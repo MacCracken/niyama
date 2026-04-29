@@ -1,0 +1,15 @@
+# niyama test suite — M0 scaffold smoke tests.
+# Real per-engine test suites land at each milestone (tests/bre.tcyr,
+# tests/re2.tcyr, tests/pcre.tcyr, tests/fuzzy.tcyr, tests/vim.tcyr).
+
+include "lib/assert.cyr"
+
+fn main() {
+    test_group("scaffold");
+    assert(1, "scaffold is alive");
+    assert_eq(1 + 1, 2, "math works");
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

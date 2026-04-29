@@ -1,0 +1,13 @@
+# niyama — main entry point
+# Stdlib auto-included via cyrius.cyml. niyama is primarily a library
+# (engine modules under src/<flavor>.cyr); this main is a thin smoke
+# entry that reports identity. Real CLI tooling (testing, benchmarks)
+# lives in programs/ at each milestone.
+
+fn main() {
+    syscall(1, 1, "niyama 0.1.0 - additional regex engines (M0 scaffold)\n", 55);
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);
