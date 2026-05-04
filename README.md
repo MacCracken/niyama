@@ -12,11 +12,13 @@ fit the universal-floor case Cyrius stdlib already covers.
 
 ## Status
 
-**0.1.0** (scaffold, 2026-04-28) — repo scaffolded via
-`cyrius init niyama`. Doc-tree, CI workflows, and ADR 0001
-(positioning + sandhi-pattern fold lifecycle) in place. No engines
-shipped yet — see [`docs/development/roadmap.md`](docs/development/roadmap.md)
-for the M1+ plan.
+**0.2.0** (M1, 2026-05-03) — POSIX BRE engine (`niyama_bre_*`)
+shipped. ADR 0002 records the per-engine ABI shape that M2+ engines
+mirror; backref support is rejected at compile time and deferred to
+potentially post-v1.0. Next: M2 (`re2`, linear-time-safe). See
+[`docs/development/state.md`](docs/development/state.md) for the
+live snapshot and [`docs/development/roadmap.md`](docs/development/roadmap.md)
+for the full M2+ plan.
 
 ## Why niyama exists
 
@@ -71,7 +73,7 @@ then demand):
 | Milestone | Engine | Why this order |
 |-----------|--------|----------------|
 | **M0** | scaffold | Done — first-party-standards conformance, ABI sketch, dist artifact stub. |
-| **M1** | **bre** (POSIX BRE) | Smallest engine. Shakes out the niyama dispatch surface without diving into PCRE complexity. |
+| **M1** | **bre** (POSIX BRE) | ✅ Done (v0.2.0). 68 unit tests, fuzz harness, bench floor recorded. ABI shape (per ADR 0002) is the template M2+ engines mirror. |
 | **M2** | **re2** (Thompson NFA, linear-time) | DoS-safe regex for untrusted patterns. Architecturally similar to stdlib's Pike NFA but with safety guarantees made explicit. |
 | **M3** | **pcre** (Perl-compatible) | Power-user features: lookaround, atomic groups, named captures, backrefs, Unicode properties. Largest fuzz target — comes after re2 for diff-test fallback. |
 | **M3.5** | **fuzzy** (Levenshtein) | Typo-tolerant matching. Not strict regex but lives in the neighborhood. agnoshi shell completion + daimon agent fuzzy-name-match are immediate consumers. |

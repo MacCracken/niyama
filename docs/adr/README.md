@@ -19,4 +19,5 @@ Decisions about niyama — what we chose, the context, and the consequences we a
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+- [0001 — niyama is the additional-engines repo, following the sandhi-pattern fold lifecycle](0001-additional-engines-repo-sandhi-pattern.md)
+- [0002 — niyama_bre engine ABI shape and scope](0002-bre-engine-abi-and-scope.md)

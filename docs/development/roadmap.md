@@ -43,7 +43,7 @@ precedent at cyrius v5.7.0). Concrete bar:
   sandhi-pattern fold lifecycle), `dist/niyama.cyr` placeholder.
 - CI workflows (`.github/workflows/{ci,release}.yml`).
 
-### M1 — bre engine (v0.2.0) — POSIX Basic Regular Expressions
+### M1 — bre engine (v0.2.0) — POSIX Basic Regular Expressions — ✅ shipped 2026-05-03
 
 **Why first.** Smallest engine. Shakes out the niyama dispatch
 surface — module organization, per-engine ABI naming, option-bag
@@ -51,21 +51,32 @@ struct extension points, error reporting — without diving into
 PCRE complexity. Direct value: POSIX-strict tooling compatibility
 for any consumer that needs `grep` / `sed` BRE semantics.
 
-**Acceptance:**
+**Acceptance — done:**
 
-- `niyama_bre_compile(pat)` → handle, `niyama_bre_match(nfa, s)`,
-  `niyama_bre_search(nfa, s)`, `niyama_bre_search_at(nfa, s, len, from)`
-  per the cyrius stdlib `regex_*` ABI shape.
-- POSIX BRE syntax: literal-by-default metachars (`*` is special only
-  after a literal; `(`, `{`, `?`, `+` are literal in BRE), `\(...\)`
-  for groups, `\{n,m\}` for quantifiers, `^` anchored to start,
-  `$` anchored to end (no anchor in middle).
-- Test suite: per-feature unit tests + POSIX BRE conformance corpus
-  (cross-check against `grep -G`).
-- Fuzz harness on `niyama_bre_compile` + `niyama_bre_search`.
-- Benchmarks vs. stdlib `regex_*` on a shared corpus where ERE/BRE
-  patterns are equivalent.
-- cyim-side: add `--regex=bre` flavor (one elif arm per cyim ADR 0002).
+- ✅ `niyama_bre_compile(pat)` → opaque NFA pointer (`0` on error;
+  error code via `niyama_bre_last_error()`).
+- ✅ `niyama_bre_match`, `niyama_bre_search`, `niyama_bre_search_at`,
+  `niyama_bre_group_start`, `niyama_bre_group_end` (mirrors stdlib
+  `regex_*` shape per ADR 0002).
+- ✅ POSIX BRE syntax: literal-by-default metachars, `\(...\)`
+  capturing groups (1..9), `\{n,m\}` quantifiers, `^`/`$` anchors
+  at pattern boundaries only.
+- ✅ `\1`-`\9` backreferences rejected at compile with
+  `BRE_E_BACKREF_UNSUPPORTED` per ADR 0002 (deferred to potentially
+  post-v1.0).
+- ✅ `tests/bre.tcyr` — 68 assertions across 13 feature groups.
+- ✅ `fuzz/bre.fcyr` — 200-iter randomized sweep + smoke corpus
+  drawn from past stdlib regex bug-fix history.
+- ✅ `tests/bre.bcyr` — bench floor recorded in CHANGELOG.
+- 🟦 cyim-side: `--regex=bre` flavor — landing in cyim repo as a
+  separate PR (one elif arm per cyim ADR 0002). Not blocking M2.
+
+**Deferred from M1 to later milestones:**
+
+- GNU `\<` / `\>` word boundaries → M4 (vim flavor inherits the
+  same semantics; implement once).
+- `[:alpha:]` POSIX bracket character classes → M4.
+- Backref support → potentially post-v1.0, per ADR 0002.
 
 ### M2 — re2 engine (v0.3.0) — Thompson NFA, linear-time guarantee
 

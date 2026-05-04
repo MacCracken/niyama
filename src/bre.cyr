@@ -1,0 +1,888 @@
+# bre.cyr — niyama POSIX BRE engine.
+#
+# Implements POSIX.1-2017 § 9.3 Basic Regular Expressions, exposed via
+# the niyama_bre_* ABI defined in docs/adr/0002-bre-engine-abi-and-scope.md.
+#
+# Architecture: forked from the cyrius stdlib lib/regex.cyr Pike NFA
+# (instruction model, class bitmap, matcher) — reuse what's well-tested,
+# swap the parser for BRE-flavor syntax.
+#
+# Public API (mirrors stdlib regex_*):
+#   niyama_bre_compile(pat)       -> opaque NFA pointer or 0 on error
+#   niyama_bre_match(nfa, s)      -> 1 if anchored match, else 0
+#   niyama_bre_search(nfa, s)     -> first match offset, or -1
+#   niyama_bre_search_at(...)     -> first match offset starting at `from`
+#   niyama_bre_group_start(nfa,n) -> group n start or -1
+#   niyama_bre_group_end(nfa,n)   -> group n end or -1
+#   niyama_bre_last_error()       -> error code from most recent compile
+#
+# POSIX BRE flavor highlights:
+#   - `*`, `+`, `?`, `(`, `)`, `{`, `}` literal-by-default; `*` is special
+#     ONLY after a previously-emitted atom (not at start of pattern).
+#   - `\(...\)` capturing groups (1..9), `\{n,m\}` quantifiers.
+#   - `^` anchor only at byte 0 of the pattern; literal elsewhere.
+#   - `$` anchor only at end of pattern; literal elsewhere.
+#   - `[...]` / `[^...]` POSIX bracket expressions, ranges.
+#   - `\1`..`\9` backreferences are REJECTED at compile time
+#     (BRE_E_BACKREF_UNSUPPORTED); use niyama_pcre at M3 for backref-using
+#     patterns.
+#
+# Out of scope for M1:
+#   - `\d` `\w` `\s` `\b` (ERE-style; not POSIX BRE — treated as literal
+#     `d`/`w`/`s`/`b` per POSIX undefined-escape rule).
+#   - GNU `\<` / `\>` word boundaries (deferred to M4 vim, which inherits
+#     the same semantics — implement once in vim.cyr).
+#   - `[:alpha:]` POSIX bracket character classes (deferred to M4 vim).
+#
+# All globals are `_bre_*`-prefixed to avoid collision with stdlib
+# regex.cyr if both are linked into the same program.
+#
+# Precondition: `alloc_init()` must have been called before
+# niyama_bre_compile (mirrors the rest of the AGNOS-lineage stdlib —
+# every consumer's main() calls alloc_init() once at startup).
+
+# === Constants ========================================================
+
+var BRE_OP_MATCH     = 0;
+var BRE_OP_CHAR      = 1;
+var BRE_OP_ANY       = 2;
+var BRE_OP_CLASS     = 3;
+var BRE_OP_NCLASS    = 4;
+var BRE_OP_JMP       = 5;
+var BRE_OP_SPLIT     = 6;
+var BRE_OP_SAVE      = 7;
+var BRE_OP_BOL       = 8;
+var BRE_OP_EOL       = 9;
+
+var BRE_NFA_HEADER_SIZE = 216;
+var BRE_OFF_INSTR_COUNT = 0;
+var BRE_OFF_INSTRS_OFF  = 8;
+var BRE_OFF_CLASS_COUNT = 16;
+var BRE_OFF_CLASSES_OFF = 24;
+var BRE_OFF_CAPTURES    = 32;
+var BRE_OFF_MATCH_START = 40;
+var BRE_OFF_MATCH_END   = 48;
+var BRE_OFF_SAVES       = 56;
+
+var BRE_MAX_INSTRS  = 4096;
+var BRE_MAX_CLASSES = 64;
+var BRE_MAX_SAVES   = 20;
+
+# Error codes — frozen-at-M1 ABI. Adding new codes is fine; renumbering
+# existing ones is not. See docs/adr/0002-bre-engine-abi-and-scope.md.
+var BRE_E_OK                   = 0;
+var BRE_E_SYNTAX               = 1;
+var BRE_E_BACKREF_UNSUPPORTED  = 2;
+var BRE_E_TOO_LARGE            = 3;
+var BRE_E_BAD_ANCHOR           = 4;
+
+# === Compile-time globals ============================================
+
+var _bre_pat = 0;
+var _bre_pat_len = 0;
+var _bre_pos = 0;
+var _bre_nfa = 0;
+var _bre_instr_base = 0;
+var _bre_class_base = 0;
+var _bre_instr_n = 0;
+var _bre_class_n = 0;
+var _bre_capture_n = 0;
+var _bre_err = 0;
+var _bre_last_err = 0;
+
+# Process-lifetime scratch buffers for the matcher (lazy-init), plus
+# a quantifier-unroll splits scratch for the compiler.
+var _bre_m_init = 0;
+var _bre_m_cur = 0;
+var _bre_m_next = 0;
+var _bre_m_lastgen = 0;
+var _bre_m_gen = 0;
+var _bre_q_splits = 0;       # 64 slots × 8 bytes — quantifier unrolling
+
+fn _bre_lazy_init() {
+    if (_bre_m_init == 1) { return 0; }
+    _bre_m_cur     = alloc(8 + BRE_MAX_INSTRS * 168);
+    _bre_m_next    = alloc(8 + BRE_MAX_INSTRS * 168);
+    _bre_m_lastgen = alloc(BRE_MAX_INSTRS * 8);
+    _bre_q_splits  = alloc(64 * 8);
+    var i = 0;
+    while (i < BRE_MAX_INSTRS) {
+        store64(_bre_m_lastgen + i * 8, 0);
+        i = i + 1;
+    }
+    _bre_m_init = 1;
+    _bre_m_gen = 1;
+    return 0;
+}
+
+# === Instruction emit / patch helpers ================================
+
+fn _bre_w0(op, small, arg1) {
+    return op | (small << 8) | (arg1 << 32);
+}
+
+fn _bre_emit_raw(w0, w1) {
+    var i = _bre_instr_n;
+    if (i >= BRE_MAX_INSTRS) { _bre_err = BRE_E_TOO_LARGE; return i; }
+    store64(_bre_instr_base + i * 16, w0);
+    store64(_bre_instr_base + i * 16 + 8, w1);
+    _bre_instr_n = i + 1;
+    return i;
+}
+
+fn _bre_emit_op(op)        { return _bre_emit_raw(op, 0); }
+fn _bre_emit_char(c)       { return _bre_emit_raw(BRE_OP_CHAR | (c << 8), 0); }
+fn _bre_emit_class(neg, ci) {
+    var op = BRE_OP_CLASS;
+    if (neg == 1) { op = BRE_OP_NCLASS; }
+    return _bre_emit_raw(op | (ci << 8), 0);
+}
+fn _bre_emit_save(idx)     { return _bre_emit_raw(BRE_OP_SAVE | (idx << 8), 0); }
+fn _bre_emit_jmp(target)   { return _bre_emit_raw(BRE_OP_JMP | (target << 32), 0); }
+fn _bre_emit_split(a, b)   { return _bre_emit_raw(BRE_OP_SPLIT | (a << 32), b); }
+
+fn _bre_patch_arg1(idx, arg1) {
+    var off = _bre_instr_base + idx * 16;
+    var w0 = load64(off);
+    store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
+    return 0;
+}
+
+fn _bre_patch_arg2(idx, arg2) {
+    store64(_bre_instr_base + idx * 16 + 8, arg2);
+    return 0;
+}
+
+# Shift instructions [lo, hi) right by 1 slot (overlap-safe backward copy).
+fn _bre_shift_right(lo, hi) {
+    var k = (hi - lo) * 16 - 1;
+    while (k >= 0) {
+        var src = _bre_instr_base + lo * 16 + k;
+        store8(src + 16, load8(src));
+        k = k - 1;
+    }
+    return 0;
+}
+
+# After shifting [lo, hi) right by 1, fix branch targets that pointed
+# back into the OLD range. Inclusive upper bound — a target == hi means
+# "first position past the fragment" (where a JMP-to-end was patched at
+# iter end with the then-current _bre_instr_n == hi); after shift, that
+# position is hi+1, so the target needs the same bump as targets strictly
+# inside.
+fn _bre_shift_targets_one(lo, hi) {
+    var i = lo + 1;
+    var end = hi + 1;
+    while (i < end) {
+        var off = _bre_instr_base + i * 16;
+        var w0 = load64(off);
+        var op = w0 & 0xFF;
+        var is_branch = 0;
+        if (op == BRE_OP_JMP)   { is_branch = 1; }
+        if (op == BRE_OP_SPLIT) { is_branch = 1; }
+        if (is_branch == 1) {
+            var arg1 = (w0 >> 32) & 0xFFFFFFFF;
+            if (arg1 >= lo && arg1 <= hi) {
+                _bre_patch_arg1(i, arg1 + 1);
+            }
+            if (op == BRE_OP_SPLIT) {
+                var arg2 = load64(off + 8);
+                if (arg2 >= lo && arg2 <= hi) {
+                    _bre_patch_arg2(i, arg2 + 1);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# === Class bitmap helpers ============================================
+
+fn _bre_alloc_class() {
+    var ci = _bre_class_n;
+    if (ci >= BRE_MAX_CLASSES) { _bre_err = BRE_E_TOO_LARGE; return ci; }
+    var z = 0;
+    while (z < 32) {
+        store8(_bre_class_base + ci * 32 + z, 0);
+        z = z + 1;
+    }
+    _bre_class_n = ci + 1;
+    return ci;
+}
+
+fn _bre_class_set(ci, c) {
+    if (c < 0)   { return 0; }
+    if (c > 255) { return 0; }
+    var off = _bre_class_base + ci * 32 + (c >> 3);
+    store8(off, load8(off) | (1 << (c & 7)));
+    return 0;
+}
+
+fn _bre_class_range(ci, lo, hi) {
+    var c = lo;
+    while (c <= hi) {
+        _bre_class_set(ci, c);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# === Pattern decoder =================================================
+
+# Decode a literal byte at _bre_pos and advance. Sets _bre_err on EOF.
+# Backslash handling for IN-PATTERN bytes: \n \r \t \0 \a \f \v expand
+# to control bytes (matches stdlib precedent + common consumer expectation);
+# any other backslashed byte is the literal byte (`\.` -> `.`, `\\` -> `\`,
+# etc.). Numeric backslash (`\1`..`\9`) is REJECTED upstream by
+# _bre_check_backref before this is called.
+fn _bre_lit_byte() {
+    if (_bre_pos >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0; }
+    var c = load8(_bre_pat + _bre_pos);
+    _bre_pos = _bre_pos + 1;
+    if (c != 92) { return c; }
+    if (_bre_pos >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0; }
+    var e = load8(_bre_pat + _bre_pos);
+    _bre_pos = _bre_pos + 1;
+    if (e == 110) { return 10; }
+    if (e == 114) { return 13; }
+    if (e == 116) { return 9; }
+    if (e == 48)  { return 0; }
+    if (e == 97)  { return 7; }
+    if (e == 102) { return 12; }
+    if (e == 118) { return 11; }
+    return e;
+}
+
+# Parse a `[...]` POSIX bracket-expression body (caller already consumed
+# `[`). Returns the class index. Sets _bre_err on syntax error. Negation
+# is encoded by returning -(ci+1).
+#
+# POSIX-strict bracket scope for M1: ranges (`a-z`), literal characters,
+# `^` for negation as first char. NOT shipped: `[:alpha:]` POSIX char
+# classes (deferred to M4 vim per ADR 0002).
+fn _bre_parse_class() {
+    var ci = _bre_alloc_class();
+    if (_bre_err != BRE_E_OK) { return ci; }
+    var neg = 0;
+    if (_bre_pos < _bre_pat_len && load8(_bre_pat + _bre_pos) == 94) {
+        neg = 1;
+        _bre_pos = _bre_pos + 1;
+    }
+    # POSIX: `]` as first char (after optional `^`) is literal `]`, not
+    # the close. Honor that.
+    var first = 1;
+    var done = 0;
+    while (done == 0) {
+        if (_bre_pos >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0 - 1; }
+        var pc = load8(_bre_pat + _bre_pos);
+        if (pc == 93 && first == 0) {
+            _bre_pos = _bre_pos + 1;
+            done = 1;
+        }
+        elif (pc == 92 && _bre_pos + 1 < _bre_pat_len) {
+            # In bracket context, only literal-byte escapes apply.
+            var lc = _bre_lit_byte();
+            if (_bre_err != BRE_E_OK) { return 0 - 1; }
+            if (_bre_pos + 1 < _bre_pat_len && load8(_bre_pat + _bre_pos) == 45 && load8(_bre_pat + _bre_pos + 1) != 93) {
+                _bre_pos = _bre_pos + 1;
+                var hi = _bre_lit_byte();
+                if (_bre_err != BRE_E_OK) { return 0 - 1; }
+                _bre_class_range(ci, lc, hi);
+            } else {
+                _bre_class_set(ci, lc);
+            }
+            first = 0;
+        }
+        else {
+            var lc2 = _bre_lit_byte();
+            if (_bre_err != BRE_E_OK) { return 0 - 1; }
+            if (_bre_pos + 1 < _bre_pat_len && load8(_bre_pat + _bre_pos) == 45 && load8(_bre_pat + _bre_pos + 1) != 93) {
+                _bre_pos = _bre_pos + 1;
+                var hi2 = _bre_lit_byte();
+                if (_bre_err != BRE_E_OK) { return 0 - 1; }
+                _bre_class_range(ci, lc2, hi2);
+            } else {
+                _bre_class_set(ci, lc2);
+            }
+            first = 0;
+        }
+    }
+    if (neg == 1) { return 0 - (ci + 1); }
+    return ci;
+}
+
+# === Recursive-descent BRE compiler ==================================
+
+# Parse a primary (atom body, no quantifier yet). Returns 0 always; sets
+# _bre_err on failure. `at_start` is 1 when this primary is the first
+# atom in the entire pattern (used for ^ anchor placement).
+fn _bre_parse_primary(at_start) {
+    if (_bre_pos >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0; }
+    var c = load8(_bre_pat + _bre_pos);
+
+    # `^` anchor — special only at byte 0 of the pattern. Literal elsewhere.
+    if (c == 94) {
+        _bre_pos = _bre_pos + 1;
+        if (at_start == 1) {
+            _bre_emit_op(BRE_OP_BOL);
+        } else {
+            _bre_emit_char(94);
+        }
+        return 0;
+    }
+
+    # `$` anchor — special only at end of pattern. Literal elsewhere.
+    if (c == 36) {
+        _bre_pos = _bre_pos + 1;
+        if (_bre_pos == _bre_pat_len) {
+            _bre_emit_op(BRE_OP_EOL);
+        } else {
+            _bre_emit_char(36);
+        }
+        return 0;
+    }
+
+    # `.` any byte
+    if (c == 46) {
+        _bre_pos = _bre_pos + 1;
+        _bre_emit_op(BRE_OP_ANY);
+        return 0;
+    }
+
+    # `[...]` bracket expression
+    if (c == 91) {
+        _bre_pos = _bre_pos + 1;
+        var ci = _bre_parse_class();
+        if (_bre_err != BRE_E_OK) { return 0; }
+        var neg = 0;
+        if (ci < 0) { neg = 1; ci = 0 - (ci + 1); }
+        _bre_emit_class(neg, ci);
+        return 0;
+    }
+
+    # Backslash — group delim, quantifier delim, or literal escape.
+    if (c == 92) {
+        if (_bre_pos + 1 >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0; }
+        var e = load8(_bre_pat + _bre_pos + 1);
+
+        # `\(` open group
+        if (e == 40) {
+            _bre_pos = _bre_pos + 2;
+            _bre_capture_n = _bre_capture_n + 1;
+            var capture_idx = _bre_capture_n;
+            if (capture_idx > 9) { _bre_err = BRE_E_SYNTAX; return 0; }
+            _bre_emit_save(capture_idx * 2);
+            # Inside a group, `^` is literal (POSIX BRE: `^` is anchor
+            # only at byte 0 of the entire pattern). We propagate
+            # at_start = 0.
+            _bre_parse_concat(0);
+            if (_bre_err != BRE_E_OK) { return 0; }
+            # Expect `\)`
+            if (_bre_pos + 1 >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0; }
+            if (load8(_bre_pat + _bre_pos) != 92 || load8(_bre_pat + _bre_pos + 1) != 41) {
+                _bre_err = BRE_E_SYNTAX; return 0;
+            }
+            _bre_pos = _bre_pos + 2;
+            _bre_emit_save(capture_idx * 2 + 1);
+            return 0;
+        }
+
+        # `\)` outside a group — syntax error.
+        if (e == 41) {
+            _bre_err = BRE_E_SYNTAX; return 0;
+        }
+
+        # `\1`..`\9` backreference — REJECT explicitly per ADR 0002.
+        if (e >= 49 && e <= 57) {
+            _bre_err = BRE_E_BACKREF_UNSUPPORTED;
+            return 0;
+        }
+
+        # `\{` quantifier — only valid AFTER an atom (handled in _bre_parse_atom).
+        # Hitting it here means it's at start of concat with no preceding
+        # atom; that's a syntax error.
+        if (e == 123) {
+            _bre_err = BRE_E_SYNTAX; return 0;
+        }
+
+        # Otherwise: plain escape -> literal byte.
+        var lc = _bre_lit_byte();
+        if (_bre_err == BRE_E_OK) { _bre_emit_char(lc); }
+        return 0;
+    }
+
+    # Bare `*` at start of concat — POSIX says undefined; we err on
+    # syntax (matches `grep -G '^*'` rejecting via "Unmatched [ or [^").
+    # Actually GNU grep -G treats leading * as literal. We follow GNU
+    # for compat: at_start = 1 means * is literal.
+    if (c == 42) {
+        _bre_pos = _bre_pos + 1;
+        if (at_start == 1) {
+            _bre_emit_char(42);
+        } else {
+            # Should never reach here; quantifier handling is in _bre_parse_atom.
+            _bre_err = BRE_E_SYNTAX;
+        }
+        return 0;
+    }
+
+    # Everything else: literal byte. Note `+`, `?`, `(`, `)`, `{`, `}`,
+    # `|` are literal in POSIX BRE.
+    _bre_pos = _bre_pos + 1;
+    _bre_emit_char(c);
+    return 0;
+}
+
+# Apply `*` to the just-emitted atom at [atom_start, _bre_instr_n).
+# POSIX BRE has no `+`, `?`, lazy quantifiers, or alternation.
+fn _bre_apply_star(atom_start) {
+    var atom_end = _bre_instr_n;
+    if (atom_end == atom_start) { _bre_err = BRE_E_SYNTAX; return 0; }
+    _bre_pos = _bre_pos + 1;
+    # SPLIT body, exit ; body ; JMP back ; exit
+    _bre_shift_right(atom_start, atom_end);
+    _bre_shift_targets_one(atom_start, atom_end);
+    _bre_instr_n = _bre_instr_n + 1;
+    var body_pc = atom_start + 1;
+    store64(_bre_instr_base + atom_start * 16, _bre_w0(BRE_OP_SPLIT, 0, body_pc));
+    store64(_bre_instr_base + atom_start * 16 + 8, 0);
+    _bre_emit_jmp(atom_start);
+    var exit_pc = _bre_instr_n;
+    _bre_patch_arg2(atom_start, exit_pc);
+    return 0;
+}
+
+# Apply `*` (greedy) to a body at [body_start, _bre_instr_n) — used by
+# {n,} unrolling for the unbounded tail.
+fn _bre_apply_star_inline(body_start) {
+    var body_end = _bre_instr_n;
+    _bre_shift_right(body_start, body_end);
+    _bre_shift_targets_one(body_start, body_end);
+    _bre_instr_n = _bre_instr_n + 1;
+    var body_pc = body_start + 1;
+    store64(_bre_instr_base + body_start * 16, _bre_w0(BRE_OP_SPLIT, 0, body_pc));
+    store64(_bre_instr_base + body_start * 16 + 8, 0);
+    _bre_emit_jmp(body_start);
+    var exit_pc = _bre_instr_n;
+    _bre_patch_arg2(body_start, exit_pc);
+    return 0;
+}
+
+# Apply `\{n,m\}` / `\{n,\}` / `\{n\}` to the atom at [atom_start, _bre_instr_n).
+# `save_primary_start` is the source position before the FIRST primary —
+# used to re-parse for additional copies.
+fn _bre_apply_brace_q(save_primary_start, atom_start) {
+    if (_bre_instr_n == atom_start) { _bre_err = BRE_E_SYNTAX; return 0; }
+    # caller positioned _bre_pos at the `\` of `\{` — consume `\{`.
+    _bre_pos = _bre_pos + 2;
+    var n_min = 0;
+    var have_min = 0;
+    while (_bre_pos < _bre_pat_len && load8(_bre_pat + _bre_pos) >= 48 && load8(_bre_pat + _bre_pos) <= 57) {
+        n_min = n_min * 10 + (load8(_bre_pat + _bre_pos) - 48);
+        _bre_pos = _bre_pos + 1;
+        have_min = 1;
+    }
+    if (have_min == 0) { _bre_err = BRE_E_SYNTAX; return 0; }
+    var n_max = n_min;
+    var open_ended = 0;
+    if (_bre_pos < _bre_pat_len && load8(_bre_pat + _bre_pos) == 44) {
+        _bre_pos = _bre_pos + 1;
+        n_max = 0;
+        var have_max = 0;
+        while (_bre_pos < _bre_pat_len && load8(_bre_pat + _bre_pos) >= 48 && load8(_bre_pat + _bre_pos) <= 57) {
+            n_max = n_max * 10 + (load8(_bre_pat + _bre_pos) - 48);
+            _bre_pos = _bre_pos + 1;
+            have_max = 1;
+        }
+        if (have_max == 0) { open_ended = 1; n_max = 0; }
+    }
+    # Expect `\}`
+    if (_bre_pos + 1 >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0; }
+    if (load8(_bre_pat + _bre_pos) != 92 || load8(_bre_pat + _bre_pos + 1) != 125) {
+        _bre_err = BRE_E_SYNTAX; return 0;
+    }
+    _bre_pos = _bre_pos + 2;
+    var pos_after_q = _bre_pos;
+    if (open_ended == 0 && n_max < n_min) { _bre_err = BRE_E_SYNTAX; return 0; }
+    if (n_max > 1000) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+    if (n_min == 0) {
+        _bre_instr_n = atom_start;
+        if (open_ended == 1) {
+            # {0,} ≡ *
+            var ts = _bre_instr_n;
+            _bre_pos = save_primary_start;
+            _bre_parse_primary(0);
+            if (_bre_err != BRE_E_OK) { return 0; }
+            _bre_apply_star_inline(ts);
+        } else {
+            var sn = 0;
+            var k = 0;
+            while (k < n_max) {
+                if (sn >= 64) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+                var sx = _bre_emit_split(0, 0);
+                store64(_bre_q_splits + sn * 8, sx);
+                sn = sn + 1;
+                _bre_pos = save_primary_start;
+                _bre_parse_primary(0);
+                if (_bre_err != BRE_E_OK) { return 0; }
+                k = k + 1;
+            }
+            var exit_pc = _bre_instr_n;
+            var ti = 0;
+            while (ti < sn) {
+                var sxi = load64(_bre_q_splits + ti * 8);
+                _bre_patch_arg1(sxi, sxi + 1);
+                _bre_patch_arg2(sxi, exit_pc);
+                ti = ti + 1;
+            }
+        }
+    } else {
+        var k1 = 1;
+        while (k1 < n_min) {
+            _bre_pos = save_primary_start;
+            _bre_parse_primary(0);
+            if (_bre_err != BRE_E_OK) { return 0; }
+            k1 = k1 + 1;
+        }
+        if (open_ended == 1) {
+            var ts2 = _bre_instr_n;
+            _bre_pos = save_primary_start;
+            _bre_parse_primary(0);
+            if (_bre_err != BRE_E_OK) { return 0; }
+            _bre_apply_star_inline(ts2);
+        } elif (n_max > n_min) {
+            var sn2 = 0;
+            var k2 = n_min;
+            while (k2 < n_max) {
+                if (sn2 >= 64) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+                var sy = _bre_emit_split(0, 0);
+                store64(_bre_q_splits + sn2 * 8, sy);
+                sn2 = sn2 + 1;
+                _bre_pos = save_primary_start;
+                _bre_parse_primary(0);
+                if (_bre_err != BRE_E_OK) { return 0; }
+                k2 = k2 + 1;
+            }
+            var exit_pc2 = _bre_instr_n;
+            var tj = 0;
+            while (tj < sn2) {
+                var syi = load64(_bre_q_splits + tj * 8);
+                _bre_patch_arg1(syi, syi + 1);
+                _bre_patch_arg2(syi, exit_pc2);
+                tj = tj + 1;
+            }
+        }
+    }
+    _bre_pos = pos_after_q;
+    return 0;
+}
+
+fn _bre_parse_atom(at_start) {
+    var save_primary_start = _bre_pos;
+    var atom_start = _bre_instr_n;
+    _bre_parse_primary(at_start);
+    if (_bre_err != BRE_E_OK) { return 0; }
+    if (_bre_pos >= _bre_pat_len) { return 0; }
+    var c = load8(_bre_pat + _bre_pos);
+    if (c == 42) {
+        _bre_apply_star(atom_start);
+    }
+    elif (c == 92 && _bre_pos + 1 < _bre_pat_len && load8(_bre_pat + _bre_pos + 1) == 123) {
+        _bre_apply_brace_q(save_primary_start, atom_start);
+    }
+    return 0;
+}
+
+# Parse a concat — a sequence of atoms terminated by end-of-pattern or
+# `\)`. `at_start` is 1 only for the first call (top-level pattern start);
+# nested calls (inside a group) pass 0.
+fn _bre_parse_concat(at_start) {
+    var first = at_start;
+    while (_bre_pos < _bre_pat_len) {
+        # Stop at `\)` (close-group).
+        if (load8(_bre_pat + _bre_pos) == 92 && _bre_pos + 1 < _bre_pat_len && load8(_bre_pat + _bre_pos + 1) == 41) {
+            return 0;
+        }
+        _bre_parse_atom(first);
+        first = 0;
+        if (_bre_err != BRE_E_OK) { return 0; }
+    }
+    return 0;
+}
+
+# === Compiler entry ==================================================
+
+# Compile a null-terminated POSIX BRE pattern. Returns an opaque NFA
+# pointer (heap-allocated) or 0 on error. Use niyama_bre_last_error()
+# to get the error code.
+fn niyama_bre_compile(pat) {
+    _bre_lazy_init();
+    var n = strlen(pat);
+    var instr_bytes = BRE_MAX_INSTRS * 16;
+    var class_bytes = BRE_MAX_CLASSES * 32;
+    var nfa = alloc(BRE_NFA_HEADER_SIZE + instr_bytes + class_bytes);
+    var instrs = nfa + BRE_NFA_HEADER_SIZE;
+    var classes = instrs + instr_bytes;
+    store64(nfa + BRE_OFF_INSTRS_OFF,  BRE_NFA_HEADER_SIZE);
+    store64(nfa + BRE_OFF_CLASSES_OFF, BRE_NFA_HEADER_SIZE + instr_bytes);
+    store64(nfa + BRE_OFF_MATCH_START, 0 - 1);
+    store64(nfa + BRE_OFF_MATCH_END,   0 - 1);
+    var sv = 0;
+    while (sv < BRE_MAX_SAVES) {
+        store64(nfa + BRE_OFF_SAVES + sv * 8, 0 - 1);
+        sv = sv + 1;
+    }
+    _bre_pat = pat;
+    _bre_pat_len = n;
+    _bre_pos = 0;
+    _bre_nfa = nfa;
+    _bre_instr_base = instrs;
+    _bre_class_base = classes;
+    _bre_instr_n = 0;
+    _bre_class_n = 0;
+    _bre_capture_n = 0;
+    _bre_err = BRE_E_OK;
+    _bre_emit_save(0);
+    _bre_parse_concat(1);
+    if (_bre_err != BRE_E_OK || _bre_pos != _bre_pat_len) {
+        if (_bre_err == BRE_E_OK) { _bre_err = BRE_E_SYNTAX; }
+        _bre_last_err = _bre_err;
+        return 0;
+    }
+    _bre_emit_save(1);
+    _bre_emit_op(BRE_OP_MATCH);
+    if (_bre_err != BRE_E_OK) {
+        _bre_last_err = _bre_err;
+        return 0;
+    }
+    store64(nfa + BRE_OFF_INSTR_COUNT, _bre_instr_n);
+    store64(nfa + BRE_OFF_CLASS_COUNT, _bre_class_n);
+    store64(nfa + BRE_OFF_CAPTURES,    _bre_capture_n);
+    _bre_last_err = BRE_E_OK;
+    return nfa;
+}
+
+fn niyama_bre_last_error() {
+    return _bre_last_err;
+}
+
+# === Pike's NFA matcher (forked from stdlib) =========================
+
+fn _bre_at_word_char(input, input_len, pos) {
+    if (pos < 0)         { return 0; }
+    if (pos >= input_len){ return 0; }
+    var c = load8(input + pos);
+    if (c >= 48 && c <= 57)   { return 1; }
+    if (c >= 65 && c <= 90)   { return 1; }
+    if (c >= 97 && c <= 122)  { return 1; }
+    if (c == 95)              { return 1; }
+    return 0;
+}
+
+fn _bre_class_get_at(class_base, ci, c) {
+    if (c < 0)   { return 0; }
+    if (c > 255) { return 0; }
+    var off = class_base + ci * 32 + (c >> 3);
+    var b = load8(off);
+    if ((b >> (c & 7)) & 1) { return 1; }
+    return 0;
+}
+
+fn _bre_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
+    if (pc < 0)                 { return 0; }
+    if (load64(_bre_m_lastgen + pc * 8) == _bre_m_gen) { return 0; }
+    store64(_bre_m_lastgen + pc * 8, _bre_m_gen);
+    var off = instrs + pc * 16;
+    var w0 = load64(off);
+    var op = w0 & 0xFF;
+    if (op == BRE_OP_JMP) {
+        var t = (w0 >> 32) & 0xFFFFFFFF;
+        _bre_add_thread(list_base, t, input, input_len, pos, saves, instrs);
+    }
+    elif (op == BRE_OP_SPLIT) {
+        var a = (w0 >> 32) & 0xFFFFFFFF;
+        var b = load64(off + 8);
+        _bre_add_thread(list_base, a, input, input_len, pos, saves, instrs);
+        _bre_add_thread(list_base, b, input, input_len, pos, saves, instrs);
+    }
+    elif (op == BRE_OP_SAVE) {
+        var idx = (w0 >> 8) & 0xFF;
+        var prev = load64(saves + idx * 8);
+        store64(saves + idx * 8, pos);
+        _bre_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        store64(saves + idx * 8, prev);
+    }
+    elif (op == BRE_OP_BOL) {
+        var ok = 0;
+        if (pos == 0) { ok = 1; }
+        else {
+            if (load8(input + pos - 1) == 10) { ok = 1; }
+        }
+        if (ok == 1) { _bre_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs); }
+    }
+    elif (op == BRE_OP_EOL) {
+        var ok2 = 0;
+        if (pos == input_len) { ok2 = 1; }
+        elif (load8(input + pos) == 10) { ok2 = 1; }
+        if (ok2 == 1) { _bre_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs); }
+    }
+    else {
+        var n = load64(list_base);
+        store64(list_base + 8 + n * 168, pc);
+        var k = 0;
+        while (k < BRE_MAX_SAVES) {
+            var v = load64(saves + k * 8);
+            store64(list_base + 8 + n * 168 + 8 + k * 8, v);
+            k = k + 1;
+        }
+        store64(list_base, n + 1);
+    }
+    return 0;
+}
+
+fn _bre_pike_run(nfa, input, input_len, start_pos) {
+    _bre_lazy_init();
+    var instrs = nfa + load64(nfa + BRE_OFF_INSTRS_OFF);
+    var class_base = nfa + load64(nfa + BRE_OFF_CLASSES_OFF);
+    var matched = 0 - 1;
+    var saves_scratch = alloc(BRE_MAX_SAVES * 8);
+    var k = 0;
+    while (k < BRE_MAX_SAVES) {
+        store64(saves_scratch + k * 8, 0 - 1);
+        k = k + 1;
+    }
+    var match_saves = alloc(BRE_MAX_SAVES * 8);
+    var k2 = 0;
+    while (k2 < BRE_MAX_SAVES) {
+        store64(match_saves + k2 * 8, 0 - 1);
+        k2 = k2 + 1;
+    }
+    var cur = _bre_m_cur;
+    var nxt = _bre_m_next;
+    store64(cur, 0);
+    store64(nxt, 0);
+    _bre_m_gen = _bre_m_gen + 1;
+    _bre_add_thread(cur, 0, input, input_len, start_pos, saves_scratch, instrs);
+    var pos = start_pos;
+    var done = 0;
+    while (done == 0) {
+        var c = 0 - 1;
+        if (pos < input_len) { c = load8(input + pos); }
+        _bre_m_gen = _bre_m_gen + 1;
+        var n_cur = load64(cur);
+        var ti = 0;
+        while (ti < n_cur) {
+            var pc = load64(cur + 8 + ti * 168);
+            var iw0 = load64(instrs + pc * 16);
+            var iop = iw0 & 0xFF;
+            if (iop == BRE_OP_MATCH) {
+                matched = pos;
+                var ks = 0;
+                while (ks < BRE_MAX_SAVES) {
+                    store64(match_saves + ks * 8, load64(cur + 8 + ti * 168 + 8 + ks * 8));
+                    ks = ks + 1;
+                }
+                ti = n_cur;
+            }
+            elif (iop == BRE_OP_CHAR) {
+                var want = (iw0 >> 8) & 0xFF;
+                if (c >= 0 && c == want) {
+                    var ks2 = 0;
+                    while (ks2 < BRE_MAX_SAVES) {
+                        store64(saves_scratch + ks2 * 8, load64(cur + 8 + ti * 168 + 8 + ks2 * 8));
+                        ks2 = ks2 + 1;
+                    }
+                    _bre_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                }
+            }
+            elif (iop == BRE_OP_ANY) {
+                if (c >= 0) {
+                    var ks3 = 0;
+                    while (ks3 < BRE_MAX_SAVES) {
+                        store64(saves_scratch + ks3 * 8, load64(cur + 8 + ti * 168 + 8 + ks3 * 8));
+                        ks3 = ks3 + 1;
+                    }
+                    _bre_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                }
+            }
+            elif (iop == BRE_OP_CLASS || iop == BRE_OP_NCLASS) {
+                if (c >= 0) {
+                    var ci = (iw0 >> 8) & 0xFF;
+                    var hit = _bre_class_get_at(class_base, ci, c);
+                    if (iop == BRE_OP_NCLASS) {
+                        if (hit == 1) { hit = 0; } else { hit = 1; }
+                    }
+                    if (hit == 1) {
+                        var ks4 = 0;
+                        while (ks4 < BRE_MAX_SAVES) {
+                            store64(saves_scratch + ks4 * 8, load64(cur + 8 + ti * 168 + 8 + ks4 * 8));
+                            ks4 = ks4 + 1;
+                        }
+                        _bre_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    }
+                }
+            }
+            ti = ti + 1;
+        }
+        var swap = cur;
+        cur = nxt;
+        nxt = swap;
+        store64(nxt, 0);
+        if (pos > input_len) { done = 1; }
+        elif (load64(cur) == 0) { done = 1; }
+        else { pos = pos + 1; }
+    }
+    if (matched >= 0) {
+        var ks5 = 0;
+        while (ks5 < BRE_MAX_SAVES) {
+            store64(nfa + BRE_OFF_SAVES + ks5 * 8, load64(match_saves + ks5 * 8));
+            ks5 = ks5 + 1;
+        }
+        store64(nfa + BRE_OFF_MATCH_START, load64(match_saves));
+        store64(nfa + BRE_OFF_MATCH_END,   matched);
+    } else {
+        store64(nfa + BRE_OFF_MATCH_START, 0 - 1);
+        store64(nfa + BRE_OFF_MATCH_END,   0 - 1);
+    }
+    return matched;
+}
+
+# === Public API ======================================================
+
+fn niyama_bre_match(nfa, s) {
+    if (nfa == 0) { return 0; }
+    var len = strlen(s);
+    var r = _bre_pike_run(nfa, s, len, 0);
+    if (r >= 0) { return 1; }
+    return 0;
+}
+
+fn niyama_bre_search(nfa, s) {
+    if (nfa == 0) { return 0 - 1; }
+    var len = strlen(s);
+    return niyama_bre_search_at(nfa, s, len, 0);
+}
+
+fn niyama_bre_search_at(nfa, s, len, from) {
+    if (nfa == 0) { return 0 - 1; }
+    var i = from;
+    while (i <= len) {
+        var r = _bre_pike_run(nfa, s, len, i);
+        if (r >= 0) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn niyama_bre_group_start(nfa, n) {
+    if (nfa == 0)        { return 0 - 1; }
+    if (n < 0 || n > 9)  { return 0 - 1; }
+    return load64(nfa + BRE_OFF_SAVES + n * 16);
+}
+
+fn niyama_bre_group_end(nfa, n) {
+    if (nfa == 0)        { return 0 - 1; }
+    if (n < 0 || n > 9)  { return 0 - 1; }
+    return load64(nfa + BRE_OFF_SAVES + n * 16 + 8);
+}

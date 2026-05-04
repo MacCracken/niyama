@@ -1,0 +1,164 @@
+# tests/bre.tcyr — POSIX BRE engine unit tests + conformance subset.
+#
+# Cross-checks against `grep -G` / POSIX BRE spec semantics for the
+# features niyama_bre ships (see docs/adr/0002-bre-engine-abi-and-scope.md).
+# Backref rejection is verified explicitly.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/bre.cyr"
+
+# Helpers — assert that pattern matches/doesn't-match input.
+fn t_match(pat, input) {
+    var nfa = niyama_bre_compile(pat);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_bre_match(nfa, input);
+}
+
+fn t_search(pat, input) {
+    var nfa = niyama_bre_compile(pat);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_bre_search(nfa, input);
+}
+
+fn t_err(pat) {
+    var nfa = niyama_bre_compile(pat);
+    if (nfa != 0) { return 0; }
+    return niyama_bre_last_error();
+}
+
+fn main() {
+    alloc_init();
+
+    # === Literals =====================================================
+    test_group("literals");
+    assert_eq(t_match("abc", "abc"), 1, "literal exact match");
+    assert_eq(t_match("abc", "abd"), 0, "literal mismatch");
+    assert_eq(t_match("abc", "ab"), 0, "literal underrun");
+    assert_eq(t_search("xyz", "abxyzde"), 2, "literal search hit");
+    assert_eq(t_search("xyz", "abcde"), 0 - 1, "literal search miss");
+
+    # === Any-char `.` =================================================
+    test_group("dot");
+    assert_eq(t_match("a.c", "abc"), 1, ". matches arbitrary byte");
+    assert_eq(t_match("a.c", "axc"), 1, ". matches another arbitrary byte");
+    assert_eq(t_match("a.c", "ac"), 0, ". requires exactly one byte");
+
+    # === Star quantifier ==============================================
+    test_group("star");
+    assert_eq(t_match("a*", ""), 1, "a* matches empty");
+    assert_eq(t_match("a*", "aaaa"), 1, "a* matches multiple");
+    assert_eq(t_match("ba*", "b"), 1, "ba* matches just b");
+    assert_eq(t_match("ba*", "baaaa"), 1, "ba* matches b + many a");
+    assert_eq(t_search("ab*c", "ac"), 0, "ab*c matches ac");
+    assert_eq(t_search("ab*c", "abbbc"), 0, "ab*c matches abbbc");
+
+    # === POSIX BRE: + ? are LITERAL, not quantifiers ==================
+    test_group("literal-plus-qmark");
+    assert_eq(t_match("a+", "a+"), 1, "+ is literal in BRE");
+    assert_eq(t_match("a+", "aa"), 0, "+ is NOT a quantifier in BRE");
+    assert_eq(t_match("a?", "a?"), 1, "? is literal in BRE");
+    assert_eq(t_match("a?", ""), 0, "? is NOT a quantifier in BRE");
+
+    # === Anchors ======================================================
+    test_group("anchors");
+    assert_eq(t_search("^abc", "abc"), 0, "^ anchored at start");
+    assert_eq(t_search("^abc", "xabc"), 0 - 1, "^ does not match mid-string");
+    assert_eq(t_search("xyz$", "wxyz"), 1, "$ anchored at end");
+    assert_eq(t_search("xyz$", "xyzw"), 0 - 1, "$ does not match mid-string");
+    # ^ mid-pattern is literal.
+    assert_eq(t_match("a^b", "a^b"), 1, "^ literal mid-pattern");
+    # $ mid-pattern is literal.
+    assert_eq(t_match("a$b", "a$b"), 1, "$ literal mid-pattern");
+
+    # === Bracket expressions ==========================================
+    test_group("brackets");
+    assert_eq(t_match("[abc]", "a"), 1, "[abc] matches a");
+    assert_eq(t_match("[abc]", "b"), 1, "[abc] matches b");
+    assert_eq(t_match("[abc]", "d"), 0, "[abc] rejects d");
+    assert_eq(t_match("[a-z]", "m"), 1, "[a-z] range hit");
+    assert_eq(t_match("[a-z]", "M"), 0, "[a-z] case-sensitive miss");
+    assert_eq(t_match("[^0-9]", "a"), 1, "[^0-9] negated");
+    assert_eq(t_match("[^0-9]", "5"), 0, "[^0-9] negated rejects digit");
+
+    # === Groups + brace quantifiers ===================================
+    test_group("groups-and-braces");
+    # \(ab\) — capturing group, literal `(` `)` are literal in BRE.
+    var nfa1 = niyama_bre_compile("\\(ab\\)c");
+    assert_neq(nfa1, 0, "\\(ab\\)c compiles");
+    assert_eq(niyama_bre_match(nfa1, "abc"), 1, "\\(ab\\)c matches abc");
+    assert_eq(niyama_bre_group_start(nfa1, 1), 0, "group 1 starts at 0");
+    assert_eq(niyama_bre_group_end(nfa1, 1), 2, "group 1 ends at 2");
+
+    # \{n,m\} brace quantifier
+    var nfa2 = niyama_bre_compile("a\\{2,4\\}");
+    assert_neq(nfa2, 0, "a\\{2,4\\} compiles");
+    assert_eq(niyama_bre_match(nfa2, "a"), 0, "a{2,4} rejects 1 a");
+    assert_eq(niyama_bre_match(nfa2, "aa"), 1, "a{2,4} accepts 2 a");
+    assert_eq(niyama_bre_match(nfa2, "aaaa"), 1, "a{2,4} accepts 4 a");
+    # Matches at most 4 — search returns where 4-prefix starts; further
+    # `a`s past the cap still leave the prefix matched.
+
+    var nfa3 = niyama_bre_compile("a\\{3\\}");
+    assert_neq(nfa3, 0, "a\\{3\\} compiles");
+    assert_eq(niyama_bre_match(nfa3, "aa"), 0, "a{3} rejects 2 a");
+    assert_eq(niyama_bre_match(nfa3, "aaa"), 1, "a{3} accepts 3 a");
+
+    var nfa4 = niyama_bre_compile("a\\{2,\\}");
+    assert_neq(nfa4, 0, "a\\{2,\\} compiles");
+    assert_eq(niyama_bre_match(nfa4, "a"), 0, "a{2,} rejects 1 a");
+    assert_eq(niyama_bre_match(nfa4, "aa"), 1, "a{2,} accepts 2 a");
+    assert_eq(niyama_bre_match(nfa4, "aaaaa"), 1, "a{2,} accepts 5 a");
+
+    # === BRE-specific: ( ) { } literal-by-default =====================
+    test_group("literal-metachars");
+    assert_eq(t_match("(foo)", "(foo)"), 1, "( ) literal in BRE");
+    assert_eq(t_match("a(b", "a(b"), 1, "( without \\ is literal");
+    # Note: bare `{` / `}` without `\` are literal in BRE per POSIX.
+    assert_eq(t_match("a{b", "a{b"), 1, "{ without \\ is literal");
+
+    # === Escaped literals =============================================
+    test_group("escapes");
+    assert_eq(t_match("a\\.b", "a.b"), 1, "\\. is literal dot");
+    assert_eq(t_match("a\\.b", "axb"), 0, "\\. does NOT match arbitrary");
+    assert_eq(t_match("a\\\\b", "a\\b"), 1, "\\\\ is literal backslash");
+    assert_eq(t_match("a\\*b", "a*b"), 1, "\\* is literal asterisk");
+
+    # === Backref rejection (ADR 0002) =================================
+    test_group("backref-rejection");
+    assert_eq(t_err("\\(a\\)\\1"), BRE_E_BACKREF_UNSUPPORTED, "\\1 rejected");
+    assert_eq(t_err("foo\\2"), BRE_E_BACKREF_UNSUPPORTED, "\\2 rejected");
+    assert_eq(t_err("\\9"), BRE_E_BACKREF_UNSUPPORTED, "\\9 rejected");
+    # `\0` is NOT a backref — it's the NUL escape per stdlib precedent.
+    var nfa_nul = niyama_bre_compile("\\0");
+    assert_neq(nfa_nul, 0, "\\0 is NUL literal, not a backref");
+
+    # === Syntax error paths ===========================================
+    test_group("syntax-errors");
+    assert_eq(t_err("\\(unclosed"), BRE_E_SYNTAX, "unclosed group");
+    assert_eq(t_err("\\)"), BRE_E_SYNTAX, "stray close-group");
+    assert_eq(t_err("a\\{2,1\\}"), BRE_E_SYNTAX, "{n,m} with m<n");
+    assert_eq(t_err("a\\{\\}"), BRE_E_SYNTAX, "empty quantifier");
+    assert_eq(t_err("a\\{2"), BRE_E_SYNTAX, "unclosed quantifier");
+    assert_eq(t_err("\\"), BRE_E_SYNTAX, "trailing backslash");
+
+    # === Search semantics =============================================
+    test_group("search");
+    assert_eq(t_search(".at", "the cat sat on the mat"), 4, "first .at match offset");
+    assert_eq(t_search("[0-9]\\{3\\}", "abc 123 def"), 4, "search to digit triple");
+
+    # === DoS-resistant (Pike NFA, no backtracking) ====================
+    test_group("dos-resistant");
+    # The classic catastrophic-backtracking pattern in Perl/Python — should
+    # match in linear time on a Pike NFA.
+    var nfa_d = niyama_bre_compile("a*a*a*a*a*a*a*a*a*a*a*x");
+    assert_neq(nfa_d, 0, "compile dos pattern");
+    assert_eq(niyama_bre_match(nfa_d, "aaaaaaaaaaaaaaaax"), 1, "linear match");
+    assert_eq(niyama_bre_match(nfa_d, "aaaaaaaaaaaaaaaay"), 0, "linear no-match");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

@@ -1,0 +1,120 @@
+# tests/bre.fcyr — niyama_bre fuzz harness.
+#
+# Property-style fuzz: throw random/structured byte sequences at
+# niyama_bre_compile + niyama_bre_search and assert no crash, no infinite
+# loop, and clean error returns. Pike NFA is linear-time by construction
+# so we don't need a wall-clock timeout — pattern compile bounds via
+# BRE_MAX_INSTRS already cap pathological inputs.
+#
+# This is a stub harness — full coverage corpus + libFuzzer-style
+# minimization is M5 (P-1 hardening) work per the roadmap. Today it
+# exercises the smoke set and a small randomized PRNG-driven sweep.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/bre.cyr"
+
+# xorshift32 PRNG — deterministic across runs for reproducibility.
+var _rng_state = 0x12345678;
+fn rng() {
+    var x = _rng_state;
+    x = x ^ (x << 13);
+    x = x & 0xFFFFFFFF;
+    x = x ^ (x >> 17);
+    x = x ^ (x << 5);
+    x = x & 0xFFFFFFFF;
+    _rng_state = x;
+    return x;
+}
+
+# Generate a random pattern of length `n` into `buf` (caller-allocated,
+# null-terminated). Bytes drawn from a metachar-heavy alphabet so we
+# stress the parser branches.
+fn gen_pat(buf, n) {
+    var alphabet = "abc.*[]\\(){},^$|012";
+    var alen = strlen(alphabet);
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var idx = r - (r / alen) * alen;
+        if (idx < 0) { idx = 0 - idx; }
+        store8(buf + i, load8(alphabet + idx));
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+# Generate a random input string of length n.
+fn gen_input(buf, n) {
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var c = r - (r / 26) * 26;
+        if (c < 0) { c = 0 - c; }
+        store8(buf + i, 97 + c);
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn fuzz_one(pat_buf, in_buf) {
+    var nfa = niyama_bre_compile(pat_buf);
+    if (nfa == 0) {
+        # Compile failed — niyama_bre_last_error() must return non-OK.
+        var e = niyama_bre_last_error();
+        assert(e != BRE_E_OK, "compile-fail-returns-error");
+        return 0;
+    }
+    # Compile succeeded — search must terminate cleanly. Returns offset
+    # or -1; we just assert it doesn't loop / segfault.
+    var r = niyama_bre_search(nfa, in_buf);
+    assert(r >= 0 - 1, "search-returns-int");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("bre-fuzz");
+
+    # Smoke corpus — known-tricky patterns from past stdlib regex
+    # bug-fix history (cat|dog|fish 3-way alt regression at v5.7.18,
+    # `([a-z]+)`/`abc` body-pc re-entry regression).
+    fuzz_one("a*", "aaaaa");
+    fuzz_one("a\\{0,5\\}", "aaa");
+    fuzz_one("\\(a\\)\\(b\\)\\(c\\)", "abc");
+    fuzz_one("[^a-z]*", "ABC123");
+    fuzz_one(".*", "anything");
+    fuzz_one("^abc$", "abc");
+    fuzz_one("a*b*c*", "aaabbbccc");
+
+    # Backref-rejection invariant: every `\1`-`\9` MUST return error 2.
+    var nfa_br = niyama_bre_compile("\\(x\\)\\1");
+    assert_eq(nfa_br, 0, "backref-pattern-rejects");
+    assert_eq(niyama_bre_last_error(), BRE_E_BACKREF_UNSUPPORTED, "backref-error-code");
+
+    # Randomized sweep — 200 iterations × small patterns. Pure smoke for
+    # SIGSEGV / hang. Larger sweeps + minimization are M5.
+    var pat_buf = alloc(64);
+    var in_buf = alloc(128);
+    var iter = 0;
+    while (iter < 200) {
+        var pat_len = (rng() & 0x1F) + 1;
+        if (pat_len > 32) { pat_len = 32; }
+        gen_pat(pat_buf, pat_len);
+        var in_len = (rng() & 0x3F) + 1;
+        if (in_len > 64) { in_len = 64; }
+        gen_input(in_buf, in_len);
+        fuzz_one(pat_buf, in_buf);
+        iter = iter + 1;
+    }
+    assert(1, "200-iter-sweep-survived");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

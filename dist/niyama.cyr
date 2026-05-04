@@ -1,18 +1,26 @@
-# niyama.cyr -- bundled distribution (placeholder)
-# Version: 0.1.0
-# Status:  M0 scaffold — no engines shipped yet.
+# niyama.cyr -- bundled distribution
+# Version: 0.2.0
+# Status:  M1 — POSIX BRE engine shipped.
 #
-# This file is the fold-ready single-include artifact for niyama.
-# Following the sandhi precedent (cyrius v5.7.0 vendored
-# `dist/sandhi.cyr` byte-identical as `lib/sandhi.cyr`), once niyama
-# hits v1.0 with multi-consumer adoption, cyrius stdlib will vendor
-# this file as `lib/niyama.cyr` per niyama ADR 0001.
+# Fold-ready single-include artifact. Following the sandhi precedent
+# (cyrius v5.7.0 vendored `dist/sandhi.cyr` byte-identical as
+# `lib/sandhi.cyr`), once niyama hits v1.0 with multi-consumer
+# adoption, cyrius stdlib will vendor this file as `lib/niyama.cyr`
+# per niyama ADR 0001.
 #
-# For now this is just a marker — the actual engine modules
-# (`src/bre.cyr`, `src/re2.cyr`, `src/pcre.cyr`, `src/fuzzy.cyr`,
-# `src/vim.cyr`) will be bundled here at each milestone via
-# `cyrius distlib` (sandhi reference).
+# Until then, downstream consumers can vendor this file directly via
+# `[deps.niyama]` in their cyrius.cyml.
 #
-# Do not edit -- rebuild with: cyrius distlib (post-M1)
+# Engines shipped:
+#   - bre (M1, v0.2.0): POSIX BRE — niyama_bre_compile/match/search/...
+#   - re2, pcre, fuzzy, vim: not yet shipped (see roadmap.md)
+#
+# Precondition: consumers MUST call alloc_init() before any
+# niyama_bre_compile() call.
+#
+# Do not edit -- rebuild with: scripts/build-dist.sh (post-M1)
 
-var NIYAMA_VERSION = "0.1.0";
+var NIYAMA_VERSION = "0.2.0";
+
+# === bre engine ======================================================
+include "src/bre.cyr"
