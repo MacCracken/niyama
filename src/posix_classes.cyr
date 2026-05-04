@@ -1,0 +1,204 @@
+# posix_classes.cyr — shared POSIX bracket-class implementation.
+#
+# Provides ASCII fillers for the 12 POSIX bracket classes
+# (`[:alpha:]`, `[:digit:]`, ..., `[:xdigit:]`) plus a name-recognizer.
+# All functions are state-free — they take a `class_base` pointer
+# (engine-specific class table) and a `ci` index and operate on
+# 32-byte bitmaps in that table. The recognizer is also state-free:
+# it takes `(pat, pos, pat_len)` and returns a packed result without
+# touching any engine-specific globals.
+#
+# Used by niyama_bre and niyama_pcre starting at v0.7.0. niyama_vim
+# still carries an in-engine copy from M4 (its dispatch is
+# mode-aware and intermingled with vim's bracket parser); folding
+# vim onto this module is a v0.9.0 cleanup, not a v0.7.0 commitment.
+#
+# Bitmap layout (matches bre/re2/pcre): each class is 32 bytes,
+# bit `c` of byte `c >> 3` set means the class includes byte `c`.
+#
+# All globals/functions are `_posix_*`-prefixed for collision-free
+# coexistence with engine-internal `_bre_*` / `_pcre_*` / `_vim_*`
+# helpers.
+
+# --- Bit ops on a generic class table -------------------------------
+
+fn _posix_class_set(class_base, ci, c) {
+    if (c < 0)   { return 0; }
+    if (c > 255) { return 0; }
+    var off = class_base + ci * 32 + (c >> 3);
+    store8(off, load8(off) | (1 << (c & 7)));
+    return 0;
+}
+
+fn _posix_class_range(class_base, ci, lo, hi) {
+    var c = lo;
+    while (c <= hi) {
+        _posix_class_set(class_base, ci, c);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# --- The 12 POSIX bracket classes (ASCII) ---------------------------
+
+fn _posix_fill_alpha(class_base, ci) {
+    _posix_class_range(class_base, ci, 65, 90);
+    _posix_class_range(class_base, ci, 97, 122);
+    return 0;
+}
+
+fn _posix_fill_digit(class_base, ci) {
+    _posix_class_range(class_base, ci, 48, 57);
+    return 0;
+}
+
+fn _posix_fill_alnum(class_base, ci) {
+    _posix_fill_alpha(class_base, ci);
+    _posix_fill_digit(class_base, ci);
+    return 0;
+}
+
+fn _posix_fill_upper(class_base, ci) {
+    _posix_class_range(class_base, ci, 65, 90);
+    return 0;
+}
+
+fn _posix_fill_lower(class_base, ci) {
+    _posix_class_range(class_base, ci, 97, 122);
+    return 0;
+}
+
+fn _posix_fill_space(class_base, ci) {
+    # POSIX [:space:] is HT(9), LF(10), VT(11), FF(12), CR(13), SP(32).
+    _posix_class_set(class_base, ci, 9);
+    _posix_class_set(class_base, ci, 10);
+    _posix_class_set(class_base, ci, 11);
+    _posix_class_set(class_base, ci, 12);
+    _posix_class_set(class_base, ci, 13);
+    _posix_class_set(class_base, ci, 32);
+    return 0;
+}
+
+fn _posix_fill_blank(class_base, ci) {
+    _posix_class_set(class_base, ci, 9);
+    _posix_class_set(class_base, ci, 32);
+    return 0;
+}
+
+fn _posix_fill_cntrl(class_base, ci) {
+    _posix_class_range(class_base, ci, 0, 31);
+    _posix_class_set(class_base, ci, 127);
+    return 0;
+}
+
+fn _posix_fill_print(class_base, ci) {
+    _posix_class_range(class_base, ci, 32, 126);
+    return 0;
+}
+
+fn _posix_fill_graph(class_base, ci) {
+    _posix_class_range(class_base, ci, 33, 126);
+    return 0;
+}
+
+fn _posix_fill_punct(class_base, ci) {
+    # ASCII punctuation: !"#$%&'()*+,-./ :;<=>?@ [\]^_` {|}~
+    _posix_class_range(class_base, ci, 33, 47);
+    _posix_class_range(class_base, ci, 58, 64);
+    _posix_class_range(class_base, ci, 91, 96);
+    _posix_class_range(class_base, ci, 123, 126);
+    return 0;
+}
+
+fn _posix_fill_xdigit(class_base, ci) {
+    _posix_class_range(class_base, ci, 48, 57);
+    _posix_class_range(class_base, ci, 65, 70);
+    _posix_class_range(class_base, ci, 97, 102);
+    return 0;
+}
+
+# --- Class name recognizer ------------------------------------------
+
+# Globals so callers can read end-position after a successful match
+# without an out-pointer convention. Set by _posix_match_class_name.
+var _posix_match_end_pos = 0;
+
+# Match a POSIX class header `[:name:]` starting at position `pos` in
+# `pat` (which is `pat_len` bytes long). `pos` MUST point at the first
+# byte AFTER the leading `[:` (i.e. caller has already consumed those
+# two bytes). On success returns one of:
+#   1 = alpha   2 = digit   3 = space   4 = upper   5 = lower
+#   6 = alnum   7 = blank   8 = cntrl   9 = graph  10 = print
+#  11 = punct  12 = xdigit
+# and writes the position immediately after the trailing `:]` to
+# `_posix_match_end_pos`.
+# On no-match returns 0 and leaves `_posix_match_end_pos` unset.
+fn _posix_match_class_name(pat, pos, pat_len) {
+    var name_start = pos;
+    var p = pos;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (p >= pat_len) {
+            scanning = 0;
+        } else {
+            var c = load8(pat + p);
+            if (c < 97 || c > 122) { scanning = 0; }
+            else                    { p = p + 1; }
+        }
+    }
+    var name_len = p - name_start;
+    if (p + 1 >= pat_len)               { return 0; }
+    if (load8(pat + p) != 58)           { return 0; }
+    if (load8(pat + p + 1) != 93)       { return 0; }
+
+    var category = 0;
+    if (name_len == 5) {
+        var c0 = load8(pat + name_start);
+        var c1 = load8(pat + name_start + 1);
+        var c2 = load8(pat + name_start + 2);
+        var c3 = load8(pat + name_start + 3);
+        var c4 = load8(pat + name_start + 4);
+        if      (c0 == 97  && c1 == 108 && c2 == 112 && c3 == 104 && c4 == 97)  { category = 1; }   # alpha
+        elif    (c0 == 100 && c1 == 105 && c2 == 103 && c3 == 105 && c4 == 116) { category = 2; }   # digit
+        elif    (c0 == 115 && c1 == 112 && c2 == 97  && c3 == 99  && c4 == 101) { category = 3; }   # space
+        elif    (c0 == 117 && c1 == 112 && c2 == 112 && c3 == 101 && c4 == 114) { category = 4; }   # upper
+        elif    (c0 == 108 && c1 == 111 && c2 == 119 && c3 == 101 && c4 == 114) { category = 5; }   # lower
+        elif    (c0 == 97  && c1 == 108 && c2 == 110 && c3 == 117 && c4 == 109) { category = 6; }   # alnum
+        elif    (c0 == 98  && c1 == 108 && c2 == 97  && c3 == 110 && c4 == 107) { category = 7; }   # blank
+        elif    (c0 == 99  && c1 == 110 && c2 == 116 && c3 == 114 && c4 == 108) { category = 8; }   # cntrl
+        elif    (c0 == 103 && c1 == 114 && c2 == 97  && c3 == 112 && c4 == 104) { category = 9; }   # graph
+        elif    (c0 == 112 && c1 == 114 && c2 == 105 && c3 == 110 && c4 == 116) { category = 10; }  # print
+        elif    (c0 == 112 && c1 == 117 && c2 == 110 && c3 == 99  && c4 == 116) { category = 11; }  # punct
+    }
+    elif (name_len == 6) {
+        var d0 = load8(pat + name_start);
+        var d1 = load8(pat + name_start + 1);
+        var d2 = load8(pat + name_start + 2);
+        var d3 = load8(pat + name_start + 3);
+        var d4 = load8(pat + name_start + 4);
+        var d5 = load8(pat + name_start + 5);
+        if (d0 == 120 && d1 == 100 && d2 == 105 && d3 == 103 && d4 == 105 && d5 == 116) { category = 12; }  # xdigit
+    }
+    if (category == 0) { return 0; }
+    _posix_match_end_pos = p + 2;
+    return category;
+}
+
+# Apply category (1..12) to class `ci` in `class_base`. Caller is
+# responsible for having allocated `ci` already. Unknown category is
+# a no-op (caller's check should have rejected before calling).
+fn _posix_apply_filler(class_base, ci, category) {
+    if      (category == 1)  { _posix_fill_alpha(class_base, ci); }
+    elif    (category == 2)  { _posix_fill_digit(class_base, ci); }
+    elif    (category == 3)  { _posix_fill_space(class_base, ci); }
+    elif    (category == 4)  { _posix_fill_upper(class_base, ci); }
+    elif    (category == 5)  { _posix_fill_lower(class_base, ci); }
+    elif    (category == 6)  { _posix_fill_alnum(class_base, ci); }
+    elif    (category == 7)  { _posix_fill_blank(class_base, ci); }
+    elif    (category == 8)  { _posix_fill_cntrl(class_base, ci); }
+    elif    (category == 9)  { _posix_fill_graph(class_base, ci); }
+    elif    (category == 10) { _posix_fill_print(class_base, ci); }
+    elif    (category == 11) { _posix_fill_punct(class_base, ci); }
+    elif    (category == 12) { _posix_fill_xdigit(class_base, ci); }
+    return 0;
+}

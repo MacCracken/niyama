@@ -14,6 +14,7 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "src/posix_classes.cyr"
 include "src/pcre.cyr"
 
 var _rng_state = 0xDEADBEEF;
@@ -31,7 +32,9 @@ fn rng() {
 # PCRE-flavor random pattern alphabet — heavy on metachars + backref +
 # group-introducer chars to stress the parser branches.
 fn gen_pat(buf, n) {
-    var alphabet = "abc.*+?[]()|\\dws{},^$0123<>=!:>P&";
+    # v0.7.0: alphabet extended with `i` `m` `K` `C` `|` `(` (already)
+    # to fuzz inline flags / \K / branch-reset / conditional / callout.
+    var alphabet = "abc.*+?[]()|\\dws{},^$0123<>=!:>P&imKC";
     var alen = strlen(alphabet);
     var i = 0;
     while (i < n) {
@@ -101,6 +104,16 @@ fn main() {
     # Backref under quantifier.
     fuzz_one("(\\w)\\1+", "aaaa");
 
+    # v0.7.0 features in the smoke corpus.
+    fuzz_one("[[:alpha:]]+",         "Hello");
+    fuzz_one("(?i)hello",            "HELLO");
+    fuzz_one("(?ims)^foo.bar$",      "Foo\nbar");
+    fuzz_one("foo\\Kbar",            "foobar");
+    fuzz_one("(?|(a)|(b))",          "b");
+    fuzz_one("(a)?(?(1)yes|no)",     "ayes");
+    fuzz_one("foo(?C)bar",           "foobar");
+    fuzz_one("foo(?C42)bar",         "foobar");
+
     # === Rejection invariants =========================================
 
     # Lookbehind MUST yield LOOKBEHIND_UNSUPPORTED.
@@ -118,10 +131,10 @@ fn main() {
     assert_eq(r1, 0, "recursion rejects");
     assert_eq(niyama_pcre_last_error(), PCRE_E_RECURSION_UNSUPPORTED, "recursion error");
 
-    # Conditional.
-    var c1 = niyama_pcre_compile("(?(1)a|b)");
-    assert_eq(c1, 0, "conditional rejects");
-    assert_eq(niyama_pcre_last_error(), PCRE_E_CONDITIONAL_UNSUPPORTED, "conditional error");
+    # v0.7.0 — bad conditional reference rejected.
+    var bc1 = niyama_pcre_compile("(?(<absent>)yes)");
+    assert_eq(bc1, 0, "bad-cond rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_BAD_CONDITION, "bad-cond error");
 
     # Duplicate names.
     var d1 = niyama_pcre_compile("(?<x>a)(?<x>b)");

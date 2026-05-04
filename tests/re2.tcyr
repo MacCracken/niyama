@@ -132,13 +132,56 @@ fn main() {
     assert_eq(t_err("(?R)"), RE2_E_RECURSION_UNSUPPORTED, "(?R) rejected");
     assert_eq(t_err("(?P>name)"), RE2_E_RECURSION_UNSUPPORTED, "(?P>name) rejected");
 
-    # Named captures (?<name>...) and (?P<name>...) — deferred (per ADR 0003).
-    # They should produce a syntax error, not silently parse as something else.
-    assert_eq(t_err("(?<name>foo)"), RE2_E_SYNTAX, "(?<name>) deferred -> SYNTAX");
-    assert_eq(t_err("(?P<name>foo)"), RE2_E_SYNTAX, "(?P<name>) deferred -> SYNTAX");
+    # === Named captures (v0.7.0) =====================================
+    test_group("re2-named");
+    var nfa_n1 = niyama_re2_compile("(?<word>\\w+)");
+    assert_neq(nfa_n1, 0, "(?<word>) compiles");
+    assert_eq(niyama_re2_match(nfa_n1, "hello"), 1, "named matches");
+    assert_eq(niyama_re2_group_by_name(nfa_n1, "word"), 1, "name -> 1");
+    assert_eq(niyama_re2_group_start(nfa_n1, niyama_re2_group_by_name(nfa_n1, "word")), 0, "name lookup -> start");
+    # Python-style (?P<name>...).
+    var nfa_n2 = niyama_re2_compile("(?P<digit>\\d+)");
+    assert_neq(nfa_n2, 0, "(?P<>) compiles");
+    assert_eq(niyama_re2_match(nfa_n2, "12345"), 1, "(?P<>) matches");
+    assert_eq(niyama_re2_group_by_name(nfa_n2, "digit"), 1, "(?P<>) -> 1");
+    assert_eq(niyama_re2_group_by_name(nfa_n2, "missing"), 0 - 1, "missing name -> -1");
+    # Multi-named.
+    var nfa_nm = niyama_re2_compile("(?<scheme>https?)://(?<host>[a-z.]+)");
+    assert_neq(nfa_nm, 0, "multi-named compiles");
+    assert_eq(niyama_re2_match(nfa_nm, "https://example.com"), 1, "multi-named matches");
+    assert_eq(niyama_re2_group_by_name(nfa_nm, "scheme"), 1, "scheme=1");
+    assert_eq(niyama_re2_group_by_name(nfa_nm, "host"),   2, "host=2");
+    # Duplicate-name rejection.
+    assert_eq(t_err("(?<x>a)(?<x>b)"), RE2_E_DUPLICATE_NAME, "dup name rejected");
 
-    # Inline flags — also generic SYNTAX (post-v1.0 work).
-    assert_eq(t_err("(?i)foo"), RE2_E_SYNTAX, "(?i) flag -> SYNTAX");
+    # === Inline flags (?i)(?m)(?s) (v0.7.0) ==========================
+    test_group("re2-inline-flags");
+    # (?i) — case-insensitive.
+    assert_eq(t_match("(?i)hello", "HELLO"),     1, "(?i) literal upper");
+    assert_eq(t_match("(?i)hello", "Hello"),     1, "(?i) literal mixed");
+    assert_eq(t_match("(?i)[a-z]+", "ABC"),      1, "(?i) class fold");
+    assert_eq(t_match("(?i)abc", "abd"),         0, "(?i) still discriminates");
+    # (?s) — dot matches \n.
+    assert_eq(t_search(".",      "\n"), 0 - 1, "default `.` excludes \\n");
+    assert_eq(t_search("(?s).",  "\n"), 0,     "(?s) `.` matches \\n");
+    # (?m) — `^`/`$` multi-line.
+    assert_eq(t_search("^foo",     "bar\nfoo"), 0 - 1, "default `^` strict — only at start");
+    assert_eq(t_search("(?m)^foo", "bar\nfoo"), 4,     "(?m) `^` matches after \\n");
+    assert_eq(t_search("foo$",     "foo\nbar"), 0 - 1, "default `$` strict — only at end");
+    assert_eq(t_search("(?m)foo$", "foo\nbar"), 0,     "(?m) `$` matches before \\n");
+    # Combined (?ims).
+    assert_eq(t_match("(?im)HELLO", "hello"), 1, "(?im) compiles + folds");
+    # Bad flag char.
+    assert_eq(t_err("(?x)foo"), RE2_E_SYNTAX, "unknown flag rejected");
+
+    # === Strict-anchor / strict-dot defaults (v0.7.0) ================
+    # Sanity-check the behavior change: pre-v0.7.0 semantics were
+    # implicitly multiline and dot-matches-newline. v0.7.0 makes those
+    # opt-in via (?m) / (?s).
+    test_group("re2-strict-defaults");
+    assert_eq(t_search("^second", "first\nsecond"), 0 - 1, "^ no longer matches after \\n by default");
+    assert_eq(t_search("first$",  "first\nsecond"), 0 - 1, "$ no longer matches before \\n by default");
+    assert_eq(t_search("a.b",     "a\nb"),          0 - 1, ". no longer matches \\n by default");
 
     # === Generic syntax errors ========================================
     test_group("re2-syntax-errors");

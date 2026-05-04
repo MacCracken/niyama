@@ -30,7 +30,9 @@ fn rng() {
 # ERE-flavor random pattern alphabet — heavy on metachars so the parser
 # branches all get exercised.
 fn gen_pat(buf, n) {
-    var alphabet = "abc.*+?[]()|\\dws{},^$012";
+    # v0.7.0: alphabet extended with `<` `>` `:` `i` `m` `P` to fuzz
+    # the new named-capture and inline-flag paths.
+    var alphabet = "abc.*+?[]()|\\dws{},^$012<>:imP";
     var alen = strlen(alphabet);
     var i = 0;
     while (i < n) {
@@ -99,6 +101,15 @@ fn main() {
     # Deeply-nested groups.
     fuzz_one("((((a))))", "a");
 
+    # v0.7.0 features in the smoke corpus.
+    fuzz_one("(?<word>[a-z]+)",                 "hello");
+    fuzz_one("(?P<digit>\\d+)",                 "12345");
+    fuzz_one("(?i)abc",                         "ABC");
+    fuzz_one("(?i)[a-f]+",                      "ABCDEF");
+    fuzz_one("(?im)^foo",                       "Foo\nbar");
+    fuzz_one("(?s).+",                          "line1\nline2");
+    fuzz_one("(?<scheme>https?)://(?<host>\\w+)", "https://example");
+
     # === Rejection invariants =========================================
     # Every \1-\9 MUST yield BACKREF_UNSUPPORTED.
     var bn = niyama_re2_compile("(a)\\1");
@@ -119,6 +130,11 @@ fn main() {
     var rn = niyama_re2_compile("(?R)");
     assert_eq(rn, 0, "recursion-rejects");
     assert_eq(niyama_re2_last_error(), RE2_E_RECURSION_UNSUPPORTED, "recursion-error-code");
+
+    # v0.7.0 — duplicate named captures rejected.
+    var dn = niyama_re2_compile("(?<x>a)(?<x>b)");
+    assert_eq(dn, 0, "dup-name-rejects");
+    assert_eq(niyama_re2_last_error(), RE2_E_DUPLICATE_NAME, "dup-name-error-code");
 
     # === Linear-time adversaries ======================================
     # Build a few big inputs and run them through patterns that DoS

@@ -220,74 +220,91 @@ muscle-memory continuity.
 - Replacement-language helpers (`~`, `&`, `\u`/`\l`/`\U`/`\L`) —
   replacement is a consumer concern.
 
-### M4.5 — deferred-features catch-up (v0.9.0) — pre-freeze completeness pass
+### M4.5 — deferred-features catch-up (v0.7.0 → v0.9.0) — pre-freeze completeness pass
 
 **Why this milestone exists.** During M2/M3/M3.5, deferrals were
 recorded in each engine's ADR ("post-v1.0", "M3.5 candidate", etc.)
-without explicit user agreement. v0.9.0 is the catch-up release that
+without explicit user agreement. M4.5 is the catch-up sequence that
 clears those deferrals before M5 freeze, so the surface that gets
 frozen is the surface the roadmap originally promised — not a
 silently-trimmed subset.
 
-The 11 deferred items below are consolidated here. v0.7.0 / v0.8.0
-slots stay open for sub-milestones if the work needs splitting; the
-user can carve them at planning time.
+11 deferred items consolidated here, carved into three sub-releases
+by infrastructure dependency:
 
-**niyama_re2 catch-up (per ADR 0003 deferrals):**
+#### M4.5a — v0.7.0 (shipped 2026-05-03) — no-Unicode-dep slice
 
-- ✅ Named captures `(?<name>...)` and `(?P<name>...)` with
-  `niyama_re2_group_by_name(nfa, name)` lookup. Reuses the
-  niyama_pcre name-table mechanism added at M3.
-- ✅ Unicode property classes `\p{L}` etc. — adds the Unicode
-  decomposition + property table (~25KB) used by niyama_re2 +
-  niyama_pcre + niyama_vim.
-- ✅ Inline flags `(?i)` `(?m)` `(?s)` — case-fold via the same
-  ASCII case-fold mechanism as niyama_fuzzy; multiline + single-line
-  via matcher flags.
+Per ADR 0007. Eight features land under one new shared module
+`src/posix_classes.cyr`.
 
-**niyama_pcre catch-up (per ADR 0004 deferrals):**
+- ✅ `niyama_bre` GNU `\<` / `\>` word boundaries (strict semantics
+  via two new opcodes; matches `grep -G`).
+- ✅ `niyama_bre` POSIX bracket classes `[:alpha:]` etc. via shared
+  module.
+- ✅ `niyama_re2` named captures `(?<name>...)` and
+  `(?P<name>...)` with `niyama_re2_group_by_name(nfa, name)`
+  lookup. Mirrors the niyama_pcre name-table mechanism.
+- ✅ `niyama_re2` inline flags `(?i)` `(?m)` `(?s)` and
+  combinations.
+- ✅ `niyama_pcre` POSIX bracket classes via shared module.
+- ✅ `niyama_pcre` inline flags `(?i)` `(?m)` `(?s)`.
+- ✅ `niyama_pcre` `\K` reset-match-start.
+- ✅ `niyama_pcre` branch-reset groups `(?|...)`.
+- ✅ `niyama_pcre` conditional patterns `(?(cond)yes|no)`
+  (numeric and named conditions).
+- ✅ `niyama_pcre` callouts `(?C)` and `(?C<num>)` (observability
+  only, no callback API).
+- ✅ Behavior change — re2/pcre `^`/`$`/`.` now strict-by-default
+  (PCRE/RE2 spec); `(?m)` and `(?s)` opt into the previous loose
+  semantics.
 
-- ✅ Lookbehind `(?<=...)` and `(?<!...)` — fixed-width compile-time
-  width analysis (PCRE2 10.43 model). Variable-width lookbehind stays
-  out of scope unless asked.
-- ✅ Unicode property classes `\p{L}` (shared table from re2 work).
-- ✅ POSIX bracket classes `[:alpha:]` `[:digit:]` etc. — shared
-  with niyama_vim implementation (ADR 0002 originally pointed at M4
-  reuse; v0.9.0 ships the shared implementation).
-- ✅ Recursion `(?R)`, `(?P>name)`, `(?N)` — subroutine call into
-  the same compiled NFA.
-- ✅ Conditional patterns `(?(cond)yes|no)`.
-- ✅ Inline flags `(?i)` `(?m)` `(?s)`.
-- ✅ Branch-reset groups `(?|...)`.
-- ✅ Callouts `(?C)`.
-- ✅ `\K` reset-match-start.
+#### M4.5b — v0.8.0 (planned) — analysis-heavy slice
 
-**niyama_bre catch-up (per ADR 0002 deferrals from M4-pointer):**
+Three features that each need real compile-time analysis or matcher
+work; deliberately separate from the v0.7.0 set so each gets focused
+review.
 
-- ✅ GNU `\<` / `\>` word boundaries.
-- ✅ POSIX bracket classes `[:alpha:]` etc. (shared with pcre/vim).
-- ⏳ Backreferences `\1`-`\9` — **user's explicit "potentially
-  post-v1.0; document, don't skip" call from M1 scoping.** Stays
-  there unless the user revisits during v0.9.0 planning.
+- 🟦 `niyama_pcre` lookbehind `(?<=...)` and `(?<!...)` —
+  fixed-width compile-time width analysis (PCRE2 10.43 model).
+  Variable-width lookbehind stays out of scope unless asked.
+- 🟦 `niyama_pcre` recursion `(?R)`, `(?P>name)`, `(?N)` —
+  subroutine call into the same compiled NFA.
+- 🟦 `niyama_fuzzy` exact start-position recovery in
+  `niyama_fuzzy_search` — reverse-DP pass to recover the precise
+  start offset of the best fuzzy substring match.
+- ⏳ `niyama_bre` and `niyama_vim` backref `\1`-`\9` —
+  **user's explicit "potentially post-v1.0; document, don't skip"
+  call from M1 / M4.** v0.8.0 is the natural revisit point if the
+  user wants to reopen.
 
-**niyama_fuzzy catch-up (per ADR 0005 deferrals):**
+#### M4.5c — v0.9.0 (planned) — Unicode slice + cleanups
 
-- ✅ Unicode NFD normalization via `FUZZY_FLAG_UNICODE_NFD`. Reuses
-  the Unicode decomposition table added by re2/pcre.
-- ✅ Exact start-position recovery in `niyama_fuzzy_search` —
-  reverse-DP pass to recover the precise start offset of the best
-  fuzzy substring match.
+The infrastructure-heavy slice. Adds one shared module and clears
+remaining Unicode deferrals.
 
-**Cross-engine concerns:**
+- 🟦 New shared module `src/unicode.cyr` for the Unicode
+  decomposition + property table (~25 KB) — used by re2, pcre,
+  fuzzy, and vim.
+- 🟦 `niyama_re2` Unicode property classes `\p{L}` etc.
+- 🟦 `niyama_pcre` Unicode property classes `\p{L}` (shared table
+  from re2 work).
+- 🟦 `niyama_fuzzy` Unicode NFD normalization via
+  `FUZZY_FLAG_UNICODE_NFD`.
+- 🟦 Refactor — fold `niyama_vim`'s in-engine POSIX bracket-class
+  code onto `src/posix_classes.cyr` (deliberate duplication left in
+  v0.7.0 to keep risk low; this clears the technical debt before
+  M5 freeze).
 
-- New shared module `src/unicode.cyr` for the Unicode decomposition
-  + property table — used by re2, pcre, fuzzy, and vim. Adds ~25KB
-  to `dist/niyama.cyr` which is acceptable now that fold-readiness
-  prep is concrete.
-- Per-engine ABI extensions (named-capture lookup for re2, flag
-  setters for re2/pcre, NFD flag for fuzzy) all preserve M3-frozen
-  numeric error code values — additions only, no renumbers.
-- New tests/fuzz/bench harnesses for each catch-up feature.
+**Cross-engine concerns (apply across the three sub-releases):**
+
+- All per-engine ABI extensions (named-capture lookup for re2, flag
+  setters, NFD flag, etc.) preserve frozen numeric error code values
+  — additions only, no renumbers. New error codes start at the
+  next-available slot per engine.
+- Reserved-but-unused error code slots (e.g.
+  `PCRE_E_CONDITIONAL_UNSUPPORTED = 5` after v0.7.0 implements
+  conditionals) are kept for ABI stability.
+- New tests/fuzz/bench harnesses ship alongside each feature.
 
 ### M5 — P(-1) hardening + closeout (post-v0.9.0 → freeze)
 

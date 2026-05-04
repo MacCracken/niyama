@@ -53,6 +53,13 @@ var BRE_OP_SPLIT     = 6;
 var BRE_OP_SAVE      = 7;
 var BRE_OP_BOL       = 8;
 var BRE_OP_EOL       = 9;
+# v0.7.0 — GNU BRE word boundaries. Strict semantics distinct from
+# `\b`: WORDBEGIN fires only at non-word -> word transitions,
+# WORDEND only at word -> non-word transitions. (vim conflates the
+# two onto its single BOUNDARY op; bre tracks `grep -G` which keeps
+# them distinct.)
+var BRE_OP_WORDBEGIN = 10;
+var BRE_OP_WORDEND   = 11;
 
 var BRE_NFA_HEADER_SIZE = 216;
 var BRE_OFF_INSTR_COUNT = 0;
@@ -258,9 +265,9 @@ fn _bre_lit_byte() {
 # `[`). Returns the class index. Sets _bre_err on syntax error. Negation
 # is encoded by returning -(ci+1).
 #
-# POSIX-strict bracket scope for M1: ranges (`a-z`), literal characters,
-# `^` for negation as first char. NOT shipped: `[:alpha:]` POSIX char
-# classes (deferred to M4 vim per ADR 0002).
+# Scope: ranges (`a-z`), literal characters, `^` for negation as first
+# char, and POSIX bracket character classes `[:alpha:]` etc. (added in
+# v0.7.0 via the shared posix_classes module).
 fn _bre_parse_class() {
     var ci = _bre_alloc_class();
     if (_bre_err != BRE_E_OK) { return ci; }
@@ -279,6 +286,14 @@ fn _bre_parse_class() {
         if (pc == 93 && first == 0) {
             _bre_pos = _bre_pos + 1;
             done = 1;
+        }
+        # POSIX bracket class: `[:name:]` — only valid inside a `[...]`.
+        elif (pc == 91 && _bre_pos + 1 < _bre_pat_len && load8(_bre_pat + _bre_pos + 1) == 58) {
+            var category = _posix_match_class_name(_bre_pat, _bre_pos + 2, _bre_pat_len);
+            if (category == 0) { _bre_err = BRE_E_SYNTAX; return 0 - 1; }
+            _posix_apply_filler(_bre_class_base, ci, category);
+            _bre_pos = _posix_match_end_pos;
+            first = 0;
         }
         elif (pc == 92 && _bre_pos + 1 < _bre_pat_len) {
             # In bracket context, only literal-byte escapes apply.
@@ -396,6 +411,19 @@ fn _bre_parse_primary(at_start) {
         # `\1`..`\9` backreference — REJECT explicitly per ADR 0002.
         if (e >= 49 && e <= 57) {
             _bre_err = BRE_E_BACKREF_UNSUPPORTED;
+            return 0;
+        }
+
+        # GNU BRE word boundaries (v0.7.0): `\<` start-of-word,
+        # `\>` end-of-word. Strict semantics (distinct from `\b`).
+        if (e == 60) {
+            _bre_pos = _bre_pos + 2;
+            _bre_emit_op(BRE_OP_WORDBEGIN);
+            return 0;
+        }
+        if (e == 62) {
+            _bre_pos = _bre_pos + 2;
+            _bre_emit_op(BRE_OP_WORDEND);
             return 0;
         }
 
@@ -726,6 +754,20 @@ fn _bre_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
         if (pos == input_len) { ok2 = 1; }
         elif (load8(input + pos) == 10) { ok2 = 1; }
         if (ok2 == 1) { _bre_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs); }
+    }
+    elif (op == BRE_OP_WORDBEGIN) {
+        var lw = _bre_at_word_char(input, input_len, pos - 1);
+        var rw = _bre_at_word_char(input, input_len, pos);
+        if (lw == 0 && rw == 1) {
+            _bre_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
+    }
+    elif (op == BRE_OP_WORDEND) {
+        var lw2 = _bre_at_word_char(input, input_len, pos - 1);
+        var rw2 = _bre_at_word_char(input, input_len, pos);
+        if (lw2 == 1 && rw2 == 0) {
+            _bre_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
     }
     else {
         var n = load64(list_base);

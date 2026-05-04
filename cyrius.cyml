@@ -1,6 +1,6 @@
 [package]
 name = "niyama"
-version = "0.6.0"
+version = "0.7.0"
 description = "niyama — additional regex engines (bre, re2, pcre, fuzzy, vim) for the AGNOS-lineage Cyrius ecosystem; foldable into stdlib per sandhi pattern"
 license = "GPL-3.0-only"
 language = "cyrius"

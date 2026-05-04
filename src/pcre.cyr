@@ -27,11 +27,26 @@
 #   niyama_pcre_last_step_count()    -> step count of most recent match
 #
 # Out of scope for M3 (per ADR 0004):
-#   - Lookbehind (?<=...) (?<!...) -- needs fixed-width analysis
-#   - Unicode property classes \p{L} -- needs Unicode DB
-#   - POSIX bracket classes [:alpha:] -- M4 vim inherits, implement once
-#   - Inline flags (?i) (?m) (?s) -- post-v1.0
-#   - Conditional patterns, recursion, branch-reset, callouts -- post-v1.0
+#   - Lookbehind (?<=...) (?<!...) — deferred to v0.8.0 (needs
+#     fixed-width compile-time analysis).
+#   - Unicode property classes \p{L} — deferred to v0.9.0 (Unicode
+#     table is shared across re2/pcre/fuzzy and lands together).
+#   - Recursion (?R) (?P>name) — deferred to v0.8.0.
+#
+# v0.7.0 (per ADR 0007) lands the no-Unicode-dep pcre catch-up:
+#   - POSIX bracket classes [:alpha:] etc. via shared posix_classes module
+#   - Inline flags (?i) (?m) (?s) — and combinations
+#   - \K reset-match-start
+#   - Branch-reset groups (?|...)
+#   - Conditional patterns (?(cond)yes|no)
+#   - Callouts (?C) and (?C123) — observability only, no callback API
+#
+# v0.7.0 behavior change: niyama_pcre's `^`, `$`, and `.` are now
+# **strict-by-default** (matching the PCRE spec) — `^`/`$` only at
+# string boundaries, `.` does not match `\n`. Multi-line semantics
+# require `(?m)`; dot-matches-newline requires `(?s)`. Pre-v0.7.0
+# implementations were silently loose; this is a documented change
+# pre-surface-freeze (M5).
 #
 # Precondition: alloc_init() must have been called.
 #
@@ -60,6 +75,14 @@ var PCRE_OP_NLOOKAHEAD = 14;  # arg1: end_pc (negative lookahead)
 var PCRE_OP_LOOKAHEAD_END = 15;  # marker: sub-match returns success
 var PCRE_OP_ATOMIC     = 16;  # arg1: end_pc
 var PCRE_OP_ATOMIC_END = 17;  # marker: sub-match returns success-with-pos
+# v0.7.0 — additions for inline flags + new spec-strict defaults +
+# conditional patterns + callouts.
+var PCRE_OP_CHAR_CI    = 18;  # case-insensitive char (ASCII fold)
+var PCRE_OP_BOS        = 19;  # strict ^ — pos == 0 only
+var PCRE_OP_EOS        = 20;  # strict $ — pos == len only
+var PCRE_OP_ANY_NONL   = 21;  # . excluding \n
+var PCRE_OP_COND       = 22;  # arg1: group_idx, arg2: no_pc
+var PCRE_OP_CALLOUT    = 23;  # arg1: callout number (zero-width no-op)
 
 # === NFA layout ======================================================
 
@@ -89,9 +112,14 @@ var PCRE_E_SYNTAX                  = 1;
 var PCRE_E_LOOKBEHIND_UNSUPPORTED  = 2;
 var PCRE_E_UNICODE_PROP_UNSUPPORTED = 3;
 var PCRE_E_RECURSION_UNSUPPORTED   = 4;
+# Slot 5 was PCRE_E_CONDITIONAL_UNSUPPORTED in M3. Conditionals
+# landed in v0.7.0 (ADR 0007); the slot is reserved (frozen ABI)
+# but no longer emitted.
 var PCRE_E_CONDITIONAL_UNSUPPORTED = 5;
 var PCRE_E_TOO_LARGE               = 6;
 var PCRE_E_DUPLICATE_NAME          = 7;
+# v0.7.0 — new error code (next-available; preserves M3 numbering).
+var PCRE_E_BAD_CONDITION           = 8;
 
 # === Compile-time globals ============================================
 
@@ -115,6 +143,16 @@ var _pcre_q_splits = 0;
 var _pcre_step_limit = 1000000;
 var _pcre_step_count = 0;
 var _pcre_last_step_count = 0;
+
+# v0.7.0 — inline-flag compile-time state. (?i)/(?m)/(?s).
+var _pcre_flag_i = 0;
+var _pcre_flag_m = 0;
+var _pcre_flag_s = 0;
+# v0.7.0 — branch-reset state. -1 outside (?|...); the saved
+# `_pcre_capture_n` value at the start of the (?|...) when inside.
+var _pcre_branch_reset_base = 0 - 1;
+# v0.7.0 — last-callout-number observability. Reset per match.
+var _pcre_last_callout = 0 - 1;
 
 # Recursion-depth bound for the backtracking matcher. Cyrius has no
 # native stack-depth limit, so deep adversarial patterns would SIGSEGV
@@ -146,7 +184,14 @@ fn _pcre_emit_raw(w0, w1) {
 }
 
 fn _pcre_emit_op(op)        { return _pcre_emit_raw(op, 0); }
-fn _pcre_emit_char(c)       { return _pcre_emit_raw(PCRE_OP_CHAR | (c << 8), 0); }
+fn _pcre_emit_char(c) {
+    # v0.7.0 — under (?i) emit CHAR_CI; the matcher does case-fold.
+    var op = PCRE_OP_CHAR;
+    if (_pcre_flag_i == 1) { op = PCRE_OP_CHAR_CI; }
+    var stored = c;
+    if (_pcre_flag_i == 1 && c >= 65 && c <= 90) { stored = c + 32; }
+    return _pcre_emit_raw(op | (stored << 8), 0);
+}
 fn _pcre_emit_class(neg, ci) {
     var op = PCRE_OP_CLASS;
     if (neg == 1) { op = PCRE_OP_NCLASS; }
@@ -207,6 +252,16 @@ fn _pcre_shift_targets_one(lo, hi) {
                 if (arg2 >= lo && arg2 <= hi) {
                     _pcre_patch_arg2(i, arg2 + 1);
                 }
+            }
+        }
+        # v0.7.0 — COND has arg1 = group_idx (NOT a PC, do not shift)
+        # and arg2 = no_pc (a PC, shift if it falls inside the moved
+        # range). Handled separately to keep the arg1 logic above
+        # unconditional.
+        if (op == PCRE_OP_COND) {
+            var c_arg2 = load64(off + 8);
+            if (c_arg2 >= lo && c_arg2 <= hi) {
+                _pcre_patch_arg2(i, c_arg2 + 1);
             }
         }
         i = i + 1;
@@ -273,6 +328,52 @@ fn _pcre_class_fill_space(ci) {
     _pcre_class_set(ci, 12);
     _pcre_class_set(ci, 13);
     return 0;
+}
+
+# v0.7.0 — under (?i) also set the opposite-case ASCII letter.
+fn _pcre_class_set_folded(ci, c) {
+    _pcre_class_set(ci, c);
+    if (_pcre_flag_i == 1) {
+        if (c >= 65 && c <= 90)    { _pcre_class_set(ci, c + 32); }
+        elif (c >= 97 && c <= 122) { _pcre_class_set(ci, c - 32); }
+    }
+    return 0;
+}
+
+fn _pcre_class_range_folded(ci, lo, hi) {
+    var c = lo;
+    while (c <= hi) {
+        _pcre_class_set_folded(ci, c);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# v0.7.0 — try to parse `(?<flags>)` where <flags> is one or more of
+# i/m/s. Caller has consumed `(?`; `_pcre_pos` is at the first byte
+# after `(?`. Returns 1 on success (flags set, `)` consumed); 0 if
+# the body is not pure-flag (caller falls through). Sets _pcre_err on
+# malformed flag run.
+fn _pcre_try_inline_flags() {
+    var p = _pcre_pos;
+    var first = load8(_pcre_pat + p);
+    if (first != 105 && first != 109 && first != 115) { return 0; }
+    var fi = 0; var fm = 0; var fs = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (p >= _pcre_pat_len) { _pcre_err = PCRE_E_SYNTAX; return 0; }
+        var c = load8(_pcre_pat + p);
+        if      (c == 105) { fi = 1; p = p + 1; }
+        elif    (c == 109) { fm = 1; p = p + 1; }
+        elif    (c == 115) { fs = 1; p = p + 1; }
+        elif    (c == 41)  { scanning = 0; }
+        else               { _pcre_err = PCRE_E_SYNTAX; return 0; }
+    }
+    _pcre_pos = p + 1;  # consume `)`
+    if (fi == 1) { _pcre_flag_i = 1; }
+    if (fm == 1) { _pcre_flag_m = 1; }
+    if (fs == 1) { _pcre_flag_s = 1; }
+    return 1;
 }
 
 # === Named-capture name table =======================================
@@ -448,17 +549,20 @@ fn _pcre_parse_class() {
                     _pcre_pos = _pcre_pos + 1;
                     var hi = _pcre_lit_byte();
                     if (_pcre_err != PCRE_E_OK) { return 0 - 1; }
-                    _pcre_class_range(ci, lc, hi);
+                    _pcre_class_range_folded(ci, lc, hi);
                 } else {
-                    _pcre_class_set(ci, lc);
+                    _pcre_class_set_folded(ci, lc);
                 }
             }
             first = 0;
         }
         elif (pc == 91 && _pcre_pos + 1 < _pcre_pat_len && load8(_pcre_pat + _pcre_pos + 1) == 58) {
-            # POSIX bracket class [:alpha:] — deferred to M4 vim.
-            _pcre_err = PCRE_E_SYNTAX;
-            return 0 - 1;
+            # v0.7.0 — POSIX bracket class via shared posix_classes module.
+            var category = _posix_match_class_name(_pcre_pat, _pcre_pos + 2, _pcre_pat_len);
+            if (category == 0) { _pcre_err = PCRE_E_SYNTAX; return 0 - 1; }
+            _posix_apply_filler(_pcre_class_base, ci, category);
+            _pcre_pos = _posix_match_end_pos;
+            first = 0;
         }
         else {
             var lc2 = _pcre_lit_byte();
@@ -467,9 +571,9 @@ fn _pcre_parse_class() {
                 _pcre_pos = _pcre_pos + 1;
                 var hi2 = _pcre_lit_byte();
                 if (_pcre_err != PCRE_E_OK) { return 0 - 1; }
-                _pcre_class_range(ci, lc2, hi2);
+                _pcre_class_range_folded(ci, lc2, hi2);
             } else {
-                _pcre_class_set(ci, lc2);
+                _pcre_class_set_folded(ci, lc2);
             }
             first = 0;
         }
@@ -485,6 +589,14 @@ fn _pcre_parse_class() {
 #   capture_idx == -2: lookahead positive (caller emits LOOKAHEAD start/end)
 #   capture_idx == -3: lookahead negative
 #   capture_idx == -4: atomic group
+# v0.7.0:
+#   capture_idx == -5: branch-reset group `(?|...)` — caller still
+#                      parses body but with branch-reset semantics.
+#   capture_idx == -6: conditional `(?(cond)yes|no)` — caller is
+#                      told to skip body parsing; this fn already
+#                      emitted the COND/JMP/no_body and consumed `)`.
+#   capture_idx == -7: fully-consumed form (inline flag, callout) —
+#                      caller emits nothing, body already eaten.
 # Sets _pcre_err on rejection / syntax / deferred-feature.
 fn _pcre_parse_group_intro() {
     # _pcre_pos at `?`; advance past `?`
@@ -552,12 +664,127 @@ fn _pcre_parse_group_intro() {
         _pcre_err = PCRE_E_RECURSION_UNSUPPORTED;
         return 0;
     }
-    if (n1 == 40) {
-        # (?(...)...) conditional
-        _pcre_err = PCRE_E_CONDITIONAL_UNSUPPORTED;
-        return 0;
+    if (n1 == 124) {
+        # v0.7.0 — (?|...) branch-reset group.
+        _pcre_pos = _pcre_pos + 1;
+        return 0 - 5;
     }
-    # (?i) (?m) (?s) flags or anything else — generic syntax for now.
+    if (n1 == 40) {
+        # v0.7.0 — (?(cond)yes|no) conditional. cond may be a group
+        # number or a name. Compiles to:
+        #   COND group_idx, no_pc
+        #   <yes_body>
+        #   JMP end_pc
+        # no_pc:
+        #   <no_body>
+        # end_pc:
+        # If there is no `|`, no_pc == end_pc and the JMP is omitted.
+        _pcre_pos = _pcre_pos + 1;  # past `(`
+        if (_pcre_pos >= _pcre_pat_len) { _pcre_err = PCRE_E_SYNTAX; return 0; }
+        var group_idx = 0;
+        var cb = load8(_pcre_pat + _pcre_pos);
+        if (cb >= 49 && cb <= 57) {
+            # Numeric reference (?(N)
+            group_idx = cb - 48;
+            _pcre_pos = _pcre_pos + 1;
+        }
+        elif (cb == 60) {
+            # (?(<NAME>) named-group reference.
+            _pcre_pos = _pcre_pos + 1;
+            var nm_start = _pcre_pos;
+            while (_pcre_pos < _pcre_pat_len && _pcre_is_name_rest(load8(_pcre_pat + _pcre_pos)) == 1) {
+                _pcre_pos = _pcre_pos + 1;
+            }
+            if (_pcre_pos >= _pcre_pat_len || load8(_pcre_pat + _pcre_pos) != 62) {
+                _pcre_err = PCRE_E_SYNTAX; return 0;
+            }
+            var nm_len = _pcre_pos - nm_start;
+            # Look up the name in the in-progress name table.
+            var i = 0;
+            var found = 0 - 1;
+            while (i < _pcre_name_n) {
+                var slot = _pcre_name_base + i * PCRE_NAME_SLOT_SIZE;
+                var slot_len = 0;
+                while (slot_len < PCRE_NAME_MAX_LEN && load8(slot + slot_len) != 0) {
+                    slot_len = slot_len + 1;
+                }
+                if (slot_len == nm_len) {
+                    var k = 0;
+                    var same = 1;
+                    while (k < nm_len) {
+                        if (load8(slot + k) != load8(_pcre_pat + nm_start + k)) {
+                            same = 0;
+                            k = nm_len;
+                        }
+                        k = k + 1;
+                    }
+                    if (same == 1) { found = load64(slot + 32); }
+                }
+                i = i + 1;
+            }
+            if (found < 1) { _pcre_err = PCRE_E_BAD_CONDITION; return 0; }
+            group_idx = found;
+            _pcre_pos = _pcre_pos + 1;  # past `>`
+        }
+        else {
+            # Other condition forms (lookarounds-as-cond, DEFINE, etc.) — not v0.7.0.
+            _pcre_err = PCRE_E_BAD_CONDITION; return 0;
+        }
+        # Expect `)` closing the condition.
+        if (_pcre_pos >= _pcre_pat_len || load8(_pcre_pat + _pcre_pos) != 41) {
+            _pcre_err = PCRE_E_SYNTAX; return 0;
+        }
+        _pcre_pos = _pcre_pos + 1;  # past `)` of condition
+        # Emit COND with placeholder no_pc.
+        var cond_pc = _pcre_emit_raw(PCRE_OP_COND | (group_idx << 32), 0);
+        # Parse YES body.
+        _pcre_parse_concat();
+        if (_pcre_err != PCRE_E_OK) { return 0; }
+        var jmp_pc = 0 - 1;
+        if (_pcre_pos < _pcre_pat_len && load8(_pcre_pat + _pcre_pos) == 124) {
+            # `|` — there's a NO branch.
+            _pcre_pos = _pcre_pos + 1;
+            jmp_pc = _pcre_emit_jmp(0);
+            var no_pc = _pcre_instr_n;
+            _pcre_patch_arg2(cond_pc, no_pc);
+            _pcre_parse_concat();
+            if (_pcre_err != PCRE_E_OK) { return 0; }
+        }
+        # Expect `)` closing the conditional group.
+        if (_pcre_pos >= _pcre_pat_len || load8(_pcre_pat + _pcre_pos) != 41) {
+            _pcre_err = PCRE_E_SYNTAX; return 0;
+        }
+        _pcre_pos = _pcre_pos + 1;  # past final `)`
+        var end_pc = _pcre_instr_n;
+        if (jmp_pc >= 0) { _pcre_patch_arg1(jmp_pc, end_pc); }
+        else              { _pcre_patch_arg2(cond_pc, end_pc); }
+        return 0 - 7;  # fully consumed
+    }
+    if (n1 == 67) {
+        # v0.7.0 — (?C) or (?C<num>) callout. Numbered observability hook.
+        _pcre_pos = _pcre_pos + 1;  # past `C`
+        var num = 0;
+        var have_digits = 0;
+        while (_pcre_pos < _pcre_pat_len && load8(_pcre_pat + _pcre_pos) >= 48 && load8(_pcre_pat + _pcre_pos) <= 57) {
+            num = num * 10 + (load8(_pcre_pat + _pcre_pos) - 48);
+            _pcre_pos = _pcre_pos + 1;
+            have_digits = 1;
+        }
+        if (have_digits == 0) { num = 0; }
+        if (num > 255)        { _pcre_err = PCRE_E_SYNTAX; return 0; }
+        if (_pcre_pos >= _pcre_pat_len || load8(_pcre_pat + _pcre_pos) != 41) {
+            _pcre_err = PCRE_E_SYNTAX; return 0;
+        }
+        _pcre_pos = _pcre_pos + 1;  # past `)`
+        _pcre_emit_raw(PCRE_OP_CALLOUT | (num << 8), 0);
+        return 0 - 7;  # fully consumed
+    }
+    if (n1 == 105 || n1 == 109 || n1 == 115) {
+        # v0.7.0 — inline flags `(?i)` `(?m)` `(?s)` and combinations.
+        _pcre_try_inline_flags();
+        if (_pcre_err != PCRE_E_OK) { return 0; }
+        return 0 - 7;  # fully consumed
+    }
     _pcre_err = PCRE_E_SYNTAX;
     return 0;
 }
@@ -567,15 +794,18 @@ fn _pcre_parse_primary() {
     var c = load8(_pcre_pat + _pcre_pos);
     if (c == 46) {
         _pcre_pos = _pcre_pos + 1;
-        _pcre_emit_op(PCRE_OP_ANY);
+        if (_pcre_flag_s == 1) { _pcre_emit_op(PCRE_OP_ANY); }
+        else                    { _pcre_emit_op(PCRE_OP_ANY_NONL); }
     }
     elif (c == 94) {
         _pcre_pos = _pcre_pos + 1;
-        _pcre_emit_op(PCRE_OP_BOL);
+        if (_pcre_flag_m == 1) { _pcre_emit_op(PCRE_OP_BOL); }
+        else                    { _pcre_emit_op(PCRE_OP_BOS); }
     }
     elif (c == 36) {
         _pcre_pos = _pcre_pos + 1;
-        _pcre_emit_op(PCRE_OP_EOL);
+        if (_pcre_flag_m == 1) { _pcre_emit_op(PCRE_OP_EOL); }
+        else                    { _pcre_emit_op(PCRE_OP_EOS); }
     }
     elif (c == 40) {
         # `(` — group. Inspect for `(?...)` sub-syntax.
@@ -583,12 +813,15 @@ fn _pcre_parse_primary() {
         var capture_idx = 0 - 1;
         var lookahead_kind = 0;     # 1 = positive, 2 = negative
         var atomic_flag = 0;
+        var branch_reset_flag = 0;  # v0.7.0 — (?|...)
         if (_pcre_pos < _pcre_pat_len && load8(_pcre_pat + _pcre_pos) == 63) {
             var introducer = _pcre_parse_group_intro();
             if (_pcre_err != PCRE_E_OK) { return 0; }
+            if (introducer == 0 - 7) { return 0; }   # fully consumed (flags / callout / conditional)
             if (introducer == 0 - 2) { lookahead_kind = 1; }
             elif (introducer == 0 - 3) { lookahead_kind = 2; }
             elif (introducer == 0 - 4) { atomic_flag = 1; }
+            elif (introducer == 0 - 5) { branch_reset_flag = 1; }
             elif (introducer >= 1) { capture_idx = introducer; }
             # introducer == 0 means non-capturing — fall through
         }
@@ -611,7 +844,18 @@ fn _pcre_parse_primary() {
         if (atomic_flag == 1) {
             atomic_pc = _pcre_emit_raw(PCRE_OP_ATOMIC, 0);
         }
+        # v0.7.0 — branch-reset save/restore around the body. Always
+        # save+clear: nested groups inside a (?|...) get their own
+        # alternation semantics back. Branch-reset itself sets a fresh
+        # base for its body.
+        var saved_br = _pcre_branch_reset_base;
+        if (branch_reset_flag == 1) {
+            _pcre_branch_reset_base = _pcre_capture_n;
+        } else {
+            _pcre_branch_reset_base = 0 - 1;
+        }
         _pcre_parse_alt();
+        _pcre_branch_reset_base = saved_br;
         if (_pcre_err != PCRE_E_OK) { return 0; }
         if (_pcre_pos >= _pcre_pat_len || load8(_pcre_pat + _pcre_pos) != 41) { _pcre_err = PCRE_E_SYNTAX; return 0; }
         _pcre_pos = _pcre_pos + 1;
@@ -689,6 +933,12 @@ fn _pcre_parse_primary() {
         elif (e == 66) {
             _pcre_pos = _pcre_pos + 2;
             _pcre_emit_op(PCRE_OP_NBOUNDARY);
+        }
+        elif (e == 75) {
+            # v0.7.0 — \K reset-match-start. Emit SAVE 0 to overwrite
+            # the implicit start-of-match save with the current pos.
+            _pcre_pos = _pcre_pos + 2;
+            _pcre_emit_save(0);
         }
         elif (e == 112 || e == 80) {
             # \p{...} \P{...} — deferred.
@@ -945,9 +1195,17 @@ fn _pcre_parse_concat() {
 }
 
 fn _pcre_parse_alt() {
+    # v0.7.0 — branch-reset (?|...) tracking. When _pcre_branch_reset_base
+    # is set (>= 0), each `|` resets _pcre_capture_n back to that base so
+    # alternatives reuse group numbers; the post-group max-seen value is
+    # tracked in `max_after_branches` and restored when we return.
+    var br_base = _pcre_branch_reset_base;
+    var max_after_branches = _pcre_capture_n;
+
     var left_start = _pcre_instr_n;
     _pcre_parse_concat();
     if (_pcre_err != PCRE_E_OK) { return 0; }
+    if (_pcre_capture_n > max_after_branches) { max_after_branches = _pcre_capture_n; }
     while (_pcre_pos < _pcre_pat_len && load8(_pcre_pat + _pcre_pos) == 124) {
         _pcre_pos = _pcre_pos + 1;
         var left_end = _pcre_instr_n;
@@ -959,10 +1217,16 @@ fn _pcre_parse_alt() {
         var jmp_idx = _pcre_emit_jmp(0);
         var right_start = _pcre_instr_n;
         _pcre_patch_arg2(left_start, right_start);
+        if (br_base >= 0) {
+            # Reset capture count for this new branch.
+            _pcre_capture_n = br_base;
+        }
         _pcre_parse_concat();
         if (_pcre_err != PCRE_E_OK) { return 0; }
+        if (_pcre_capture_n > max_after_branches) { max_after_branches = _pcre_capture_n; }
         _pcre_patch_arg1(jmp_idx, _pcre_instr_n);
     }
+    if (br_base >= 0) { _pcre_capture_n = max_after_branches; }
     return 0;
 }
 
@@ -1005,6 +1269,11 @@ fn niyama_pcre_compile(pat) {
     _pcre_class_n = 0;
     _pcre_capture_n = 0;
     _pcre_name_n = 0;
+    # v0.7.0 — reset inline-flag + branch-reset state per compile.
+    _pcre_flag_i = 0;
+    _pcre_flag_m = 0;
+    _pcre_flag_s = 0;
+    _pcre_branch_reset_base = 0 - 1;
     _pcre_err = PCRE_E_OK;
     _pcre_emit_save(0);
     _pcre_parse_alt();
@@ -1038,6 +1307,12 @@ fn niyama_pcre_set_step_limit(n) {
 
 fn niyama_pcre_last_step_count() {
     return _pcre_last_step_count;
+}
+
+# v0.7.0 — last callout number reached during the most recent match.
+# -1 if no callout was hit (or no match was attempted).
+fn niyama_pcre_last_callout() {
+    return _pcre_last_callout;
 }
 
 # === Backtracking matcher ============================================
@@ -1125,8 +1400,23 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
             pos = pos + 1;
             pc = pc + 1;
         }
+        elif (op == PCRE_OP_CHAR_CI) {
+            if (pos >= input_len) { return 0 - 1; }
+            var want_ci = (w0 >> 8) & 0xFF;
+            var ic = load8(input + pos);
+            if (ic >= 65 && ic <= 90) { ic = ic + 32; }
+            if (ic != want_ci) { return 0 - 1; }
+            pos = pos + 1;
+            pc = pc + 1;
+        }
         elif (op == PCRE_OP_ANY) {
             if (pos >= input_len) { return 0 - 1; }
+            pos = pos + 1;
+            pc = pc + 1;
+        }
+        elif (op == PCRE_OP_ANY_NONL) {
+            if (pos >= input_len) { return 0 - 1; }
+            if (load8(input + pos) == 10) { return 0 - 1; }
             pos = pos + 1;
             pc = pc + 1;
         }
@@ -1158,6 +1448,14 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
             if (pos == input_len) { ok2 = 1; }
             elif (load8(input + pos) == 10) { ok2 = 1; }
             if (ok2 == 0) { return 0 - 1; }
+            pc = pc + 1;
+        }
+        elif (op == PCRE_OP_BOS) {
+            if (pos != 0) { return 0 - 1; }
+            pc = pc + 1;
+        }
+        elif (op == PCRE_OP_EOS) {
+            if (pos != input_len) { return 0 - 1; }
             pc = pc + 1;
         }
         elif (op == PCRE_OP_BOUNDARY) {
@@ -1236,6 +1534,25 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
             pos = r5;
             pc = end_pc5 + 1;
         }
+        elif (op == PCRE_OP_COND) {
+            # v0.7.0 — conditional. arg1 = group_idx, arg2 = no_pc.
+            # If the referenced group has participated (start >= 0),
+            # fall through into the YES body; else jump to no_pc.
+            var cg_idx = (w0 >> 32) & 0xFFFFFFFF;
+            var no_pc  = load64(instrs + pc * 16 + 8);
+            var gs_c = load64(saves + cg_idx * 16);
+            if (gs_c >= 0) {
+                pc = pc + 1;
+            } else {
+                pc = no_pc;
+            }
+        }
+        elif (op == PCRE_OP_CALLOUT) {
+            # v0.7.0 — observability hook. Records the callout number;
+            # consumers query niyama_pcre_last_callout(). Zero-width.
+            _pcre_last_callout = (w0 >> 8) & 0xFF;
+            pc = pc + 1;
+        }
         else {
             return 0 - 1;
         }
@@ -1247,6 +1564,7 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
 
 fn _pcre_run_at(nfa, input, input_len, from) {
     _pcre_step_count = 0;
+    _pcre_last_callout = 0 - 1;
     var instrs = nfa + load64(nfa + PCRE_OFF_INSTRS_OFF);
     var instr_count = load64(nfa + PCRE_OFF_INSTR_COUNT);
     var class_base = nfa + load64(nfa + PCRE_OFF_CLASSES_OFF);

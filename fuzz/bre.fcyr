@@ -13,6 +13,7 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "src/posix_classes.cyr"
 include "src/bre.cyr"
 
 # xorshift32 PRNG — deterministic across runs for reproducibility.
@@ -32,7 +33,9 @@ fn rng() {
 # null-terminated). Bytes drawn from a metachar-heavy alphabet so we
 # stress the parser branches.
 fn gen_pat(buf, n) {
-    var alphabet = "abc.*[]\\(){},^$|012";
+    # v0.7.0: alphabet extended with `<` `>` `:` to fuzz the new
+    # `\<`/`\>` word boundaries and `[:name:]` POSIX bracket classes.
+    var alphabet = "abc.*[]\\(){},^$|012<>:";
     var alen = strlen(alphabet);
     var i = 0;
     while (i < n) {
@@ -90,6 +93,13 @@ fn main() {
     fuzz_one(".*", "anything");
     fuzz_one("^abc$", "abc");
     fuzz_one("a*b*c*", "aaabbbccc");
+
+    # v0.7.0 features in the smoke corpus.
+    fuzz_one("\\<word\\>",       "say word now");
+    fuzz_one("[[:alpha:]]\\{3\\}", "abc123");
+    fuzz_one("[[:digit:]]*",       "12345");
+    fuzz_one("[^[:space:]]\\{1,\\}", "no spaces");
+    fuzz_one("\\<[[:alpha:]]\\{2,\\}\\>", "ab cde fg");
 
     # Backref-rejection invariant: every `\1`-`\9` MUST return error 2.
     var nfa_br = niyama_bre_compile("\\(x\\)\\1");

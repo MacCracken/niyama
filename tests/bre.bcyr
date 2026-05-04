@@ -13,6 +13,7 @@ include "lib/fmt.cyr"
 include "lib/vec.cyr"
 include "lib/fnptr.cyr"
 include "lib/bench.cyr"
+include "src/posix_classes.cyr"
 include "src/bre.cyr"
 
 # Persistent NFAs reused across iterations — compile cost is measured

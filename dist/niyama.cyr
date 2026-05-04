@@ -1,8 +1,13 @@
 # niyama.cyr -- bundled distribution
-# Version: 0.6.0
-# Status:  M4 — POSIX BRE + linear-time RE2 + Perl-compat PCRE +
-#                Levenshtein fuzzy + vim/cyim flavor engines shipped.
-#                All five engines pre-v0.9.0-catch-up.
+# Version: 0.7.0
+# Status:  v0.7.0 — first M4.5 catch-up release. POSIX bracket classes
+#                shared across bre/pcre, GNU \<\> word boundaries in
+#                bre, named captures + inline flags in re2, and the
+#                no-Unicode-dep pcre catch-up: POSIX classes, inline
+#                flags, \K, branch-reset (?|...), conditional
+#                (?(cond)yes|no), callouts (?C). All five engines
+#                still shipped; deferred items reduced (lookbehind +
+#                pcre recursion to v0.8.0; Unicode work to v0.9.0).
 #
 # Fold-ready single-include artifact. Following the sandhi precedent
 # (cyrius v5.7.0 vendored `dist/sandhi.cyr` byte-identical as
@@ -15,16 +20,25 @@
 #
 # Engines shipped:
 #   - bre   (M1, v0.2.0):   POSIX BRE — niyama_bre_*
+#                           v0.7.0 adds GNU \<\> word boundaries +
+#                           POSIX bracket classes [[:alpha:]] etc.
 #   - re2   (M2, v0.3.0):   ERE flavor + linear-time guarantee at API.
 #                           niyama_re2_* — same shape as niyama_bre_*,
 #                           with compile-time rejection of
 #                           backref / lookaround / atomic / recursion.
+#                           v0.7.0 adds named captures + inline flags
+#                           (?i)(?m)(?s) + spec-strict ^/$/.
+#                           defaults.
 #   - pcre  (M3, v0.4.0):   Perl-compat backtracking matcher.
 #                           niyama_pcre_* — backref, lookahead, atomic,
 #                           named captures, possessive quantifiers.
 #                           Catastrophic-backtracking mitigated by
 #                           configurable step-limit + recursion-depth
 #                           bound (per ADR 0004).
+#                           v0.7.0 adds POSIX bracket classes, inline
+#                           flags, \K, branch-reset, conditional
+#                           patterns, callouts, and spec-strict ^/$/.
+#                           defaults.
 #   - fuzzy (M3.5, v0.5.0): Levenshtein edit-distance matcher.
 #                           niyama_fuzzy_* — anchored match + substring
 #                           + prefix modes. Not regex. Per ADR 0005.
@@ -34,15 +48,25 @@
 #                           bracket classes [[:alpha:]] etc.
 #                           Per ADR 0006.
 #
-# Next: v0.9.0 (M4.5 catch-up) — clears the deferred-features list
-# from ADRs 0002-0006 before M5 surface freeze. See roadmap.md.
+# Shared modules:
+#   - posix_classes (v0.7.0): ASCII fillers + name-recognizer for the
+#                             12 POSIX bracket classes. Used by bre +
+#                             pcre. (vim still carries an in-engine
+#                             copy; folding is a v0.9.0 cleanup.)
+#
+# Next: v0.8.0 (lookbehind + pcre recursion + fuzzy exact-start),
+#       v0.9.0 (Unicode property/decomposition table — re2/pcre/fuzzy),
+#       then M5 hardening + freeze. See roadmap.md.
 #
 # Precondition: consumers MUST call alloc_init() before any
 # niyama_*_compile() call.
 #
 # Do not edit -- rebuild with: scripts/build-dist.sh (post-M1)
 
-var NIYAMA_VERSION = "0.6.0";
+var NIYAMA_VERSION = "0.7.0";
+
+# === posix bracket classes (shared) ==================================
+include "src/posix_classes.cyr"
 
 # === bre engine ======================================================
 include "src/bre.cyr"

@@ -27,9 +27,16 @@
 #   niyama_re2_last_error()       -> error code from most recent compile
 #
 # Out of scope for M2 (deferred per ADR 0003):
-#   - Named captures (?P<name>...) — post-M3 cross-engine API consolidation.
-#   - Unicode property classes \p{L} — M2 is ASCII-only.
-#   - Inline flags (?i) (?m) (?s) — post-v1.0 unless consumer asks.
+#   - Named captures (?P<name>...) — landed in v0.7.0 (ADR 0007).
+#   - Unicode property classes \p{L} — deferred to v0.9.0.
+#   - Inline flags (?i) (?m) (?s) — landed in v0.7.0 (ADR 0007).
+#
+# v0.7.0 behavior change: niyama_re2's `^`, `$`, and `.` are now
+# **strict-by-default** (matching the RE2/PCRE spec) — `^`/`$` only
+# at string boundaries, `.` does not match `\n`. Multi-line semantics
+# require `(?m)`; dot-matches-newline requires `(?s)`. Pre-v0.7.0
+# implementations were silently loose; this is a documented change
+# pre-surface-freeze (M5).
 #
 # Precondition: alloc_init() must have been called.
 #
@@ -46,12 +53,18 @@ var RE2_OP_NCLASS    = 4;
 var RE2_OP_JMP       = 5;
 var RE2_OP_SPLIT     = 6;
 var RE2_OP_SAVE      = 7;
-var RE2_OP_BOL       = 8;
-var RE2_OP_EOL       = 9;
+var RE2_OP_BOL       = 8;       # multiline ^ — fires at pos 0 OR after \n
+var RE2_OP_EOL       = 9;       # multiline $ — fires at pos len OR at \n
 var RE2_OP_BOUNDARY  = 10;
 var RE2_OP_NBOUNDARY = 11;
+# v0.7.0 — opcodes added for PCRE-spec strict default of ^/$/. and
+# the case-insensitive CHAR_CI used by `(?i)` flag emission.
+var RE2_OP_CHAR_CI   = 12;      # case-insensitive char (ASCII fold)
+var RE2_OP_BOS       = 13;      # strict ^ — pos == 0 only
+var RE2_OP_EOS       = 14;      # strict $ — pos == len only
+var RE2_OP_ANY_NONL  = 15;      # . excluding \n
 
-var RE2_NFA_HEADER_SIZE = 216;
+var RE2_NFA_HEADER_SIZE = 256;  # extended for name table (was 216)
 var RE2_OFF_INSTR_COUNT = 0;
 var RE2_OFF_INSTRS_OFF  = 8;
 var RE2_OFF_CLASS_COUNT = 16;
@@ -59,13 +72,19 @@ var RE2_OFF_CLASSES_OFF = 24;
 var RE2_OFF_CAPTURES    = 32;
 var RE2_OFF_MATCH_START = 40;
 var RE2_OFF_MATCH_END   = 48;
-var RE2_OFF_SAVES       = 56;
+var RE2_OFF_SAVES       = 56;   # 20 × 8 = 160 bytes (covers up to 215)
+var RE2_OFF_NAMES_OFF   = 216;
+var RE2_OFF_NAME_COUNT  = 224;
 
 var RE2_MAX_INSTRS  = 4096;
 var RE2_MAX_CLASSES = 64;
 var RE2_MAX_SAVES   = 20;
+var RE2_MAX_NAMES   = 9;
+var RE2_NAME_SLOT_SIZE = 40;    # 32 bytes name (NUL-padded) + 8 bytes group_idx
+var RE2_NAME_MAX_LEN   = 31;
 
-# Error codes — frozen-at-M2 ABI per ADR 0003.
+# Error codes — frozen-at-M2 ABI per ADR 0003. v0.7.0 adds error 7
+# (RE2_E_DUPLICATE_NAME) per ADR 0007; existing codes unchanged.
 var RE2_E_OK                    = 0;
 var RE2_E_SYNTAX                = 1;
 var RE2_E_BACKREF_UNSUPPORTED   = 2;  # \1-\9 — non-regular
@@ -73,6 +92,7 @@ var RE2_E_LOOKAROUND_UNSUPPORTED = 3; # (?=...) (?!...) (?<=...) (?<!...)
 var RE2_E_ATOMIC_UNSUPPORTED    = 4;  # (?>...) — backtracking-only
 var RE2_E_RECURSION_UNSUPPORTED = 5;  # (?R) (?P>name) — non-regular
 var RE2_E_TOO_LARGE             = 6;
+var RE2_E_DUPLICATE_NAME        = 7;  # v0.7.0: (?<x>...)(?<x>...)
 
 # === Compile-time globals ============================================
 
@@ -82,11 +102,17 @@ var _re2_pos = 0;
 var _re2_nfa = 0;
 var _re2_instr_base = 0;
 var _re2_class_base = 0;
+var _re2_name_base = 0;
 var _re2_instr_n = 0;
 var _re2_class_n = 0;
 var _re2_capture_n = 0;
+var _re2_name_n = 0;
 var _re2_err = 0;
 var _re2_last_err = 0;
+# v0.7.0 — inline-flag compile-time state (?i)/(?m)/(?s).
+var _re2_flag_i = 0;
+var _re2_flag_m = 0;
+var _re2_flag_s = 0;
 
 # Process-lifetime scratch (lazy-init).
 var _re2_m_init = 0;
@@ -128,7 +154,16 @@ fn _re2_emit_raw(w0, w1) {
 }
 
 fn _re2_emit_op(op)        { return _re2_emit_raw(op, 0); }
-fn _re2_emit_char(c)       { return _re2_emit_raw(RE2_OP_CHAR | (c << 8), 0); }
+fn _re2_emit_char(c) {
+    # v0.7.0 — under (?i) emit CHAR_CI; the matcher does case-fold.
+    var op = RE2_OP_CHAR;
+    if (_re2_flag_i == 1) { op = RE2_OP_CHAR_CI; }
+    # CHAR_CI stores the lower-case form to make the runtime check
+    # cheap (single fold of the input byte, compare to lowered want).
+    var stored = c;
+    if (_re2_flag_i == 1 && c >= 65 && c <= 90) { stored = c + 32; }
+    return _re2_emit_raw(op | (stored << 8), 0);
+}
 fn _re2_emit_class(neg, ci) {
     var op = RE2_OP_CLASS;
     if (neg == 1) { op = RE2_OP_NCLASS; }
@@ -248,7 +283,127 @@ fn _re2_class_fill_space(ci) {
     return 0;
 }
 
+# v0.7.0 — set `c` and (under (?i)) also its opposite-case ASCII letter.
+fn _re2_class_set_folded(ci, c) {
+    _re2_class_set(ci, c);
+    if (_re2_flag_i == 1) {
+        if (c >= 65 && c <= 90)   { _re2_class_set(ci, c + 32); }
+        elif (c >= 97 && c <= 122) { _re2_class_set(ci, c - 32); }
+    }
+    return 0;
+}
+
+fn _re2_class_range_folded(ci, lo, hi) {
+    var c = lo;
+    while (c <= hi) {
+        _re2_class_set_folded(ci, c);
+        c = c + 1;
+    }
+    return 0;
+}
+
+# === Named-capture name table (v0.7.0) ===============================
+# Mirrors niyama_pcre's scheme — same slot layout, same lookup ABI
+# shape so the cross-engine surface stays uniform.
+
+fn _re2_is_name_first(c) {
+    if (c >= 65 && c <= 90)  { return 1; }
+    if (c >= 97 && c <= 122) { return 1; }
+    if (c == 95)             { return 1; }
+    return 0;
+}
+fn _re2_is_name_rest(c) {
+    if (_re2_is_name_first(c) == 1) { return 1; }
+    if (c >= 48 && c <= 57)         { return 1; }
+    return 0;
+}
+
+fn _re2_add_name(group_idx, terminator) {
+    if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0 - 1; }
+    var first = load8(_re2_pat + _re2_pos);
+    if (_re2_is_name_first(first) == 0) { _re2_err = RE2_E_SYNTAX; return 0 - 1; }
+    var name_start = _re2_pos;
+    _re2_pos = _re2_pos + 1;
+    while (_re2_pos < _re2_pat_len && _re2_is_name_rest(load8(_re2_pat + _re2_pos)) == 1) {
+        _re2_pos = _re2_pos + 1;
+    }
+    var name_len = _re2_pos - name_start;
+    if (name_len > RE2_NAME_MAX_LEN) { _re2_err = RE2_E_TOO_LARGE; return 0 - 1; }
+    if (_re2_pos >= _re2_pat_len || load8(_re2_pat + _re2_pos) != terminator) {
+        _re2_err = RE2_E_SYNTAX; return 0 - 1;
+    }
+    _re2_pos = _re2_pos + 1;  # consume terminator (`>`)
+
+    # Duplicate-name detection.
+    var i = 0;
+    while (i < _re2_name_n) {
+        var slot = _re2_name_base + i * RE2_NAME_SLOT_SIZE;
+        var slot_len = 0;
+        while (slot_len < RE2_NAME_MAX_LEN && load8(slot + slot_len) != 0) {
+            slot_len = slot_len + 1;
+        }
+        if (slot_len == name_len) {
+            var k = 0;
+            var same = 1;
+            while (k < name_len) {
+                if (load8(slot + k) != load8(_re2_pat + name_start + k)) {
+                    same = 0;
+                    k = name_len;
+                }
+                k = k + 1;
+            }
+            if (same == 1) { _re2_err = RE2_E_DUPLICATE_NAME; return 0 - 1; }
+        }
+        i = i + 1;
+    }
+
+    if (_re2_name_n >= RE2_MAX_NAMES) { _re2_err = RE2_E_TOO_LARGE; return 0 - 1; }
+    var dst = _re2_name_base + _re2_name_n * RE2_NAME_SLOT_SIZE;
+    var k2 = 0;
+    while (k2 < name_len) {
+        store8(dst + k2, load8(_re2_pat + name_start + k2));
+        k2 = k2 + 1;
+    }
+    while (k2 < RE2_NAME_MAX_LEN + 1) {
+        store8(dst + k2, 0);
+        k2 = k2 + 1;
+    }
+    store64(dst + 32, group_idx);
+    _re2_name_n = _re2_name_n + 1;
+    return 0;
+}
+
 # === Pattern decoder =================================================
+
+# v0.7.0 — parse `(?...)` body when `...` is one or more of i/m/s.
+# Caller has consumed `(?` and `_re2_pos` is at the first flag char.
+# Returns 1 on success (flags applied + `)` consumed); 0 if the body
+# is not pure-flag (caller should treat as a different (?...) form).
+# Sets _re2_err on syntax error inside a recognized flag run.
+fn _re2_try_inline_flags() {
+    var p = _re2_pos;
+    # Quick check — first byte must be i/m/s for the entire form to be
+    # "(?<flags>)". Caller has already discriminated for `(?<`, `(?=`,
+    # `(?!`, `(?:`, `(?>`, `(?P`, `(?R`, so this is fine.
+    var first = load8(_re2_pat + p);
+    if (first != 105 && first != 109 && first != 115) { return 0; }
+    var fi = 0; var fm = 0; var fs = 0;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (p >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
+        var c = load8(_re2_pat + p);
+        if      (c == 105) { fi = 1; p = p + 1; }
+        elif    (c == 109) { fm = 1; p = p + 1; }
+        elif    (c == 115) { fs = 1; p = p + 1; }
+        elif    (c == 41)  { scanning = 0; }
+        else               { _re2_err = RE2_E_SYNTAX; return 0; }
+    }
+    _re2_pos = p + 1;  # consume `)`
+    if (fi == 1) { _re2_flag_i = 1; }
+    if (fm == 1) { _re2_flag_m = 1; }
+    if (fs == 1) { _re2_flag_s = 1; }
+    return 1;
+}
 
 fn _re2_lit_byte() {
     if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
@@ -345,9 +500,9 @@ fn _re2_parse_class() {
                     _re2_pos = _re2_pos + 1;
                     var hi = _re2_lit_byte();
                     if (_re2_err != RE2_E_OK) { return 0 - 1; }
-                    _re2_class_range(ci, lc, hi);
+                    _re2_class_range_folded(ci, lc, hi);
                 } else {
-                    _re2_class_set(ci, lc);
+                    _re2_class_set_folded(ci, lc);
                 }
             }
             first = 0;
@@ -359,9 +514,9 @@ fn _re2_parse_class() {
                 _re2_pos = _re2_pos + 1;
                 var hi2 = _re2_lit_byte();
                 if (_re2_err != RE2_E_OK) { return 0 - 1; }
-                _re2_class_range(ci, lc2, hi2);
+                _re2_class_range_folded(ci, lc2, hi2);
             } else {
-                _re2_class_set(ci, lc2);
+                _re2_class_set_folded(ci, lc2);
             }
             first = 0;
         }
@@ -388,23 +543,29 @@ fn _re2_parse_primary() {
     if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
     var c = load8(_re2_pat + _re2_pos);
     if (c == 46) {
+        # v0.7.0 — strict default: `.` excludes \n. `(?s)` flips to ANY.
         _re2_pos = _re2_pos + 1;
-        _re2_emit_op(RE2_OP_ANY);
+        if (_re2_flag_s == 1) { _re2_emit_op(RE2_OP_ANY); }
+        else                   { _re2_emit_op(RE2_OP_ANY_NONL); }
     }
     elif (c == 94) {
+        # v0.7.0 — strict default: `^` only at pos 0. `(?m)` flips to BOL.
         _re2_pos = _re2_pos + 1;
-        _re2_emit_op(RE2_OP_BOL);
+        if (_re2_flag_m == 1) { _re2_emit_op(RE2_OP_BOL); }
+        else                   { _re2_emit_op(RE2_OP_BOS); }
     }
     elif (c == 36) {
+        # v0.7.0 — strict default: `$` only at pos len. `(?m)` flips to EOL.
         _re2_pos = _re2_pos + 1;
-        _re2_emit_op(RE2_OP_EOL);
+        if (_re2_flag_m == 1) { _re2_emit_op(RE2_OP_EOL); }
+        else                   { _re2_emit_op(RE2_OP_EOS); }
     }
     elif (c == 40) {
         # `(` — group. Inspect for `(?...)` sub-syntax.
         _re2_pos = _re2_pos + 1;
         var capture_idx = 0 - 1;
         if (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) == 63) {
-            # `(?` — must be one of: `(?:` `(?=` `(?!` `(?<=` `(?<!` `(?<NAME>` `(?>` `(?P<NAME>` `(?P>NAME` `(?R)` ...
+            # `(?` — must be one of: `(?:` `(?=` `(?!` `(?<=` `(?<!` `(?<NAME>` `(?>` `(?P<NAME>` `(?P>NAME` `(?R)` `(?ims)` ...
             if (_re2_pos + 1 >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
             var n1 = load8(_re2_pat + _re2_pos + 1);
             # `(?:` non-capturing — allowed.
@@ -419,18 +580,21 @@ fn _re2_parse_primary() {
             }
             elif (n1 == 60) {
                 # (?<=...) lookbehind, (?<!...) negative lookbehind, OR
-                # (?<NAME>...) named capture.
+                # (?<NAME>...) named capture (v0.7.0).
                 if (_re2_pos + 2 >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
                 var n2 = load8(_re2_pat + _re2_pos + 2);
                 if (n2 == 61 || n2 == 33) {
                     _re2_err = RE2_E_LOOKAROUND_UNSUPPORTED;
                     return 0;
                 }
-                # `(?<NAME>...)` named capture — deferred per ADR 0003.
-                # Treat as syntax error so consumers know to switch to pcre
-                # at M3 (which will share the named-capture API surface).
-                _re2_err = RE2_E_SYNTAX;
-                return 0;
+                # (?<NAME>...) named capture.
+                _re2_pos = _re2_pos + 2;  # past `(?<`
+                _re2_capture_n = _re2_capture_n + 1;
+                if (_re2_capture_n > 9) { _re2_err = RE2_E_SYNTAX; return 0; }
+                _re2_add_name(_re2_capture_n, 62);  # terminator `>`
+                if (_re2_err != RE2_E_OK) { return 0; }
+                capture_idx = _re2_capture_n;
+                _re2_emit_save(capture_idx * 2);
             }
             elif (n1 == 62) {
                 # (?>...) atomic group
@@ -438,7 +602,7 @@ fn _re2_parse_primary() {
                 return 0;
             }
             elif (n1 == 80) {
-                # `(?P<NAME>` named capture or `(?P>NAME)` recursion.
+                # `(?P<NAME>` named capture (v0.7.0) or `(?P>NAME)` recursion.
                 if (_re2_pos + 2 >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
                 var p2 = load8(_re2_pat + _re2_pos + 2);
                 if (p2 == 62) {
@@ -446,20 +610,35 @@ fn _re2_parse_primary() {
                     _re2_err = RE2_E_RECURSION_UNSUPPORTED;
                     return 0;
                 }
-                # Anything else under (?P — named capture — deferred.
-                _re2_err = RE2_E_SYNTAX;
-                return 0;
+                if (p2 == 60) {
+                    # (?P<NAME>...) named capture.
+                    _re2_pos = _re2_pos + 3;  # past `(?P<`
+                    _re2_capture_n = _re2_capture_n + 1;
+                    if (_re2_capture_n > 9) { _re2_err = RE2_E_SYNTAX; return 0; }
+                    _re2_add_name(_re2_capture_n, 62);
+                    if (_re2_err != RE2_E_OK) { return 0; }
+                    capture_idx = _re2_capture_n;
+                    _re2_emit_save(capture_idx * 2);
+                } else {
+                    _re2_err = RE2_E_SYNTAX;
+                    return 0;
+                }
             }
             elif (n1 == 82) {
                 # (?R) — recursion
                 _re2_err = RE2_E_RECURSION_UNSUPPORTED;
                 return 0;
             }
+            elif (n1 == 105 || n1 == 109 || n1 == 115) {
+                # v0.7.0 — `(?i)` `(?m)` `(?s)` (and combinations).
+                _re2_pos = _re2_pos + 1;  # past `?`
+                _re2_try_inline_flags();
+                if (_re2_err != RE2_E_OK) { return 0; }
+                # Flags-only (?...) emits no instructions; do NOT fall
+                # through into alt parsing.
+                return 0;
+            }
             else {
-                # (?something_we_dont_recognize) — generic syntax error.
-                # Inline flags `(?i)` `(?m)` `(?s)` would land here; per ADR
-                # 0003 they're post-v1.0 work so they go through SYNTAX
-                # rather than a dedicated error code.
                 _re2_err = RE2_E_SYNTAX;
                 return 0;
             }
@@ -787,11 +966,14 @@ fn niyama_re2_compile(pat) {
     var n = strlen(pat);
     var instr_bytes = RE2_MAX_INSTRS * 16;
     var class_bytes = RE2_MAX_CLASSES * 32;
-    var nfa = alloc(RE2_NFA_HEADER_SIZE + instr_bytes + class_bytes);
+    var name_bytes  = RE2_MAX_NAMES * RE2_NAME_SLOT_SIZE;
+    var nfa = alloc(RE2_NFA_HEADER_SIZE + instr_bytes + class_bytes + name_bytes);
     var instrs = nfa + RE2_NFA_HEADER_SIZE;
     var classes = instrs + instr_bytes;
+    var names = classes + class_bytes;
     store64(nfa + RE2_OFF_INSTRS_OFF,  RE2_NFA_HEADER_SIZE);
     store64(nfa + RE2_OFF_CLASSES_OFF, RE2_NFA_HEADER_SIZE + instr_bytes);
+    store64(nfa + RE2_OFF_NAMES_OFF,   RE2_NFA_HEADER_SIZE + instr_bytes + class_bytes);
     store64(nfa + RE2_OFF_MATCH_START, 0 - 1);
     store64(nfa + RE2_OFF_MATCH_END,   0 - 1);
     var sv = 0;
@@ -799,15 +981,25 @@ fn niyama_re2_compile(pat) {
         store64(nfa + RE2_OFF_SAVES + sv * 8, 0 - 1);
         sv = sv + 1;
     }
+    var nb = 0;
+    while (nb < name_bytes) {
+        store8(names + nb, 0);
+        nb = nb + 1;
+    }
     _re2_pat = pat;
     _re2_pat_len = n;
     _re2_pos = 0;
     _re2_nfa = nfa;
     _re2_instr_base = instrs;
     _re2_class_base = classes;
+    _re2_name_base = names;
     _re2_instr_n = 0;
     _re2_class_n = 0;
     _re2_capture_n = 0;
+    _re2_name_n = 0;
+    _re2_flag_i = 0;
+    _re2_flag_m = 0;
+    _re2_flag_s = 0;
     _re2_err = RE2_E_OK;
     _re2_emit_save(0);
     _re2_parse_alt();
@@ -825,6 +1017,7 @@ fn niyama_re2_compile(pat) {
     store64(nfa + RE2_OFF_INSTR_COUNT, _re2_instr_n);
     store64(nfa + RE2_OFF_CLASS_COUNT, _re2_class_n);
     store64(nfa + RE2_OFF_CAPTURES,    _re2_capture_n);
+    store64(nfa + RE2_OFF_NAME_COUNT,  _re2_name_n);
     _re2_last_err = RE2_E_OK;
     return nfa;
 }
@@ -899,6 +1092,16 @@ fn _re2_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
         if (pos == input_len) { ok2 = 1; }
         elif (load8(input + pos) == 10) { ok2 = 1; }
         if (ok2 == 1) { _re2_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs); }
+    }
+    elif (op == RE2_OP_BOS) {
+        if (pos == 0) {
+            _re2_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
+    }
+    elif (op == RE2_OP_EOS) {
+        if (pos == input_len) {
+            _re2_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
     }
     elif (op == RE2_OP_BOUNDARY) {
         if (_re2_is_boundary(input, input_len, pos) == 1) {
@@ -979,12 +1182,40 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
                     _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
                 }
             }
+            elif (iop == RE2_OP_CHAR_CI) {
+                # v0.7.0 — case-insensitive char compare (ASCII fold).
+                # The stored byte is already lower-cased; fold the input.
+                var want_ci = (iw0 >> 8) & 0xFF;
+                if (c >= 0) {
+                    var c_fold = c;
+                    if (c >= 65 && c <= 90) { c_fold = c + 32; }
+                    if (c_fold == want_ci) {
+                        var ks_ci = 0;
+                        while (ks_ci < RE2_MAX_SAVES) {
+                            store64(saves_scratch + ks_ci * 8, load64(cur + 8 + ti * 168 + 8 + ks_ci * 8));
+                            ks_ci = ks_ci + 1;
+                        }
+                        _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    }
+                }
+            }
             elif (iop == RE2_OP_ANY) {
                 if (c >= 0) {
                     var ks3 = 0;
                     while (ks3 < RE2_MAX_SAVES) {
                         store64(saves_scratch + ks3 * 8, load64(cur + 8 + ti * 168 + 8 + ks3 * 8));
                         ks3 = ks3 + 1;
+                    }
+                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                }
+            }
+            elif (iop == RE2_OP_ANY_NONL) {
+                # v0.7.0 — strict default `.` excludes \n.
+                if (c >= 0 && c != 10) {
+                    var ks_nn = 0;
+                    while (ks_nn < RE2_MAX_SAVES) {
+                        store64(saves_scratch + ks_nn * 8, load64(cur + 8 + ti * 168 + 8 + ks_nn * 8));
+                        ks_nn = ks_nn + 1;
                     }
                     _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
                 }
@@ -1068,4 +1299,36 @@ fn niyama_re2_group_end(nfa, n) {
     if (nfa == 0)        { return 0 - 1; }
     if (n < 0 || n > 9)  { return 0 - 1; }
     return load64(nfa + RE2_OFF_SAVES + n * 16 + 8);
+}
+
+# v0.7.0 — look up a named-capture group index by name. Returns -1 if
+# not found. Same shape as niyama_pcre_group_by_name for cross-engine
+# uniformity.
+fn niyama_re2_group_by_name(nfa, name) {
+    if (nfa == 0) { return 0 - 1; }
+    var name_count = load64(nfa + RE2_OFF_NAME_COUNT);
+    var names_base = nfa + load64(nfa + RE2_OFF_NAMES_OFF);
+    var name_len = strlen(name);
+    var i = 0;
+    while (i < name_count) {
+        var slot = names_base + i * RE2_NAME_SLOT_SIZE;
+        var slot_len = 0;
+        while (slot_len < RE2_NAME_MAX_LEN && load8(slot + slot_len) != 0) {
+            slot_len = slot_len + 1;
+        }
+        if (slot_len == name_len) {
+            var k = 0;
+            var matched = 1;
+            while (k < name_len) {
+                if (load8(slot + k) != load8(name + k)) {
+                    matched = 0;
+                    k = name_len;
+                }
+                k = k + 1;
+            }
+            if (matched == 1) { return load64(slot + 32); }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
 }

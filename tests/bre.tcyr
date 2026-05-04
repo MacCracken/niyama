@@ -7,6 +7,7 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "src/posix_classes.cyr"
 include "src/bre.cyr"
 
 # Helpers — assert that pattern matches/doesn't-match input.
@@ -147,6 +148,59 @@ fn main() {
     test_group("search");
     assert_eq(t_search(".at", "the cat sat on the mat"), 4, "first .at match offset");
     assert_eq(t_search("[0-9]\\{3\\}", "abc 123 def"), 4, "search to digit triple");
+
+    # === GNU \< / \> word boundaries (v0.7.0) =========================
+    test_group("word-boundaries");
+    assert_eq(t_search("\\<word", "say word now"),  4, "\\< matches at word start");
+    assert_eq(t_search("\\<cat",  "concatenation"), 0 - 1, "\\< does NOT match mid-word");
+    assert_eq(t_search("word\\>", "say word now"),  4, "\\> matches at word end");
+    assert_eq(t_search("cat\\>",  "concatenate"),   0 - 1, "\\> does NOT match mid-word");
+    # \<word\> = full-word match
+    assert_eq(t_search("\\<is\\>", "this is here"), 5, "\\<...\\> requires both edges");
+    assert_eq(t_search("\\<is\\>", "thistle"),      0 - 1, "\\<...\\> rejects substring");
+    # Strict semantics (distinct from \b): \> at start-of-word should fail.
+    assert_eq(t_search("\\>word", "word"), 0 - 1, "\\> only fires at word END");
+    assert_eq(t_search("word\\<", "word"), 0 - 1, "\\< only fires at word START");
+    # Empty/edge cases.
+    assert_eq(t_search("\\<a\\>", "a"), 0, "\\<a\\> at single-char buffer");
+
+    # === POSIX bracket classes (v0.7.0) ===============================
+    test_group("posix-bracket-classes");
+    assert_eq(t_match("[[:alpha:]]",  "x"), 1, "[:alpha:] matches letter");
+    assert_eq(t_match("[[:alpha:]]",  "5"), 0, "[:alpha:] rejects digit");
+    assert_eq(t_match("[[:digit:]]",  "7"), 1, "[:digit:]");
+    assert_eq(t_match("[[:digit:]]",  "z"), 0, "[:digit:] rejects letter");
+    assert_eq(t_match("[[:alnum:]]",  "x"), 1, "[:alnum:] alpha");
+    assert_eq(t_match("[[:alnum:]]",  "9"), 1, "[:alnum:] digit");
+    assert_eq(t_match("[[:alnum:]]",  "_"), 0, "[:alnum:] rejects underscore");
+    assert_eq(t_match("[[:upper:]]",  "Z"), 1, "[:upper:]");
+    assert_eq(t_match("[[:upper:]]",  "z"), 0, "[:upper:] rejects lower");
+    assert_eq(t_match("[[:lower:]]",  "z"), 1, "[:lower:]");
+    assert_eq(t_match("[[:space:]]",  " "), 1, "[:space:] sp");
+    assert_eq(t_match("[[:space:]]",  "\t"), 1, "[:space:] tab");
+    assert_eq(t_match("[[:blank:]]",  " "), 1, "[:blank:] sp");
+    assert_eq(t_match("[[:blank:]]",  "\n"), 0, "[:blank:] excludes newline");
+    assert_eq(t_match("[[:cntrl:]]",  "\t"), 1, "[:cntrl:] tab");
+    assert_eq(t_match("[[:cntrl:]]",  "a"), 0, "[:cntrl:] rejects letter");
+    assert_eq(t_match("[[:graph:]]",  "x"), 1, "[:graph:]");
+    assert_eq(t_match("[[:graph:]]",  " "), 0, "[:graph:] excludes space");
+    assert_eq(t_match("[[:print:]]",  " "), 1, "[:print:] includes space");
+    assert_eq(t_match("[[:punct:]]",  "."), 1, "[:punct:]");
+    assert_eq(t_match("[[:xdigit:]]", "f"), 1, "[:xdigit:] f");
+    assert_eq(t_match("[[:xdigit:]]", "G"), 0, "[:xdigit:] rejects G");
+    # Combined: [[:alpha:][:digit:]] — same as [:alnum:]
+    assert_eq(t_match("[[:alpha:][:digit:]]", "5"), 1, "combined classes");
+    assert_eq(t_match("[[:alpha:][:digit:]]", "."), 0, "combined rejects punct");
+    # Negated.
+    assert_eq(t_match("[^[:digit:]]", "x"), 1, "[^[:digit:]] negated");
+    assert_eq(t_match("[^[:digit:]]", "5"), 0, "[^[:digit:]] negated rejects");
+    # Combined with literal char.
+    assert_eq(t_match("[_[:digit:]]", "_"), 1, "literal + posix class");
+    assert_eq(t_match("[_[:digit:]]", "9"), 1, "literal + posix class digit");
+    # Quantified.
+    assert_eq(t_match("[[:alpha:]]\\{3\\}", "xyz"), 1, "[:alpha:]{3}");
+    # Bad name -> SYNTAX.
+    assert_eq(t_err("[[:bogus:]]"), BRE_E_SYNTAX, "unknown class -> SYNTAX");
 
     # === DoS-resistant (Pike NFA, no backtracking) ====================
     test_group("dos-resistant");

@@ -8,6 +8,7 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "src/posix_classes.cyr"
 include "src/pcre.cyr"
 
 fn t_match(pat, input) {
@@ -167,26 +168,122 @@ fn main() {
     # Duplicate name rejection.
     assert_eq(t_err("(?<x>a)(?<x>b)"), PCRE_E_DUPLICATE_NAME, "dup name rejected");
 
-    # === Deferred-feature rejection ==================================
+    # === Deferred-feature rejection (still deferred post-v0.7.0) =====
     test_group("pcre-deferrals");
 
-    # Lookbehind deferred.
+    # Lookbehind deferred to v0.8.0.
     assert_eq(t_err("(?<=foo)bar"), PCRE_E_LOOKBEHIND_UNSUPPORTED, "(?<=) deferred");
     assert_eq(t_err("(?<!foo)bar"), PCRE_E_LOOKBEHIND_UNSUPPORTED, "(?<!) deferred");
 
-    # Unicode property classes deferred.
+    # Unicode property classes deferred to v0.9.0.
     assert_eq(t_err("\\p{L}"), PCRE_E_UNICODE_PROP_UNSUPPORTED, "\\p{L} deferred");
     assert_eq(t_err("[\\p{L}]"), PCRE_E_UNICODE_PROP_UNSUPPORTED, "[\\p{L}] deferred");
 
-    # Recursion deferred.
+    # Recursion deferred to v0.8.0.
     assert_eq(t_err("(?R)"), PCRE_E_RECURSION_UNSUPPORTED, "(?R) deferred");
     assert_eq(t_err("(?P>name)"), PCRE_E_RECURSION_UNSUPPORTED, "(?P>name) deferred");
 
-    # Conditional patterns deferred.
-    assert_eq(t_err("(?(1)yes|no)"), PCRE_E_CONDITIONAL_UNSUPPORTED, "(?(...)) deferred");
+    # === POSIX bracket classes (v0.7.0) ==============================
+    test_group("pcre-posix-classes");
+    assert_eq(t_match("[[:alpha:]]+",  "Hello"),  1, "[:alpha:]+");
+    assert_eq(t_match("[[:digit:]]+",  "12345"),  1, "[:digit:]+");
+    assert_eq(t_match("[[:alnum:]]+",  "abc123"), 1, "[:alnum:]+");
+    assert_eq(t_match("[[:space:]]",   " "),      1, "[:space:]");
+    assert_eq(t_match("[[:xdigit:]]+", "deadBEEF"), 1, "[:xdigit:]+ mixed-case hex");
+    assert_eq(t_match("[^[:digit:]]+", "abc"),    1, "[^[:digit:]]+ negated");
+    assert_eq(t_match("[[:alpha:][:digit:]_]+", "var_5"), 1, "combined classes + literal");
+    assert_eq(t_err("[[:bogus:]]"), PCRE_E_SYNTAX, "unknown class -> SYNTAX");
 
-    # Inline flags — generic SYNTAX (post-v1.0).
-    assert_eq(t_err("(?i)foo"), PCRE_E_SYNTAX, "(?i) syntax err");
+    # === Inline flags (v0.7.0) =======================================
+    test_group("pcre-inline-flags");
+    # (?i) — case-insensitive.
+    assert_eq(t_match("(?i)hello",    "HELLO"),  1, "(?i) literal upper");
+    assert_eq(t_match("(?i)Hello",    "heLLo"),  1, "(?i) literal mixed");
+    assert_eq(t_match("(?i)[a-z]+",   "ABC"),    1, "(?i) class fold");
+    assert_eq(t_match("(?i)hello",    "world"),  0, "(?i) still discriminates");
+    # (?s) — dot matches \n.
+    assert_eq(t_search(".",     "\n"),       0 - 1, "default `.` excludes \\n");
+    assert_eq(t_search("(?s).", "\n"),       0,     "(?s) `.` matches \\n");
+    # (?m) — `^`/`$` multi-line.
+    assert_eq(t_search("^foo",     "bar\nfoo"), 0 - 1, "default `^` strict");
+    assert_eq(t_search("(?m)^foo", "bar\nfoo"), 4,     "(?m) `^` after \\n");
+    assert_eq(t_search("foo$",     "foo\nbar"), 0 - 1, "default `$` strict");
+    assert_eq(t_search("(?m)foo$", "foo\nbar"), 0,     "(?m) `$` before \\n");
+    # Combined (?ims).
+    assert_eq(t_match("(?ims)HELLO.WORLD", "hello\nworld"), 1, "(?ims) compiles + matches");
+    # Unknown flag char rejected.
+    assert_eq(t_err("(?x)foo"), PCRE_E_SYNTAX, "unknown flag rejected");
+
+    # === Strict-anchor / strict-dot defaults (v0.7.0) ================
+    test_group("pcre-strict-defaults");
+    assert_eq(t_search("^second", "first\nsecond"), 0 - 1, "^ no longer matches after \\n by default");
+    assert_eq(t_search("first$",  "first\nsecond"), 0 - 1, "$ no longer matches before \\n by default");
+    assert_eq(t_search("a.b",     "a\nb"),          0 - 1, ". no longer matches \\n by default");
+
+    # === \K reset-match-start (v0.7.0) ===============================
+    test_group("pcre-K");
+    var nfa_K = niyama_pcre_compile("foo\\Kbar");
+    assert_neq(nfa_K, 0, "\\K compiles");
+    assert_eq(niyama_pcre_search(nfa_K, "foobar"),       0, "\\K search returns natural start");
+    # Group 0 should start at the \K position (3) and end at full match (6).
+    assert_eq(niyama_pcre_group_start(nfa_K, 0),         3, "\\K resets group-0 start");
+    assert_eq(niyama_pcre_group_end(nfa_K, 0),           6, "\\K leaves group-0 end intact");
+
+    # === Branch-reset groups (?|...) (v0.7.0) ========================
+    test_group("pcre-branch-reset");
+    # (?|(a)|(b)) — both alternatives use group 1.
+    var nfa_br1 = niyama_pcre_compile("(?|(a)|(b))");
+    assert_neq(nfa_br1, 0, "(?|...) compiles");
+    assert_eq(niyama_pcre_match(nfa_br1, "a"), 1, "(?|...) matches first alt");
+    assert_eq(niyama_pcre_group_start(nfa_br1, 1), 0, "alt1 captured group 1");
+    assert_eq(niyama_pcre_match(nfa_br1, "b"), 1, "(?|...) matches second alt");
+    assert_eq(niyama_pcre_group_start(nfa_br1, 1), 0, "alt2 reused group 1");
+    # (?|(a)(b)|(c)(d)) — both alternatives use groups 1 and 2.
+    var nfa_br2 = niyama_pcre_compile("(?|(a)(b)|(c)(d))");
+    assert_neq(nfa_br2, 0, "(?|...) two-cap compiles");
+    assert_eq(niyama_pcre_match(nfa_br2, "ab"), 1, "(?|...) two-cap match alt1");
+    assert_eq(niyama_pcre_group_end(nfa_br2, 2), 2, "alt1 group 2 = b");
+    assert_eq(niyama_pcre_match(nfa_br2, "cd"), 1, "(?|...) two-cap match alt2");
+    assert_eq(niyama_pcre_group_end(nfa_br2, 2), 2, "alt2 group 2 = d (reused slot)");
+
+    # === Conditional patterns (?(cond)yes|no) (v0.7.0) ===============
+    test_group("pcre-conditional");
+    # (a)?(?(1)yes|no) — if group 1 captured, expect "yes", else "no".
+    var nfa_cond1 = niyama_pcre_compile("(a)?(?(1)yes|no)");
+    assert_neq(nfa_cond1, 0, "(?(N)yes|no) compiles");
+    assert_eq(niyama_pcre_match(nfa_cond1, "ayes"), 1, "cond YES branch");
+    assert_eq(niyama_pcre_match(nfa_cond1, "no"),   1, "cond NO branch");
+    assert_eq(niyama_pcre_match(nfa_cond1, "ano"),  0, "group 1 took, but NO branch chosen -> fail");
+    # No-else form: (a)?(?(1)yes)
+    var nfa_cond2 = niyama_pcre_compile("(a)?(?(1)yes)");
+    assert_neq(nfa_cond2, 0, "(?(N)yes) no-else compiles");
+    assert_eq(niyama_pcre_match(nfa_cond2, "ayes"), 1, "no-else YES branch");
+    assert_eq(niyama_pcre_match(nfa_cond2, ""),     1, "no-else falls through to empty match");
+    # Named-group reference: (?<x>a)?(?(<x>)yes|no)
+    var nfa_cond3 = niyama_pcre_compile("(?<x>a)?(?(<x>)yes|no)");
+    assert_neq(nfa_cond3, 0, "(?(<NAME>)) compiles");
+    assert_eq(niyama_pcre_match(nfa_cond3, "ayes"), 1, "named-cond YES");
+    assert_eq(niyama_pcre_match(nfa_cond3, "no"),   1, "named-cond NO");
+    # Bad condition rejected.
+    assert_eq(t_err("(?(?:foo)yes)"), PCRE_E_BAD_CONDITION, "non-numeric/named cond -> BAD_CONDITION");
+    assert_eq(t_err("(?(<missing>)yes)"), PCRE_E_BAD_CONDITION, "unknown name in cond rejected");
+
+    # === Callouts (?C) and (?C123) (v0.7.0) ==========================
+    test_group("pcre-callout");
+    var nfa_co = niyama_pcre_compile("foo(?C)bar");
+    assert_neq(nfa_co, 0, "(?C) compiles");
+    assert_eq(niyama_pcre_match(nfa_co, "foobar"),    1, "(?C) doesn't break match");
+    assert_eq(niyama_pcre_last_callout(),             0, "(?C) records callout 0");
+    var nfa_co2 = niyama_pcre_compile("foo(?C42)bar");
+    assert_neq(nfa_co2, 0, "(?C42) compiles");
+    assert_eq(niyama_pcre_match(nfa_co2, "foobar"),   1, "(?C42) doesn't break match");
+    assert_eq(niyama_pcre_last_callout(),             42, "(?C42) records callout 42");
+    # No callout reached -> -1.
+    var nfa_co3 = niyama_pcre_compile("foo");
+    assert_neq(nfa_co3, 0, "no-callout pattern compiles");
+    assert_eq(niyama_pcre_match(nfa_co3, "foo"),      1, "no-callout match works");
+    assert_eq(niyama_pcre_last_callout(),             0 - 1, "no callout -> -1");
+    assert_eq(t_err("(?C500)"), PCRE_E_SYNTAX, "callout > 255 rejected");
 
     # === Generic syntax errors =======================================
     test_group("pcre-syntax");

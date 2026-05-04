@@ -4,6 +4,115 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-03
+
+M4.5 first-of-three catch-up release: the no-Unicode-dep slice. Per
+ADR 0007, eight features land across bre/re2/pcre, all sharing one
+small new module `src/posix_classes.cyr`. Lookbehind + pcre
+recursion remain deferred to v0.8.0; Unicode work to v0.9.0.
+
+### Added
+
+- **`src/posix_classes.cyr`** — shared ASCII fillers + name
+  recognizer for the 12 POSIX bracket classes (`alpha`, `digit`,
+  `space`, `upper`, `lower`, `alnum`, `blank`, `cntrl`, `graph`,
+  `print`, `punct`, `xdigit`). Used by bre + pcre. (vim still
+  carries an in-engine copy from M4 — folding is a v0.9.0
+  cleanup.)
+- **niyama_bre**:
+  - GNU `\<` / `\>` word boundaries with **strict** semantics —
+    distinct from `\b`. Two new opcodes `BRE_OP_WORDBEGIN` (= 10)
+    and `BRE_OP_WORDEND` (= 11). Matches `grep -G` traditional
+    behavior.
+  - POSIX bracket classes `[[:alpha:]]` etc. via the shared
+    module. Unknown class names → `BRE_E_SYNTAX`.
+- **niyama_re2**:
+  - Named captures `(?<NAME>...)` and `(?P<NAME>...)` with
+    `niyama_re2_group_by_name(nfa, name)` lookup. Mirrors the
+    pcre name-table mechanism (40-byte slots, 9-name max).
+  - Inline flags `(?i)`, `(?m)`, `(?s)` and combinations
+    (e.g. `(?ims)`). Pattern-wide effect from declaration onward.
+  - Four new opcodes — `RE2_OP_CHAR_CI` (= 12), `RE2_OP_BOS`
+    (= 13), `RE2_OP_EOS` (= 14), `RE2_OP_ANY_NONL` (= 15).
+  - New error code `RE2_E_DUPLICATE_NAME = 7` (next-available;
+    M2-frozen codes 0..6 unchanged).
+- **niyama_pcre**:
+  - POSIX bracket classes via the shared module.
+  - Inline flags `(?i)`, `(?m)`, `(?s)` + combinations.
+  - `\K` reset-match-start — emits `SAVE 0`, overrides implicit
+    match-start save (same mechanism as vim's `\zs`).
+  - Branch-reset groups `(?|...)` — alternatives reuse capture
+    numbers.
+  - Conditional patterns `(?(N)yes|no)` and `(?(<NAME>)yes|no)`
+    via new opcode `PCRE_OP_COND` (= 22). Matcher consults saves
+    array at runtime to dispatch.
+  - Callouts `(?C)` and `(?C<num>)` — observability only via new
+    opcode `PCRE_OP_CALLOUT` (= 23) and
+    `niyama_pcre_last_callout()` accessor. No callback API.
+  - Six new opcodes total (`PCRE_OP_CHAR_CI` = 18,
+    `PCRE_OP_BOS` = 19, `PCRE_OP_EOS` = 20,
+    `PCRE_OP_ANY_NONL` = 21, `PCRE_OP_COND` = 22,
+    `PCRE_OP_CALLOUT` = 23).
+  - New error code `PCRE_E_BAD_CONDITION = 8` for unrecognized
+    condition forms or unknown named references in
+    `(?(...)...)`. The `PCRE_E_CONDITIONAL_UNSUPPORTED = 5`
+    slot is **frozen but no longer emitted** — kept reserved per
+    ABI freeze rules.
+- ADR 0007 — records the v0.7.0 carve, what's in vs. deferred,
+  the strict-default behavior change, and the cross-engine
+  uniformity gains.
+- Tests — 121 new assertions across `tests/{bre,re2,pcre}.tcyr`:
+  bre word boundaries (9), bre POSIX classes (28), re2 named
+  captures (12), re2 inline flags (12), re2 strict defaults (3),
+  pcre POSIX classes (8), pcre inline flags (12), pcre strict
+  defaults (3), pcre `\K` (4), pcre branch-reset (8), pcre
+  conditional (10), pcre callout (8), plus a handful of supporting
+  assertions. Aggregate test count: 362 → 483.
+- Fuzz — 22 new assertions across
+  `fuzz/{bre,re2,pcre}.fcyr`: extended pattern alphabets to
+  exercise the new parser branches (POSIX bracket bodies, inline
+  flags, named captures, branch-reset, conditional, callout) and
+  invariant checks on duplicate-name rejection (re2 + pcre) and
+  bad-condition rejection (pcre). Aggregate fuzz count: 1636 →
+  1658.
+
+### Changed
+
+- **niyama_re2 BEHAVIOR CHANGE** — `^`, `$`, and `.` are now
+  **strict-by-default** (RE2-spec compliant). `^` matches only at
+  pos 0; `$` only at pos len; `.` excludes `\n`. Multi-line
+  semantics require `(?m)`; dot-matches-newline requires `(?s)`.
+  Pre-v0.7.0 implementations were silently loose. Existing tests
+  didn't exercise distinguishing inputs (no `\n`), so no test
+  regressed; downstream consumers relying on loose semantics will
+  see the change. Pre-surface-freeze (M5) is the right time to
+  fix this; M5 freezes semantics until v1.0.
+- **niyama_pcre BEHAVIOR CHANGE** — same strict-default fix as re2,
+  for the same reason. PCRE-spec compliant.
+- niyama_bre's bracket parser routed through the shared
+  `_posix_match_class_name` recognizer instead of falling through
+  to syntax error on `[[:` prefixes.
+- niyama_pcre's bracket parser routed through the shared
+  `_posix_match_class_name` recognizer; previously rejected
+  POSIX-class brackets with `PCRE_E_SYNTAX`.
+- `RE2_NFA_HEADER_SIZE` extended 216 → 256 to make room for the
+  name-table offset/count words at offsets 216/224.
+- `dist/niyama.cyr` bundle now includes
+  `src/posix_classes.cyr` ahead of the engine modules.
+
+### Notes
+
+- niyama_bre and niyama_vim **keep their pre-v0.7.0 loose
+  defaults** for `^`/`$`/`.` (vim is loose by spec; POSIX BRE
+  matches `grep` traditional behavior). The strict-default fix is
+  re2/pcre-only.
+- Backreferences `\1`-`\9` in bre and vim **remain rejected**
+  per the explicit M1/M4 "potentially post-v1.0; document, don't
+  skip" calls. Not revisited in v0.7.0.
+- `(?-i)` negated inline flags and `(?i:...)` scoped forms are
+  out of scope; the `(?ims)` pattern-wide spelling covers ~95%
+  of real-world use.
+
 ## [0.6.0] — 2026-05-03
 
 M4 — fifth and final pre-catch-up engine: vim (`niyama_vim_*`).
