@@ -81,23 +81,25 @@ real consumer demand vs. implementation complexity vs. CVE history.
 | Possessive quantifiers `*+`, `++`, `?+`, `{n,m}+` | Equivalent to atomic-wrapping. |
 | Step-limit guard (configurable, default 1M) | Catastrophic-backtracking mitigation. |
 
-**Deferred from M3 — post-v1.0 unless a consumer asks:**
+**Deferred from M3 to v0.9.0 (M4.5 catch-up):**
 
-| Feature | Why deferred |
+| Feature | Why deferred to catch-up |
 |---|---|
-| Lookbehind `(?<=...)` `(?<!...)` | Needs compile-time width analysis (PCRE2 requires fixed-width; only relaxed in 10.43); adds parser complexity disproportionate to demand. M3.5 candidate if a consumer asks. |
-| Unicode property classes `\p{L}` etc. | Requires a Unicode database (~50KB+ generated table). Big complexity for a feature with narrow demand in AGNOS-lineage consumers (we're ASCII-heavy). |
-| POSIX bracket classes `[:alpha:]` etc. | Deferred to M4 (vim flavor inherits the same semantics — implement once). |
-| Conditional patterns `(?(cond)yes|no)` | Uncommon; adds matcher complexity. |
-| Recursion / subroutine calls `(?R)`, `(?P>name)`, `(?N)` | Uncommon; non-regular by design. |
-| Inline flags `(?i)` `(?m)` `(?s)` | Post-v1.0; needs case-folding tables for `(?i)` to do meaningful work. |
-| Branch-reset groups `(?\|...)` | Uncommon. |
-| Callouts `(?C)` | Uncommon; runtime-callback feature. |
-| `\K` reset-match-start | Uncommon. |
+| Lookbehind `(?<=...)` `(?<!...)` | Needs compile-time width analysis (PCRE2 requires fixed-width; only relaxed in 10.43); adds parser complexity disproportionate to M3 fit. v0.9.0 ships fixed-width lookbehind. |
+| Unicode property classes `\p{L}` etc. | Requires a Unicode database (~25KB generated table). v0.9.0 ships the shared table used by re2/pcre/fuzzy/vim. |
+| POSIX bracket classes `[:alpha:]` etc. | Shared with vim flavor — implement once at v0.9.0, reuse across bre/pcre/vim. |
+| Conditional patterns `(?(cond)yes|no)` | Adds matcher complexity; v0.9.0 catch-up. |
+| Recursion / subroutine calls `(?R)`, `(?P>name)`, `(?N)` | Subroutine call into the same compiled NFA; v0.9.0. |
+| Inline flags `(?i)` `(?m)` `(?s)` | Needs case-folding (shared with re2 inline flags). v0.9.0. |
+| Branch-reset groups `(?\|...)` | v0.9.0. |
+| Callouts `(?C)` | Runtime-callback feature; v0.9.0. |
+| `\K` reset-match-start | v0.9.0. |
 
-The deferral list is long. That's the point — M3 is "PCRE-light"
-covering the consumer-asked features, not "PCRE-complete". Future
-ADRs (0008+) extend the surface as demand surfaces.
+The deferral list is long. M3 ships "PCRE-light" — the
+consumer-asked subset that fits cleanly in one milestone. The
+v0.9.0 catch-up release closes the gap before M5 freeze, so the
+surface that gets frozen is the surface the roadmap promised, not
+a trimmed subset.
 
 ## Decision
 

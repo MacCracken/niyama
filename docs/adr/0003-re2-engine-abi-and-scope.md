@@ -46,13 +46,13 @@ Three open questions had to land before code:
 
 3. **Named captures `(?P<name>...)`?** Real RE2 supports them.
    niyama_bre at M1 only has positional captures (1..9) per ADR
-   0002's stdlib-mirroring shape. Adding named-capture support would
-   be a cross-engine surface change — the `niyama_<flavor>_group_*`
-   ABI would need a name-resolution arm. Decision: defer named
-   captures to **post-M3 (after pcre lands)** — pcre is the engine
-   most consumers expect named captures from, and consolidating
-   the named-capture API surface across re2 + pcre at M3 avoids
-   shipping it twice.
+   0002's stdlib-mirroring shape. Adding named-capture support
+   would be a cross-engine surface change — the
+   `niyama_<flavor>_group_*` ABI would need a name-resolution arm.
+   Initial decision: defer named captures to consolidate the
+   named-capture API surface across re2 + pcre. The pcre
+   implementation landed at M3 (per ADR 0004); the re2 catch-up
+   reusing that mechanism is part of v0.9.0 (M4.5 catch-up).
 
 ## Decision
 
@@ -97,9 +97,9 @@ niyama_bre ABI shape from ADR 0002.** Concretely:
 | **`(?<=...)` `(?<!...)` lookbehind** | **rejected at compile** | `RE2_E_LOOKAROUND_UNSUPPORTED` (= 3). |
 | **`(?>...)` atomic groups** | **rejected at compile** | `RE2_E_ATOMIC_UNSUPPORTED` (= 4). |
 | **`(?R)` `(?P>name)` recursion / subroutine calls** | **rejected at compile** | `RE2_E_RECURSION_UNSUPPORTED` (= 5). |
-| `(?P<name>...)` named captures | not shipped (deferred) | Post-M3 surface decision — consolidate niyama_re2 + niyama_pcre named-capture API together. |
-| Unicode property classes `\p{L}` | not shipped | M2 is ASCII-only; UTF-8 awareness is a per-engine flag deferred to post-v1.0 unless a consumer asks. |
-| Inline flags `(?i)` `(?m)` `(?s)` | not shipped | Same posture as Unicode: post-v1.0 unless asked. |
+| `(?P<name>...)` named captures | deferred to v0.9.0 (M4.5 catch-up) | Consolidates with niyama_pcre's named-capture mechanism (ADR 0004). |
+| Unicode property classes `\p{L}` | deferred to v0.9.0 (M4.5 catch-up) | Shared Unicode decomposition + property table across re2/pcre/fuzzy/vim. |
+| Inline flags `(?i)` `(?m)` `(?s)` | deferred to v0.9.0 (M4.5 catch-up) | Case-fold + multiline + single-line matcher flags. |
 
 ### Linear-time guarantee — what it actually means
 
@@ -168,8 +168,10 @@ crosses engine boundaries.
   catastrophic-backtracking-class inputs included. Each must
   compile + match in linear time. This is more stringent than
   fuzz/bre.fcyr (which mostly checked compile-doesn't-crash).
-- **Unicode + inline flags deferred.** Documented above. If a
-  consumer asks, separate ADR + post-v1.0 work.
+- **Unicode + inline flags deferred to v0.9.0 (M4.5 catch-up).**
+  Documented above. Cross-engine Unicode table shared with
+  pcre/fuzzy/vim; inline flags share case-fold mechanism with
+  pcre.
 
 ## Alternatives considered
 

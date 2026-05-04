@@ -70,16 +70,13 @@ For M3.5 scope:
   table cost. ≥90% of consumer use cases are ASCII (filenames,
   command names, shell history) per the AGNOS-lineage consumer
   set.
-- **Unicode NFD normalization**: deferred to post-v1.0 unless a
-  consumer asks. Adding NFD requires shipping a ~25KB Unicode
-  decomposition table; for ASCII-heavy AGNOS consumers, that's
-  cost without benefit. The roadmap mentions Unicode-awareness as
-  initial-scope; deferring it here is a deliberate scope cut on
-  the "consumer demand isn't there yet" rationale.
+- **Unicode NFD normalization**: deferred to v0.9.0 (M4.5 catch-up).
+  Adding NFD requires shipping a ~25KB Unicode decomposition
+  table; v0.9.0 ships the shared table used by re2/pcre/fuzzy/vim,
+  so fuzzy's NFD lands alongside.
 
-If/when Unicode-aware fuzzy matching is needed, it lands as a new
-flag (`FUZZY_FLAG_UNICODE_NFD`) plus the decomposition table; ABI
-stays compatible.
+`FUZZY_FLAG_UNICODE_NFD` ships at v0.9.0 with the shared Unicode
+decomposition table. ABI stays compatible — additions only.
 
 ## Decision
 
@@ -141,10 +138,9 @@ Numeric values frozen. Future additions get new codes.
 The substring-fuzzy DP gives us the **end** position of the best
 match for free. Recovering the exact **start** position requires
 either backtracking through the DP (extra memory) or running a
-second DP on reversed strings. For M3.5 simplicity, `_search`
-returns `end - len(pat)` clamped to `[0, slen)` as the start
-heuristic. Consumers who need exact start positions can run a
-second match-and-track. M5 may revisit if a consumer asks.
+second DP on reversed strings. M3.5 ships the heuristic
+(`end - len(pat)` clamped); v0.9.0 (M4.5 catch-up) ships the
+exact start via reverse-DP pass.
 
 ## Consequences
 
@@ -163,10 +159,10 @@ second match-and-track. M5 may revisit if a consumer asks.
 
 - **No Unicode** in M3.5. Real fuzzy matching often wants `é ≈ e`,
   Cyrillic-Latin lookalike detection, etc. Documented deferral.
-  Mitigation: add `FUZZY_FLAG_UNICODE_NFD` post-v1.0 if asked.
-- **Approximate start position** for `_search` — see above. Most
-  consumer use cases (highlight-the-match) don't actually need
-  pixel-exact starts; the heuristic is good enough.
+  v0.9.0 (M4.5 catch-up) ships `FUZZY_FLAG_UNICODE_NFD` with the
+  shared Unicode decomposition table.
+- **Approximate start position** for `_search` — heuristic in
+  M3.5; exact-start via reverse-DP at v0.9.0 (M4.5 catch-up).
 
 ### Neutral
 
@@ -191,12 +187,13 @@ second match-and-track. M5 may revisit if a consumer asks.
   `niyama_fuzzy_search(_, _, MODE_PREFIX)` would have to look up
   what mode does what every time. Three named functions cost two
   more entry points and zero ambiguity.
-- **Ship Unicode NFD in M3.5.** Rejected — Unicode decomposition
-  table is ~25KB, ASCII consumers don't benefit, and the
-  AGNOS-lineage consumer set is ASCII-heavy. Reconsider when a
-  Unicode-needing consumer materializes.
-- **Ship exact start-position recovery in M3.5.** Rejected for
-  scope creep; the heuristic covers ≥90% of consumer use cases.
+- **Ship Unicode NFD in M3.5.** Rejected for M3.5 — Unicode
+  decomposition table is ~25KB, would have made M3.5 the milestone
+  introducing the cross-engine Unicode dependency. Rolled into
+  v0.9.0 catch-up where re2/pcre/fuzzy/vim share one table.
+- **Ship exact start-position recovery in M3.5.** Rejected for M3.5
+  scope; the heuristic covers ≥90% of consumer use cases. v0.9.0
+  catch-up ships exact-start via reverse-DP pass.
 
 ## References
 

@@ -71,9 +71,9 @@ backrefs explicitly at compile time.** Concretely:
 | `[...]` / `[^...]` char classes, `[a-z]` ranges | yes | POSIX bracket-expression body; bracket classes `[:alpha:]` etc. deferred to M4 (vim) reuse |
 | Escapes `\.` `\*` `\\` `\n` `\t` etc. | yes | |
 | `\1`-`\9` backreferences | **rejected at compile** | Returns `0` from compile; `niyama_bre_last_error()` → `BRE_E_BACKREF_UNSUPPORTED` (= 2). See § Backref rejection. |
-| GNU `\<` / `\>` word boundaries | deferred to M4 (vim) | Not strict POSIX; vim flavor inherits the same semantics |
+| GNU `\<` / `\>` word boundaries | deferred to v0.9.0 (M4.5 catch-up) | Not strict POSIX; vim flavor inherits the same semantics — implement once at v0.9.0, reuse across bre/vim |
 | `\d` / `\w` / `\s` / `\b` (ERE-style) | not shipped | Not POSIX BRE; stdlib `regex_*` covers ERE-ish callers |
-| Bracket POSIX classes `[:alpha:]` etc. | deferred to M4 | Vim flavor needs them too — implement once, reuse |
+| Bracket POSIX classes `[:alpha:]` etc. | deferred to v0.9.0 (M4.5 catch-up) | Shared with pcre/vim implementations |
 
 ### Backref rejection
 
@@ -130,18 +130,23 @@ get new codes; existing codes do not change meaning.
   stdlib's `_re_err` model). Acceptable for M1 — niyama is
   single-threaded use today; threadsafe error reporting becomes a
   P(-1) concern at M5 if a consumer needs it.
-- **GNU `\<` / `\>` deferred to M4 (vim).** vim's word-boundary
-  semantics are the same as GNU's; implementing once in vim and
-  having BRE call into it (or copy the implementation) is cleaner
-  than two parallel codepaths. M5 cross-engine refactor will
-  consolidate.
+- **GNU `\<` / `\>` deferred to v0.9.0 (M4.5 catch-up).** vim's
+  word-boundary semantics are the same as GNU's; implementing once
+  in vim and having BRE call into it (or copy the implementation)
+  is cleaner than two parallel codepaths. v0.9.0 catch-up ships
+  the shared implementation across bre/vim.
 
-## Future scope (post-v1.0)
+## Future scope
 
-Backref support in niyama_bre is **possible** but not committed. If
-a consumer materializes who needs POSIX-strict BRE *with* backrefs
-(distinct from "wants a Perl-compat regex" — that's PCRE's
-territory), the path is:
+Backref support in niyama_bre is **possible** but not committed.
+The user's M1 scoping call was "potentially post-v1.0; document,
+don't skip". The v0.9.0 (M4.5 catch-up) milestone is a natural
+revisit point — backref could land there if the user opts in
+during catch-up planning, or stay post-v1.0 per the original call.
+
+If a consumer materializes who needs POSIX-strict BRE *with*
+backrefs (distinct from "wants a Perl-compat regex" — that's
+PCRE's territory), the path is:
 
 1. New ADR (`0007-bre-backref-support.md` or similar) recording
    the consumer + the design (separate backtracking matcher

@@ -1,0 +1,140 @@
+# fuzz/vim.fcyr — niyama_vim fuzz harness.
+#
+# Mode-coverage fuzz: every random pattern is tested across all four
+# magicness modes. Pike NFA is structurally linear-time so we don't
+# need timeout protection. Asserts: no crash, search returns int,
+# rejection invariants hold.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/vim.cyr"
+
+var _rng_state = 0xBADC0FFE;
+fn rng() {
+    var x = _rng_state;
+    x = x ^ (x << 13);
+    x = x & 0xFFFFFFFF;
+    x = x ^ (x >> 17);
+    x = x ^ (x << 5);
+    x = x & 0xFFFFFFFF;
+    _rng_state = x;
+    return x;
+}
+
+# vim-flavor random-pattern alphabet — heavy on metachars + backslash
+# forms to exercise per-mode dispatch.
+fn gen_pat(buf, n) {
+    var alphabet = "abc.*+?[]()|\\<>zsexdwsm{},^$012";
+    var alen = strlen(alphabet);
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var idx = r - (r / alen) * alen;
+        if (idx < 0) { idx = 0 - idx; }
+        store8(buf + i, load8(alphabet + idx));
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn gen_input(buf, n) {
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var c = r - (r / 26) * 26;
+        if (c < 0) { c = 0 - c; }
+        store8(buf + i, 97 + c);
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn fuzz_one(pat_buf, in_buf, mode) {
+    var nfa = niyama_vim_compile_opts(pat_buf, mode);
+    if (nfa == 0) {
+        var e = niyama_vim_last_error();
+        assert(e != VIM_E_OK, "compile-fail-returns-error");
+        return 0;
+    }
+    var r = niyama_vim_search(nfa, in_buf);
+    assert(r >= 0 - 1, "search-returns-int");
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("vim-fuzz");
+
+    # === Smoke corpus — known-tricky vim patterns =====================
+
+    fuzz_one("\\(foo\\)", "foo", VIM_MODE_MAGIC);
+    fuzz_one("(foo)", "foo", VIM_MODE_VERY_MAGIC);
+    fuzz_one("foo\\zsbar", "foobar", VIM_MODE_MAGIC);
+    fuzz_one("foo\\zebar", "foobar", VIM_MODE_MAGIC);
+    fuzz_one("[[:alpha:]]\\+", "hello", VIM_MODE_MAGIC);
+    fuzz_one("\\<word\\>", "the word here", VIM_MODE_MAGIC);
+    fuzz_one("a\\{2,5\\}", "aaa", VIM_MODE_MAGIC);
+    fuzz_one("a\\{-2,5\\}", "aaaa", VIM_MODE_MAGIC);
+
+    # Cross-mode: same pattern in all four modes — most will compile or
+    # reject cleanly.
+    var test_pat = "abc";
+    fuzz_one(test_pat, "abc", VIM_MODE_VERY_MAGIC);
+    fuzz_one(test_pat, "abc", VIM_MODE_MAGIC);
+    fuzz_one(test_pat, "abc", VIM_MODE_NOMAGIC);
+    fuzz_one(test_pat, "abc", VIM_MODE_VERY_NOMAGIC);
+
+    # === Rejection invariants =========================================
+    # \1-\9 always rejects.
+    var bn = niyama_vim_compile("\\(a\\)\\1");
+    assert_eq(bn, 0, "backref rejects");
+    assert_eq(niyama_vim_last_error(), VIM_E_BACKREF_UNSUPPORTED, "backref code");
+
+    # Bad mode rejects.
+    var mb = niyama_vim_compile_opts("a", 99);
+    assert_eq(mb, 0, "bad mode rejects");
+    assert_eq(niyama_vim_last_error(), VIM_E_INVALID_MODE, "bad mode code");
+
+    # === Mode-coverage randomized sweep ===============================
+    var pat_buf = alloc(64);
+    var in_buf = alloc(128);
+    var iter = 0;
+    while (iter < 50) {
+        var pat_len = (rng() & 0x1F) + 1;
+        if (pat_len > 32) { pat_len = 32; }
+        gen_pat(pat_buf, pat_len);
+        var in_len = (rng() & 0x3F) + 1;
+        if (in_len > 64) { in_len = 64; }
+        gen_input(in_buf, in_len);
+        # Test every mode for each random pattern.
+        fuzz_one(pat_buf, in_buf, VIM_MODE_VERY_MAGIC);
+        fuzz_one(pat_buf, in_buf, VIM_MODE_MAGIC);
+        fuzz_one(pat_buf, in_buf, VIM_MODE_NOMAGIC);
+        fuzz_one(pat_buf, in_buf, VIM_MODE_VERY_NOMAGIC);
+        iter = iter + 1;
+    }
+    assert(1, "50-iter × 4-mode sweep survived");
+
+    # === Linear-time property =========================================
+    # Pike NFA is structurally linear-time; adversarial pattern
+    # against long inputs should still terminate in bounded time.
+    var nfa_dos = niyama_vim_compile("a\\(a\\|a\\)*b");
+    assert_neq(nfa_dos, 0, "(a|a)* compiles in vim");
+    var big_a = alloc(64);
+    var i = 0;
+    while (i < 50) {
+        store8(big_a + i, 97);
+        i = i + 1;
+    }
+    store8(big_a + 50, 0);
+    assert_eq(niyama_vim_match(nfa_dos, big_a), 0, "50a no-b terminates");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

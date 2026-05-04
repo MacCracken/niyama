@@ -4,6 +4,126 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-03
+
+M4 — fifth and final pre-catch-up engine: vim (`niyama_vim_*`).
+vim/cyim flavor with all four magicness modes, `\<`/`\>` word
+boundaries, `\zs`/`\ze` match-position markers, and POSIX bracket
+classes `[[:alpha:]]` etc. Pike NFA matcher (fork of re2) — `\1`-`\9`
+backref rejected by default per ADR 0006, flagged for v0.9.0 review
+alongside the bre backref question.
+
+### Added
+
+- `src/vim.cyr` — Pike NFA matcher with vim-flavor parser. ~1100
+  lines. Mode-dependent character dispatch covers all four magicness
+  variants without duplicating engine logic.
+- Public ABI mirroring the established per-engine shape:
+  - `niyama_vim_compile(pat)` — defaults to `VIM_MODE_MAGIC`.
+  - `niyama_vim_compile_opts(pat, mode)` — explicit mode flag.
+  - `niyama_vim_match` / `_search` / `_search_at` /
+    `_group_start` / `_group_end` / `_last_error`.
+- **All four magicness modes** as opts-flag-controlled values:
+  - `VIM_MODE_VERY_MAGIC` (= 0): all metachars special bare.
+  - `VIM_MODE_MAGIC` (= 1, default): `*` `.` `[` special bare;
+    `\(` `\|` `\+` `\?` `\=` `\{` `\}` need backslash.
+  - `VIM_MODE_NOMAGIC` (= 2): only `^` `$` special bare; `\.` `\*` `\[`
+    for those.
+  - `VIM_MODE_VERY_NOMAGIC` (= 3): nearly everything literal; `\^` `\$`
+    needed even for anchors.
+- vim feature set: `\<`/`\>` word boundaries, `\zs`/`\ze`
+  match-position markers, `\d`/`\D`/`\w`/`\W`/`\s`/`\S` predefined
+  classes, brace quantifiers `\{n,m\}` greedy AND `\{-n,m\}` lazy
+  (vim's lazy syntax), `\+` `\?` `\=` quantifiers (and bare `+` `?`
+  `=` in very-magic), `\(...\)` groups (and `(...)` in very-magic),
+  `\|` alternation (and `|` in very-magic), bare/escape-flipped
+  forms throughout.
+- POSIX bracket classes inside `[...]`: `[[:alpha:]]`,
+  `[[:digit:]]`, `[[:space:]]`, `[[:upper:]]`, `[[:lower:]]`,
+  `[[:alnum:]]`, `[[:blank:]]`, `[[:cntrl:]]`, `[[:graph:]]`,
+  `[[:print:]]`, `[[:punct:]]`, `[[:xdigit:]]`. Implementation
+  shared with v0.9.0 catch-up for bre/pcre/re2.
+- `\zs` resets match-start (overrides implicit start-save). `\ze`
+  freezes match-end (parser tracks `_vim_saw_ze` to suppress
+  implicit final SAVE 1 so `\ze` wins).
+- `\1`-`\9` backreferences **rejected at compile** with
+  `VIM_E_BACKREF_UNSUPPORTED`. Decision flagged for v0.9.0 review
+  alongside the bre backref question.
+- ADR 0006 — niyama_vim engine ABI, matcher architecture, and
+  scope. Records the Pike-NFA-not-backtracking decision, the
+  four-mode opts surface, the `\zs`/`\ze` SAVE-emission strategy,
+  and the deferral list (mid-pattern mode switching, vim's vast
+  `\X` escape menagerie, replacement-language helpers).
+- `tests/vim.tcyr` — 88 unit tests across 13 groups: per-mode
+  parser semantics (×4 modes), `\<`/`\>` boundaries, `\zs`/`\ze`
+  match-position semantics, all 12 POSIX bracket classes,
+  predefined classes, backref rejection, anchors, invalid mode
+  rejection, lazy brace, DoS-resistance.
+- `fuzz/vim.fcyr` — 219-assertion harness with mode-coverage sweep
+  (every random pattern exercised across all 4 modes), rejection
+  invariants (backref, bad mode), and a linear-time adversarial
+  pattern.
+- `tests/vim.bcyr` — bench harness across all four modes plus
+  vim-feature benches.
+
+### Performance floor (M4, x86_64, cyrius 5.8.42)
+
+- `vim_compile_*` (per mode): 3-5 μs.
+- `vim_search_magic` / `_very_magic` / `_nomagic` / `_very_nomagic`
+  (3-way alt over 75-byte text): 7-8 μs across all modes.
+- `vim_search_zs_ze` (`foo\zsbar\zebaz`): ~3 μs.
+- `vim_search_posix` (`[[:alpha:]]\+`): ~3 μs.
+- `vim_search_word_bound` (`\<word\>`): ~3 μs.
+
+### Changed
+
+- `dist/niyama.cyr` — bundle now includes `src/vim.cyr` alongside
+  the four prior engines. `NIYAMA_VERSION` → `"0.6.0"`.
+- `src/main.cyr` smoke banner reflects M4 status.
+
+### Deferred (not in M4 — see ADR 0006)
+
+- Mid-pattern mode switching (`\v` / `\m` / `\M` / `\V` mid-pattern).
+  Opts-flag-only entry in M4; mid-pattern switching is a v0.9.0
+  candidate if asked.
+- vim's vast `\X` escape menagerie (`\a`, `\A`, `\l`, `\L`, `\u`,
+  `\U`, `\x`, `\X`, `\o`, `\O`, `\h`, `\H`, etc.) — niyama_vim
+  ships standard `\d`/`\w`/`\s`; vim-specific extras are post-v1.0
+  unless asked.
+- Replacement-language helpers (`~`, `&`, `\u`/`\l`/`\U`/`\L`).
+  Replacement is a consumer concern; cyim handles its own.
+
+### Roadmap reorg (2026-05-03)
+
+Consolidated 11 features that prior ADRs (0003 / 0004 / 0005) had
+deferred unilaterally as "post-v1.0" or "M3.5 candidate" into a new
+v0.9.0 (M4.5) catch-up milestone. The rationale: deferrals that
+silently shrink what ships in v1.0 are scope decisions belonging to
+the user, not to the engine implementer. The v0.9.0 catch-up release
+clears those deferrals before the M5 freeze, so the surface that
+gets frozen is the surface the roadmap originally promised.
+
+Items consolidated:
+
+- **niyama_re2**: named captures, Unicode property classes `\p{L}`,
+  inline flags `(?i)/(?m)/(?s)`.
+- **niyama_pcre**: lookbehind, `\p{L}`, POSIX bracket classes,
+  recursion, conditional patterns, inline flags, branch-reset
+  groups, callouts, `\K`.
+- **niyama_bre**: GNU `\<`/`\>` word boundaries, POSIX bracket
+  classes (shared implementations with pcre/vim).
+- **niyama_fuzzy**: Unicode NFD normalization, exact start-position
+  recovery in `_search`.
+
+`niyama_bre` `\1`-`\9` backreferences remain per the user's M1
+explicit "potentially post-v1.0; document, don't skip" call —
+v0.9.0 is a natural revisit point but not a commitment.
+
+ADRs 0002 / 0003 / 0004 / 0005 updated to point their deferral
+sections at v0.9.0; `docs/development/roadmap.md` adds the M4.5
+milestone; `docs/development/state.md` updates the "Next" sequencing.
+No code changes; no shipped engines affected.
+
 ## [0.5.0] — 2026-05-03
 
 M3.5 — fourth engine: fuzzy (`niyama_fuzzy_*`). The one engine in

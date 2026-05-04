@@ -1,0 +1,205 @@
+# tests/vim.tcyr — niyama_vim engine tests.
+#
+# Coverage: all four magicness modes, vim metachars (\<, \>, \zs, \ze),
+# POSIX bracket classes [[:alpha:]] etc., predefined classes, brace
+# quantifiers (greedy + lazy), backref rejection.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/vim.cyr"
+
+fn t_match(pat, s) {
+    var nfa = niyama_vim_compile(pat);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_vim_match(nfa, s);
+}
+
+fn t_match_mode(pat, mode, s) {
+    var nfa = niyama_vim_compile_opts(pat, mode);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_vim_match(nfa, s);
+}
+
+fn t_search(pat, s) {
+    var nfa = niyama_vim_compile(pat);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_vim_search(nfa, s);
+}
+
+fn t_err(pat) {
+    var nfa = niyama_vim_compile(pat);
+    if (nfa != 0) { return 0; }
+    return niyama_vim_last_error();
+}
+
+fn main() {
+    alloc_init();
+
+    # === Magic mode (default) ========================================
+    test_group("vim-magic");
+    assert_eq(t_match("abc", "abc"), 1, "literal");
+    assert_eq(t_match("a.c", "axc"), 1, ". any-byte (magic)");
+    assert_eq(t_match("a*", ""), 1, "* zero-or-more (magic)");
+    assert_eq(t_match("a*", "aaa"), 1, "* multiple");
+    # In magic, `+` is literal — vim users say `\+` for one-or-more.
+    assert_eq(t_match("a+", "a+"), 1, "+ literal in magic");
+    assert_eq(t_match("a+", "aa"), 0, "+ NOT a quantifier in magic");
+    # `\+` quantifier in magic.
+    assert_eq(t_match("a\\+", "aaa"), 1, "\\+ one-or-more (magic)");
+    assert_eq(t_match("a\\+", ""), 0, "\\+ rejects empty");
+    # `\?` optional.
+    assert_eq(t_match("ab\\?c", "ac"), 1, "\\? optional missing");
+    assert_eq(t_match("ab\\?c", "abc"), 1, "\\? optional present");
+    # `\=` is alias for `\?`.
+    assert_eq(t_match("ab\\=c", "ac"), 1, "\\= optional missing");
+    # `\(...\)` group in magic.
+    assert_eq(t_match("\\(foo\\)", "foo"), 1, "\\(foo\\) group magic");
+    # `\{n,m\}` brace quantifier.
+    assert_eq(t_match("a\\{2,4\\}", "aaa"), 1, "\\{2,4\\} mid");
+    assert_eq(t_match("a\\{3\\}", "aaa"), 1, "\\{3\\} exact");
+    assert_eq(t_match("a\\{2,\\}", "aaaaa"), 1, "\\{2,\\} open");
+    # `\|` alternation in magic.
+    assert_eq(t_match("cat\\|dog", "cat"), 1, "\\| alt cat");
+    assert_eq(t_match("cat\\|dog", "dog"), 1, "\\| alt dog");
+    assert_eq(t_match("cat\\|dog", "fish"), 0, "\\| alt none");
+
+    # === Very-magic mode (`\v`) ======================================
+    test_group("vim-very-magic");
+    # In very-magic, all metachars are special bare.
+    assert_eq(t_match_mode("a+", VIM_MODE_VERY_MAGIC, "aaa"), 1, "+ quant in very-magic");
+    assert_eq(t_match_mode("ab?c", VIM_MODE_VERY_MAGIC, "ac"), 1, "? quant in very-magic");
+    assert_eq(t_match_mode("(foo)", VIM_MODE_VERY_MAGIC, "foo"), 1, "() group very-magic");
+    assert_eq(t_match_mode("cat|dog", VIM_MODE_VERY_MAGIC, "dog"), 1, "| alt very-magic");
+    assert_eq(t_match_mode("a{2,4}", VIM_MODE_VERY_MAGIC, "aaa"), 1, "{2,4} brace very-magic");
+
+    # === Nomagic mode (`\M`) =========================================
+    test_group("vim-nomagic");
+    # In nomagic, `*` IS still special (per vim docs); `.` is literal.
+    assert_eq(t_match_mode("a*", VIM_MODE_NOMAGIC, "aaa"), 0, "* literal in nomagic");
+    # `\*` for star.
+    assert_eq(t_match_mode("a\\*", VIM_MODE_NOMAGIC, "aaa"), 1, "\\* star in nomagic");
+    # `.` literal in nomagic.
+    assert_eq(t_match_mode("a.b", VIM_MODE_NOMAGIC, "axb"), 0, ". literal in nomagic");
+    assert_eq(t_match_mode("a.b", VIM_MODE_NOMAGIC, "a.b"), 1, ". matches itself in nomagic");
+    # `\.` is dot-any in nomagic.
+    assert_eq(t_match_mode("a\\.b", VIM_MODE_NOMAGIC, "axb"), 1, "\\. dot-any in nomagic");
+    # `\(...\)` group still works in nomagic.
+    assert_eq(t_match_mode("\\(foo\\)", VIM_MODE_NOMAGIC, "foo"), 1, "\\() group in nomagic");
+
+    # === Very-nomagic mode (`\V`) ====================================
+    test_group("vim-very-nomagic");
+    # Almost everything literal.
+    assert_eq(t_match_mode("a.b", VIM_MODE_VERY_NOMAGIC, "a.b"), 1, ". literal in V");
+    assert_eq(t_match_mode("a.b", VIM_MODE_VERY_NOMAGIC, "axb"), 0, ". rejects in V");
+    assert_eq(t_match_mode("a*b", VIM_MODE_VERY_NOMAGIC, "a*b"), 1, "* literal in V");
+    # `\.` dot-any in very-nomagic.
+    assert_eq(t_match_mode("a\\.b", VIM_MODE_VERY_NOMAGIC, "axb"), 1, "\\. dot-any in V");
+
+    # === Word boundaries `\<` `\>` ===================================
+    test_group("vim-boundaries");
+    assert_eq(t_search("\\<foo\\>", "say foo bar"), 4, "\\<foo\\> hits");
+    assert_eq(t_search("\\<foo\\>", "saysfoosbar"), 0 - 1, "\\<foo\\> requires boundary");
+
+    # === Match-position markers `\zs` and `\ze` ======================
+    test_group("vim-zs-ze");
+    # `\zs` resets match-start: pattern "foo\zsbar" matches "foobar"
+    # but the match starts at "bar" (offset 3).
+    var nfa_zs = niyama_vim_compile("foo\\zsbar");
+    assert_neq(nfa_zs, 0, "\\zs compiles");
+    assert_eq(niyama_vim_match(nfa_zs, "foobar"), 1, "\\zs matches");
+    assert_eq(niyama_vim_group_start(nfa_zs, 0), 3, "\\zs match starts after foo");
+    assert_eq(niyama_vim_group_end(nfa_zs, 0), 6, "\\zs match ends at end of bar");
+
+    # `\ze` freezes match-end: pattern "foo\zebar" matches "foobar"
+    # but the match ends at "foo" (offset 3).
+    var nfa_ze = niyama_vim_compile("foo\\zebar");
+    assert_neq(nfa_ze, 0, "\\ze compiles");
+    assert_eq(niyama_vim_match(nfa_ze, "foobar"), 1, "\\ze matches");
+    assert_eq(niyama_vim_group_start(nfa_ze, 0), 0, "\\ze match starts at 0");
+    assert_eq(niyama_vim_group_end(nfa_ze, 0), 3, "\\ze match ends at \\ze");
+
+    # `\zs` AND `\ze`.
+    var nfa_zsze = niyama_vim_compile("foo\\zsBAR\\zebaz");
+    assert_neq(nfa_zsze, 0, "\\zs+\\ze compiles");
+    assert_eq(niyama_vim_match(nfa_zsze, "fooBARbaz"), 1, "\\zs+\\ze matches");
+    assert_eq(niyama_vim_group_start(nfa_zsze, 0), 3, "\\zs+\\ze start");
+    assert_eq(niyama_vim_group_end(nfa_zsze, 0), 6, "\\zs+\\ze end");
+
+    # === POSIX bracket classes inside [...] ==========================
+    test_group("vim-posix-classes");
+    assert_eq(t_match("[[:alpha:]]", "X"), 1, "[:alpha:] hits letter");
+    assert_eq(t_match("[[:alpha:]]", "5"), 0, "[:alpha:] rejects digit");
+    assert_eq(t_match("[[:digit:]]", "5"), 1, "[:digit:] hits digit");
+    assert_eq(t_match("[[:digit:]]", "X"), 0, "[:digit:] rejects letter");
+    assert_eq(t_match("[[:space:]]", " "), 1, "[:space:] hits space");
+    assert_eq(t_match("[[:space:]]", "\t"), 1, "[:space:] hits tab");
+    assert_eq(t_match("[[:upper:]]", "X"), 1, "[:upper:] hits cap");
+    assert_eq(t_match("[[:upper:]]", "x"), 0, "[:upper:] rejects lower");
+    assert_eq(t_match("[[:lower:]]", "x"), 1, "[:lower:] hits lower");
+    assert_eq(t_match("[[:alnum:]]", "X"), 1, "[:alnum:] hits letter");
+    assert_eq(t_match("[[:alnum:]]", "5"), 1, "[:alnum:] hits digit");
+    assert_eq(t_match("[[:alnum:]]", "."), 0, "[:alnum:] rejects punct");
+    assert_eq(t_match("[[:blank:]]", " "), 1, "[:blank:] hits space");
+    assert_eq(t_match("[[:blank:]]", "\n"), 0, "[:blank:] rejects newline");
+    assert_eq(t_match("[[:xdigit:]]", "9"), 1, "[:xdigit:] hits 9");
+    assert_eq(t_match("[[:xdigit:]]", "A"), 1, "[:xdigit:] hits A");
+    assert_eq(t_match("[[:xdigit:]]", "G"), 0, "[:xdigit:] rejects G");
+
+    # Combined: [a-z[:digit:]]
+    var nfa_combo = niyama_vim_compile("[a-z[:digit:]]");
+    assert_neq(nfa_combo, 0, "combined class compiles");
+    assert_eq(niyama_vim_match(nfa_combo, "x"), 1, "combined hits letter");
+    assert_eq(niyama_vim_match(nfa_combo, "5"), 1, "combined hits digit");
+    assert_eq(niyama_vim_match(nfa_combo, "X"), 0, "combined rejects upper");
+
+    # === Predefined classes ==========================================
+    test_group("vim-predefined-classes");
+    assert_eq(t_match("\\d\\+", "12345"), 1, "\\d+");
+    assert_eq(t_match("\\D", "x"), 1, "\\D non-digit");
+    assert_eq(t_match("\\w\\+", "hello_42"), 1, "\\w+");
+    assert_eq(t_match("\\s", " "), 1, "\\s");
+
+    # === Backref rejection ===========================================
+    test_group("vim-backref");
+    assert_eq(t_err("\\(a\\)\\1"), VIM_E_BACKREF_UNSUPPORTED, "\\1 rejected");
+    assert_eq(t_err("foo\\5"), VIM_E_BACKREF_UNSUPPORTED, "\\5 rejected");
+
+    # === Anchors =====================================================
+    test_group("vim-anchors");
+    assert_eq(t_search("^abc", "abc"), 0, "^ start");
+    assert_eq(t_search("^abc", "xabc"), 0 - 1, "^ rejects mid");
+    assert_eq(t_search("xyz$", "wxyz"), 1, "$ end");
+    # Mid-pattern `^` is literal in magic.
+    assert_eq(t_match("a^b", "a^b"), 1, "^ literal mid-pattern (magic)");
+    # In very-nomagic, `^` is literal everywhere unless it's `\^` at start.
+    assert_eq(t_match_mode("^", VIM_MODE_VERY_NOMAGIC, "^"), 1, "^ literal in V");
+    assert_eq(t_match_mode("\\^abc", VIM_MODE_VERY_NOMAGIC, "abc"), 1, "\\^ anchor in V");
+
+    # === Invalid mode rejection ======================================
+    test_group("vim-invalid-mode");
+    var nfa_bad = niyama_vim_compile_opts("abc", 99);
+    assert_eq(nfa_bad, 0, "bad mode rejects");
+    assert_eq(niyama_vim_last_error(), VIM_E_INVALID_MODE, "INVALID_MODE error");
+
+    # === Lazy brace `\{-n,m\}` =======================================
+    test_group("vim-lazy-brace");
+    var nfa_lazy = niyama_vim_compile("a\\{-1,3\\}b");
+    assert_neq(nfa_lazy, 0, "\\{-n,m\\} compiles");
+    assert_eq(niyama_vim_match(nfa_lazy, "ab"), 1, "lazy matches min");
+    assert_eq(niyama_vim_match(nfa_lazy, "aaab"), 1, "lazy matches max");
+
+    # === DoS-resistant (Pike NFA, no backtracking) ===================
+    test_group("vim-dos-resistant");
+    var nfa_d = niyama_vim_compile("a\\(a\\|a\\)*b");
+    # In magic mode this needs backslash-paren and backslash-alt.
+    # Even with adversarial input, Pike NFA terminates in linear time.
+    assert_neq(nfa_d, 0, "(a|a)* compiles");
+    assert_eq(niyama_vim_match(nfa_d, "aaaaaaaaaaaaaaaaaaaa"), 0, "no-b terminates");
+    assert_eq(niyama_vim_match(nfa_d, "aaaaaaaaaaaaaaaaaaab"), 1, "with-b matches");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

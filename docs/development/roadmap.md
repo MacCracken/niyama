@@ -183,24 +183,113 @@ consumers; cyim's `:e <prefix>` completion is a plausible third.
 - Exact start-position recovery in `_search` — currently
   heuristic.
 
-### M4 — vim engine (v0.6.0) — vim/cyim flavor
+### M4 — vim engine (v0.6.0) — vim/cyim flavor — ✅ shipped 2026-05-03
 
 **Why fourth.** Consumer-driven — cyim's `:s/old/new/` and ex-mode
 pattern history will eventually want vim-flavor compatibility for
 muscle-memory continuity.
 
-**Acceptance:**
+**Acceptance — done (per ADR 0006):**
 
-- Magic / nomagic / very-magic / very-nomagic modes (mode flag in the
-  RegexOpts struct).
-- vim metachars: `\<` / `\>` word boundaries, `\zs` / `\ze`
-  match-start/end markers, `\(` / `\)` groups (nomagic-style),
-  `&` in replacement = full match.
-- vim-style char classes (`[[:alpha:]]` etc. — POSIX bracket
-  expressions).
-- cyim-side: `--regex=vim` flavor.
+- ✅ All four magicness modes (`VIM_MODE_VERY_MAGIC`,
+  `VIM_MODE_MAGIC` (default), `VIM_MODE_NOMAGIC`,
+  `VIM_MODE_VERY_NOMAGIC`) via `niyama_vim_compile_opts(pat, mode)`.
+- ✅ vim metachars: `\<`/`\>` word boundaries, `\zs`/`\ze`
+  match-position markers, `\(...\)` groups, `\|` alternation,
+  `\+`/`\?`/`\=` quantifiers, `\{n,m\}` brace, `\{-n,m\}` lazy
+  brace.
+- ✅ POSIX bracket classes `[[:alpha:]]`, `[[:digit:]]`,
+  `[[:space:]]`, `[[:upper:]]`, `[[:lower:]]`, `[[:alnum:]]`,
+  `[[:blank:]]`, `[[:cntrl:]]`, `[[:graph:]]`, `[[:print:]]`,
+  `[[:punct:]]`, `[[:xdigit:]]`. Implementation shared with v0.9.0
+  catch-up for bre/pcre/re2.
+- ✅ Predefined classes `\d`/`\D`/`\w`/`\W`/`\s`/`\S`.
+- ✅ `\1`-`\9` backref **rejected** (Pike NFA, default; flagged
+  for v0.9.0 review alongside the bre backref question).
+- ✅ `tests/vim.tcyr` — 88 assertions across 13 groups.
+- ✅ `fuzz/vim.fcyr` — 219-assertion mode-coverage harness.
+- ✅ Bench floor recorded.
+- 🟦 cyim-side: `--regex=vim` flavor — landing in cyim repo as
+  separate PR.
 
-### M5 — P(-1) hardening + closeout (v0.7.x → freeze)
+**Deferred from M4 — see ADR 0006 (most go to v0.9.0):**
+
+- Mid-pattern mode switching (`\v` / `\m` / `\M` / `\V`
+  mid-pattern) — opts-flag entry only in M4.
+- vim's vast `\X` escape menagerie (`\a`, `\A`, `\l`, `\L`, etc.).
+- Replacement-language helpers (`~`, `&`, `\u`/`\l`/`\U`/`\L`) —
+  replacement is a consumer concern.
+
+### M4.5 — deferred-features catch-up (v0.9.0) — pre-freeze completeness pass
+
+**Why this milestone exists.** During M2/M3/M3.5, deferrals were
+recorded in each engine's ADR ("post-v1.0", "M3.5 candidate", etc.)
+without explicit user agreement. v0.9.0 is the catch-up release that
+clears those deferrals before M5 freeze, so the surface that gets
+frozen is the surface the roadmap originally promised — not a
+silently-trimmed subset.
+
+The 11 deferred items below are consolidated here. v0.7.0 / v0.8.0
+slots stay open for sub-milestones if the work needs splitting; the
+user can carve them at planning time.
+
+**niyama_re2 catch-up (per ADR 0003 deferrals):**
+
+- ✅ Named captures `(?<name>...)` and `(?P<name>...)` with
+  `niyama_re2_group_by_name(nfa, name)` lookup. Reuses the
+  niyama_pcre name-table mechanism added at M3.
+- ✅ Unicode property classes `\p{L}` etc. — adds the Unicode
+  decomposition + property table (~25KB) used by niyama_re2 +
+  niyama_pcre + niyama_vim.
+- ✅ Inline flags `(?i)` `(?m)` `(?s)` — case-fold via the same
+  ASCII case-fold mechanism as niyama_fuzzy; multiline + single-line
+  via matcher flags.
+
+**niyama_pcre catch-up (per ADR 0004 deferrals):**
+
+- ✅ Lookbehind `(?<=...)` and `(?<!...)` — fixed-width compile-time
+  width analysis (PCRE2 10.43 model). Variable-width lookbehind stays
+  out of scope unless asked.
+- ✅ Unicode property classes `\p{L}` (shared table from re2 work).
+- ✅ POSIX bracket classes `[:alpha:]` `[:digit:]` etc. — shared
+  with niyama_vim implementation (ADR 0002 originally pointed at M4
+  reuse; v0.9.0 ships the shared implementation).
+- ✅ Recursion `(?R)`, `(?P>name)`, `(?N)` — subroutine call into
+  the same compiled NFA.
+- ✅ Conditional patterns `(?(cond)yes|no)`.
+- ✅ Inline flags `(?i)` `(?m)` `(?s)`.
+- ✅ Branch-reset groups `(?|...)`.
+- ✅ Callouts `(?C)`.
+- ✅ `\K` reset-match-start.
+
+**niyama_bre catch-up (per ADR 0002 deferrals from M4-pointer):**
+
+- ✅ GNU `\<` / `\>` word boundaries.
+- ✅ POSIX bracket classes `[:alpha:]` etc. (shared with pcre/vim).
+- ⏳ Backreferences `\1`-`\9` — **user's explicit "potentially
+  post-v1.0; document, don't skip" call from M1 scoping.** Stays
+  there unless the user revisits during v0.9.0 planning.
+
+**niyama_fuzzy catch-up (per ADR 0005 deferrals):**
+
+- ✅ Unicode NFD normalization via `FUZZY_FLAG_UNICODE_NFD`. Reuses
+  the Unicode decomposition table added by re2/pcre.
+- ✅ Exact start-position recovery in `niyama_fuzzy_search` —
+  reverse-DP pass to recover the precise start offset of the best
+  fuzzy substring match.
+
+**Cross-engine concerns:**
+
+- New shared module `src/unicode.cyr` for the Unicode decomposition
+  + property table — used by re2, pcre, fuzzy, and vim. Adds ~25KB
+  to `dist/niyama.cyr` which is acceptable now that fold-readiness
+  prep is concrete.
+- Per-engine ABI extensions (named-capture lookup for re2, flag
+  setters for re2/pcre, NFD flag for fuzzy) all preserve M3-frozen
+  numeric error code values — additions only, no renumbers.
+- New tests/fuzz/bench harnesses for each catch-up feature.
+
+### M5 — P(-1) hardening + closeout (post-v0.9.0 → freeze)
 
 **Why before fold.** Per first-party-standards § Security Hardening
 (required before every release) plus the cyim-style closeout pass

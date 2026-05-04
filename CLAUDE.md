@@ -73,6 +73,7 @@ cyrius test                          # run [build].test + tests/*.tcyr
 - **Read the [first-party-standards](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md) first** — niyama conforms to AGNOS-lineage project conventions.
 - **Do not commit or push** — the user handles all git operations.
 - **NEVER use `gh` CLI** — use `curl` to the GitHub API if needed.
+- **Do not unilaterally defer / descope features.** The roadmap is the user's commitments, not yours. If a milestone says "Initial scope includes X, Y, Z," ship X, Y, Z — or stop and ask before cutting any of them. "Lets keep it moving" is permission for momentum, not for scope decisions. Asking once at the start does NOT cover later cuts; every "this is bigger than fits cleanly" moment is a separate decision to surface. Do not use an ADR as the asking-mechanism — the deferral has to be agreed-to before it lands in the ADR.
 - **Sandhi-pattern fold model is load-bearing.** Don't propose folding niyama into cyrius stdlib before the fold gate is met (≥2 long-horizon consumers + 1.0.0 + frozen surface + explicit fold ADR per niyama ADR 0001).
 - **Per-engine ABI naming is `niyama_<flavor>_*`** — e.g. `niyama_bre_compile`, `niyama_re2_search`. Mirrors cyrius stdlib's `regex_*` naming pattern. Each engine adds an ADR finalizing its specific ABI shape.
 - Do not add unnecessary dependencies — niyama is stdlib-only through M5 (no external Cyrius deps).

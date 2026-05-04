@@ -1,0 +1,1484 @@
+# vim.cyr — niyama vim/cyim flavor engine.
+#
+# Pike NFA matcher with vim-flavor parser, exposed via the niyama_vim_*
+# ABI defined in docs/adr/0006-vim-engine-abi-and-scope.md.
+#
+# Architecture: forked from src/re2.cyr (Pike NFA kernel) with a
+# vim-flavor parser. Same instruction model, same matcher kernel; the
+# parser handles four magicness modes and vim-specific metachars.
+#
+# Public API (mirrors niyama_re2_* per ADR 0002):
+#   niyama_vim_compile(pat)              -> handle (default mode = MAGIC)
+#   niyama_vim_compile_opts(pat, mode)   -> handle (specific mode)
+#   niyama_vim_match(nfa, s)             -> 1 if anchored match, else 0
+#   niyama_vim_search(nfa, s)            -> first match offset, or -1
+#   niyama_vim_search_at(nfa, s, len, from) -> match starting at `from`
+#   niyama_vim_group_start(nfa, n)       -> group n start or -1
+#   niyama_vim_group_end(nfa, n)         -> group n end or -1
+#   niyama_vim_last_error()              -> error code from most recent compile
+#
+# vim features in M4 (per ADR 0006):
+#   - All four magicness modes (very-magic, magic, nomagic, very-nomagic)
+#   - vim metachars: . * \+ \? \= \{n,m\} \| \(\) [...]
+#   - \< \> word boundaries
+#   - \zs \ze match-position markers
+#   - POSIX bracket classes [[:alpha:]] etc. inside char classes
+#   - \d \D \w \W \s \S predefined classes
+#   - \1-\9 backreferences REJECTED at compile (default; v0.9.0 revisit)
+#
+# Out of scope for M4 (per ADR 0006):
+#   - Mid-pattern mode switching (\v \m \M \V mid-pattern) — opts-flag only
+#   - vim's vast \X escape menagerie (\a \A \l \L \u \U \x \X \o \O \h \H ...)
+#   - Replacement-language helpers (~, &, \u/\l etc.)
+#
+# Precondition: alloc_init() must have been called.
+
+# === Opcodes (mirrors bre/re2) =======================================
+
+var VIM_OP_MATCH      = 0;
+var VIM_OP_CHAR       = 1;
+var VIM_OP_ANY        = 2;
+var VIM_OP_CLASS      = 3;
+var VIM_OP_NCLASS     = 4;
+var VIM_OP_JMP        = 5;
+var VIM_OP_SPLIT      = 6;
+var VIM_OP_SAVE       = 7;
+var VIM_OP_BOL        = 8;
+var VIM_OP_EOL        = 9;
+var VIM_OP_BOUNDARY   = 10;
+var VIM_OP_NBOUNDARY  = 11;
+
+var VIM_NFA_HEADER_SIZE = 216;
+var VIM_OFF_INSTR_COUNT = 0;
+var VIM_OFF_INSTRS_OFF  = 8;
+var VIM_OFF_CLASS_COUNT = 16;
+var VIM_OFF_CLASSES_OFF = 24;
+var VIM_OFF_CAPTURES    = 32;
+var VIM_OFF_MATCH_START = 40;
+var VIM_OFF_MATCH_END   = 48;
+var VIM_OFF_SAVES       = 56;
+
+var VIM_MAX_INSTRS  = 4096;
+var VIM_MAX_CLASSES = 64;
+var VIM_MAX_SAVES   = 20;
+
+# === Magicness modes (frozen ABI from M4 onward) =====================
+
+var VIM_MODE_VERY_MAGIC   = 0;
+var VIM_MODE_MAGIC        = 1;
+var VIM_MODE_NOMAGIC      = 2;
+var VIM_MODE_VERY_NOMAGIC = 3;
+
+# === Error codes (frozen ABI from M4 onward) =========================
+
+var VIM_E_OK                   = 0;
+var VIM_E_SYNTAX               = 1;
+var VIM_E_BACKREF_UNSUPPORTED  = 2;
+var VIM_E_INVALID_MODE         = 3;
+var VIM_E_TOO_LARGE            = 4;
+
+# === Compile-time globals ============================================
+
+var _vim_pat = 0;
+var _vim_pat_len = 0;
+var _vim_pos = 0;
+var _vim_mode = 1;        # default = MAGIC
+var _vim_nfa = 0;
+var _vim_instr_base = 0;
+var _vim_class_base = 0;
+var _vim_instr_n = 0;
+var _vim_class_n = 0;
+var _vim_capture_n = 0;
+var _vim_err = 0;
+var _vim_last_err = 0;
+var _vim_saw_ze = 0;      # if 1, suppress implicit final SAVE 1
+
+# Process-lifetime scratch (lazy-init).
+var _vim_m_init = 0;
+var _vim_m_cur = 0;
+var _vim_m_next = 0;
+var _vim_m_lastgen = 0;
+var _vim_m_gen = 0;
+var _vim_q_splits = 0;
+
+fn _vim_lazy_init() {
+    if (_vim_m_init == 1) { return 0; }
+    _vim_m_cur     = alloc(8 + VIM_MAX_INSTRS * 168);
+    _vim_m_next    = alloc(8 + VIM_MAX_INSTRS * 168);
+    _vim_m_lastgen = alloc(VIM_MAX_INSTRS * 8);
+    _vim_q_splits  = alloc(64 * 8);
+    var i = 0;
+    while (i < VIM_MAX_INSTRS) {
+        store64(_vim_m_lastgen + i * 8, 0);
+        i = i + 1;
+    }
+    _vim_m_init = 1;
+    _vim_m_gen = 1;
+    return 0;
+}
+
+# === Instruction emit / patch helpers (mirrors re2) ==================
+
+fn _vim_w0(op, small, arg1) {
+    return op | (small << 8) | (arg1 << 32);
+}
+
+fn _vim_emit_raw(w0, w1) {
+    var i = _vim_instr_n;
+    if (i >= VIM_MAX_INSTRS) { _vim_err = VIM_E_TOO_LARGE; return i; }
+    store64(_vim_instr_base + i * 16, w0);
+    store64(_vim_instr_base + i * 16 + 8, w1);
+    _vim_instr_n = i + 1;
+    return i;
+}
+
+fn _vim_emit_op(op)        { return _vim_emit_raw(op, 0); }
+fn _vim_emit_char(c)       { return _vim_emit_raw(VIM_OP_CHAR | (c << 8), 0); }
+fn _vim_emit_class(neg, ci) {
+    var op = VIM_OP_CLASS;
+    if (neg == 1) { op = VIM_OP_NCLASS; }
+    return _vim_emit_raw(op | (ci << 8), 0);
+}
+fn _vim_emit_save(idx)     { return _vim_emit_raw(VIM_OP_SAVE | (idx << 8), 0); }
+fn _vim_emit_jmp(target)   { return _vim_emit_raw(VIM_OP_JMP | (target << 32), 0); }
+fn _vim_emit_split(a, b)   { return _vim_emit_raw(VIM_OP_SPLIT | (a << 32), b); }
+
+fn _vim_patch_arg1(idx, arg1) {
+    var off = _vim_instr_base + idx * 16;
+    var w0 = load64(off);
+    store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
+    return 0;
+}
+
+fn _vim_patch_arg2(idx, arg2) {
+    store64(_vim_instr_base + idx * 16 + 8, arg2);
+    return 0;
+}
+
+fn _vim_shift_right(lo, hi) {
+    var k = (hi - lo) * 16 - 1;
+    while (k >= 0) {
+        var src = _vim_instr_base + lo * 16 + k;
+        store8(src + 16, load8(src));
+        k = k - 1;
+    }
+    return 0;
+}
+
+fn _vim_shift_targets_one(lo, hi) {
+    var i = lo + 1;
+    var end = hi + 1;
+    while (i < end) {
+        var off = _vim_instr_base + i * 16;
+        var w0 = load64(off);
+        var op = w0 & 0xFF;
+        var is_branch = 0;
+        if (op == VIM_OP_JMP)   { is_branch = 1; }
+        if (op == VIM_OP_SPLIT) { is_branch = 1; }
+        if (is_branch == 1) {
+            var arg1 = (w0 >> 32) & 0xFFFFFFFF;
+            if (arg1 >= lo && arg1 <= hi) {
+                _vim_patch_arg1(i, arg1 + 1);
+            }
+            if (op == VIM_OP_SPLIT) {
+                var arg2 = load64(off + 8);
+                if (arg2 >= lo && arg2 <= hi) {
+                    _vim_patch_arg2(i, arg2 + 1);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# === Class bitmap helpers ============================================
+
+fn _vim_alloc_class() {
+    var ci = _vim_class_n;
+    if (ci >= VIM_MAX_CLASSES) { _vim_err = VIM_E_TOO_LARGE; return ci; }
+    var z = 0;
+    while (z < 32) {
+        store8(_vim_class_base + ci * 32 + z, 0);
+        z = z + 1;
+    }
+    _vim_class_n = ci + 1;
+    return ci;
+}
+
+fn _vim_class_set(ci, c) {
+    if (c < 0)   { return 0; }
+    if (c > 255) { return 0; }
+    var off = _vim_class_base + ci * 32 + (c >> 3);
+    store8(off, load8(off) | (1 << (c & 7)));
+    return 0;
+}
+
+fn _vim_class_range(ci, lo, hi) {
+    var c = lo;
+    while (c <= hi) {
+        _vim_class_set(ci, c);
+        c = c + 1;
+    }
+    return 0;
+}
+
+fn _vim_class_invert(ci) {
+    var z = 0;
+    while (z < 32) {
+        var off = _vim_class_base + ci * 32 + z;
+        store8(off, 255 ^ load8(off));
+        z = z + 1;
+    }
+    return 0;
+}
+
+fn _vim_class_fill_digit(ci) { _vim_class_range(ci, 48, 57); return 0; }
+
+fn _vim_class_fill_word(ci) {
+    _vim_class_range(ci, 48, 57);
+    _vim_class_range(ci, 65, 90);
+    _vim_class_range(ci, 97, 122);
+    _vim_class_set(ci, 95);
+    return 0;
+}
+
+fn _vim_class_fill_space(ci) {
+    _vim_class_set(ci, 32);
+    _vim_class_set(ci, 9);
+    _vim_class_set(ci, 10);
+    _vim_class_set(ci, 11);
+    _vim_class_set(ci, 12);
+    _vim_class_set(ci, 13);
+    return 0;
+}
+
+# === POSIX bracket class fillers — shared with v0.9.0 catch-up =======
+
+fn _vim_class_fill_alpha(ci) {
+    _vim_class_range(ci, 65, 90);
+    _vim_class_range(ci, 97, 122);
+    return 0;
+}
+
+fn _vim_class_fill_alnum(ci) {
+    _vim_class_fill_alpha(ci);
+    _vim_class_range(ci, 48, 57);
+    return 0;
+}
+
+fn _vim_class_fill_upper(ci) { _vim_class_range(ci, 65, 90); return 0; }
+fn _vim_class_fill_lower(ci) { _vim_class_range(ci, 97, 122); return 0; }
+fn _vim_class_fill_blank(ci) {
+    _vim_class_set(ci, 32);
+    _vim_class_set(ci, 9);
+    return 0;
+}
+
+fn _vim_class_fill_cntrl(ci) {
+    _vim_class_range(ci, 0, 31);
+    _vim_class_set(ci, 127);
+    return 0;
+}
+
+fn _vim_class_fill_print(ci) { _vim_class_range(ci, 32, 126); return 0; }
+fn _vim_class_fill_graph(ci) { _vim_class_range(ci, 33, 126); return 0; }
+
+fn _vim_class_fill_punct(ci) {
+    # ASCII punctuation: !"#$%&'()*+,-./ :;<=>?@ [\]^_` {|}~
+    _vim_class_range(ci, 33, 47);
+    _vim_class_range(ci, 58, 64);
+    _vim_class_range(ci, 91, 96);
+    _vim_class_range(ci, 123, 126);
+    return 0;
+}
+
+fn _vim_class_fill_xdigit(ci) {
+    _vim_class_range(ci, 48, 57);
+    _vim_class_range(ci, 65, 70);
+    _vim_class_range(ci, 97, 102);
+    return 0;
+}
+
+# Match a POSIX class name keyword starting at _vim_pos (which is past
+# the "[:" prefix). Returns the fill function category as integer:
+#   1 = alpha, 2 = digit, 3 = space, 4 = upper, 5 = lower, 6 = alnum,
+#   7 = blank, 8 = cntrl, 9 = graph, 10 = print, 11 = punct, 12 = xdigit
+# 0 = unknown / not a POSIX class. On match, advances _vim_pos past
+# ":]". On mismatch, _vim_pos is unchanged.
+fn _vim_match_posix_class() {
+    var save_pos = _vim_pos;
+    # Read the name (a-z chars).
+    var name_start = _vim_pos;
+    var scanning = 1;
+    while (scanning == 1) {
+        if (_vim_pos >= _vim_pat_len) {
+            scanning = 0;
+        } else {
+            var c = load8(_vim_pat + _vim_pos);
+            if (c < 97 || c > 122) {
+                scanning = 0;
+            } else {
+                _vim_pos = _vim_pos + 1;
+            }
+        }
+    }
+    var name_len = _vim_pos - name_start;
+    # Expect ":]".
+    if (_vim_pos + 1 >= _vim_pat_len) {
+        _vim_pos = save_pos;
+        return 0;
+    }
+    if (load8(_vim_pat + _vim_pos) != 58 || load8(_vim_pat + _vim_pos + 1) != 93) {
+        _vim_pos = save_pos;
+        return 0;
+    }
+    # Match the name.
+    var category = 0;
+    if (name_len == 5) {
+        if (load8(_vim_pat + name_start) == 97 && load8(_vim_pat + name_start + 1) == 108 && load8(_vim_pat + name_start + 2) == 112 && load8(_vim_pat + name_start + 3) == 104 && load8(_vim_pat + name_start + 4) == 97) {
+            category = 1;  # alpha
+        }
+        elif (load8(_vim_pat + name_start) == 100 && load8(_vim_pat + name_start + 1) == 105 && load8(_vim_pat + name_start + 2) == 103 && load8(_vim_pat + name_start + 3) == 105 && load8(_vim_pat + name_start + 4) == 116) {
+            category = 2;  # digit
+        }
+        elif (load8(_vim_pat + name_start) == 115 && load8(_vim_pat + name_start + 1) == 112 && load8(_vim_pat + name_start + 2) == 97 && load8(_vim_pat + name_start + 3) == 99 && load8(_vim_pat + name_start + 4) == 101) {
+            category = 3;  # space
+        }
+        elif (load8(_vim_pat + name_start) == 117 && load8(_vim_pat + name_start + 1) == 112 && load8(_vim_pat + name_start + 2) == 112 && load8(_vim_pat + name_start + 3) == 101 && load8(_vim_pat + name_start + 4) == 114) {
+            category = 4;  # upper
+        }
+        elif (load8(_vim_pat + name_start) == 108 && load8(_vim_pat + name_start + 1) == 111 && load8(_vim_pat + name_start + 2) == 119 && load8(_vim_pat + name_start + 3) == 101 && load8(_vim_pat + name_start + 4) == 114) {
+            category = 5;  # lower
+        }
+        elif (load8(_vim_pat + name_start) == 97 && load8(_vim_pat + name_start + 1) == 108 && load8(_vim_pat + name_start + 2) == 110 && load8(_vim_pat + name_start + 3) == 117 && load8(_vim_pat + name_start + 4) == 109) {
+            category = 6;  # alnum
+        }
+        elif (load8(_vim_pat + name_start) == 98 && load8(_vim_pat + name_start + 1) == 108 && load8(_vim_pat + name_start + 2) == 97 && load8(_vim_pat + name_start + 3) == 110 && load8(_vim_pat + name_start + 4) == 107) {
+            category = 7;  # blank
+        }
+        elif (load8(_vim_pat + name_start) == 99 && load8(_vim_pat + name_start + 1) == 110 && load8(_vim_pat + name_start + 2) == 116 && load8(_vim_pat + name_start + 3) == 114 && load8(_vim_pat + name_start + 4) == 108) {
+            category = 8;  # cntrl
+        }
+        elif (load8(_vim_pat + name_start) == 103 && load8(_vim_pat + name_start + 1) == 114 && load8(_vim_pat + name_start + 2) == 97 && load8(_vim_pat + name_start + 3) == 112 && load8(_vim_pat + name_start + 4) == 104) {
+            category = 9;  # graph
+        }
+        elif (load8(_vim_pat + name_start) == 112 && load8(_vim_pat + name_start + 1) == 114 && load8(_vim_pat + name_start + 2) == 105 && load8(_vim_pat + name_start + 3) == 110 && load8(_vim_pat + name_start + 4) == 116) {
+            category = 10;  # print
+        }
+        elif (load8(_vim_pat + name_start) == 112 && load8(_vim_pat + name_start + 1) == 117 && load8(_vim_pat + name_start + 2) == 110 && load8(_vim_pat + name_start + 3) == 99 && load8(_vim_pat + name_start + 4) == 116) {
+            category = 11;  # punct
+        }
+    }
+    elif (name_len == 6) {
+        if (load8(_vim_pat + name_start) == 120 && load8(_vim_pat + name_start + 1) == 100 && load8(_vim_pat + name_start + 2) == 105 && load8(_vim_pat + name_start + 3) == 103 && load8(_vim_pat + name_start + 4) == 105 && load8(_vim_pat + name_start + 5) == 116) {
+            category = 12;  # xdigit
+        }
+    }
+    if (category == 0) {
+        _vim_pos = save_pos;
+        return 0;
+    }
+    _vim_pos = _vim_pos + 2;  # consume ":]"
+    return category;
+}
+
+fn _vim_class_apply_posix(ci, category) {
+    if (category == 1)  { _vim_class_fill_alpha(ci); }
+    elif (category == 2)  { _vim_class_fill_digit(ci); }
+    elif (category == 3)  { _vim_class_fill_space(ci); }
+    elif (category == 4)  { _vim_class_fill_upper(ci); }
+    elif (category == 5)  { _vim_class_fill_lower(ci); }
+    elif (category == 6)  { _vim_class_fill_alnum(ci); }
+    elif (category == 7)  { _vim_class_fill_blank(ci); }
+    elif (category == 8)  { _vim_class_fill_cntrl(ci); }
+    elif (category == 9)  { _vim_class_fill_graph(ci); }
+    elif (category == 10) { _vim_class_fill_print(ci); }
+    elif (category == 11) { _vim_class_fill_punct(ci); }
+    elif (category == 12) { _vim_class_fill_xdigit(ci); }
+    return 0;
+}
+
+# === Mode dispatch helpers ===========================================
+#
+# The four magicness modes change which characters are special. Helpers
+# answer "what does this byte mean here?" for the current _vim_mode.
+
+# Is `c` a quantifier (after an atom) in the current mode WITHOUT
+# backslash? Magic and lower modes require `\+` etc., so only `*` is
+# bare in m / M (and `*` is literal in M).
+# In V (very-nomagic), `*` is also literal.
+# Returns: 0 (not), 1 (`*` zero-or-more)
+fn _vim_quant_bare(c) {
+    if (_vim_mode == VIM_MODE_VERY_MAGIC) {
+        if (c == 42 || c == 43 || c == 63 || c == 61) { return 1; }
+    }
+    elif (_vim_mode == VIM_MODE_MAGIC) {
+        if (c == 42) { return 1; }
+    }
+    return 0;
+}
+
+# Map a bare quantifier byte to its op-char for _vim_apply_simple_q
+# (* = 42, + = 43, ? = 63; we map = → 63 since vim's \= is a synonym
+# for \?).
+fn _vim_quant_op(c) {
+    if (c == 61) { return 63; }
+    return c;
+}
+
+# Is `c` a backslash-quantifier (after `\`) in this mode?
+# `\+`, `\?`, `\=` are quantifiers in m, M, V (always available).
+# `\*` is the quantifier in nomagic / very-nomagic (where bare `*` is
+# literal); in magic / very-magic, `\*` is a literal `*`.
+fn _vim_quant_after_bs(c) {
+    if (c == 43 || c == 63 || c == 61) { return 1; }
+    if (c == 42 && (_vim_mode == VIM_MODE_NOMAGIC || _vim_mode == VIM_MODE_VERY_NOMAGIC)) {
+        return 1;
+    }
+    return 0;
+}
+
+# Is `c` a bare alternation? `|` in v; needs `\|` in m, M, V.
+fn _vim_alt_bare(c) {
+    if (c == 124 && _vim_mode == VIM_MODE_VERY_MAGIC) { return 1; }
+    return 0;
+}
+
+# Is `c` a backslash-alternation? `\|` in m, M, V.
+fn _vim_alt_after_bs(c) {
+    if (c == 124 && _vim_mode != VIM_MODE_VERY_MAGIC) { return 1; }
+    return 0;
+}
+
+# Is `c` a bare open-paren? `(` in v; literal in m, M, V (which use `\(`).
+fn _vim_open_paren_bare(c) {
+    if (c == 40 && _vim_mode == VIM_MODE_VERY_MAGIC) { return 1; }
+    return 0;
+}
+
+fn _vim_open_paren_after_bs(c) {
+    if (c == 40 && _vim_mode != VIM_MODE_VERY_MAGIC) { return 1; }
+    return 0;
+}
+
+fn _vim_close_paren_bare(c) {
+    if (c == 41 && _vim_mode == VIM_MODE_VERY_MAGIC) { return 1; }
+    return 0;
+}
+
+fn _vim_close_paren_after_bs(c) {
+    if (c == 41 && _vim_mode != VIM_MODE_VERY_MAGIC) { return 1; }
+    return 0;
+}
+
+# Is `c` a bare brace-quantifier opener? `{` in v; needs `\{` elsewhere.
+fn _vim_brace_open_bare(c) {
+    if (c == 123 && _vim_mode == VIM_MODE_VERY_MAGIC) { return 1; }
+    return 0;
+}
+
+fn _vim_brace_open_after_bs(c) {
+    if (c == 123 && _vim_mode != VIM_MODE_VERY_MAGIC) { return 1; }
+    return 0;
+}
+
+# `.` is special in v, m; literal in M, V.
+fn _vim_dot_bare(c) {
+    if (c != 46) { return 0; }
+    if (_vim_mode == VIM_MODE_VERY_MAGIC) { return 1; }
+    if (_vim_mode == VIM_MODE_MAGIC)      { return 1; }
+    return 0;
+}
+
+# `[` is special in v, m; literal in M, V.
+fn _vim_bracket_open_bare(c) {
+    if (c != 91) { return 0; }
+    if (_vim_mode == VIM_MODE_VERY_MAGIC) { return 1; }
+    if (_vim_mode == VIM_MODE_MAGIC)      { return 1; }
+    return 0;
+}
+
+# `^` is BOL (at pattern-start) in v, m, M; literal in V (needs `\^`).
+fn _vim_anchor_bol_bare(c, at_start) {
+    if (c != 94) { return 0; }
+    if (_vim_mode == VIM_MODE_VERY_NOMAGIC) { return 0; }
+    if (_vim_mode == VIM_MODE_VERY_MAGIC) { return 1; }
+    # m, M: only special at pattern start
+    if (at_start == 1) { return 1; }
+    return 0;
+}
+
+# `$` is EOL (at pattern-end) in v, m, M; literal in V.
+fn _vim_anchor_eol_bare(c, at_end) {
+    if (c != 36) { return 0; }
+    if (_vim_mode == VIM_MODE_VERY_NOMAGIC) { return 0; }
+    if (_vim_mode == VIM_MODE_VERY_MAGIC) { return 1; }
+    if (at_end == 1) { return 1; }
+    return 0;
+}
+
+# === Pattern decoder =================================================
+
+fn _vim_lit_byte() {
+    if (_vim_pos >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0; }
+    var c = load8(_vim_pat + _vim_pos);
+    _vim_pos = _vim_pos + 1;
+    if (c != 92) { return c; }
+    if (_vim_pos >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0; }
+    var e = load8(_vim_pat + _vim_pos);
+    _vim_pos = _vim_pos + 1;
+    if (e == 110) { return 10; }
+    if (e == 114) { return 13; }
+    if (e == 116) { return 9; }
+    if (e == 48)  { return 0; }
+    if (e == 97)  { return 7; }
+    if (e == 102) { return 12; }
+    if (e == 118) { return 11; }
+    return e;
+}
+
+# Parse `[...]` body (caller consumed `[`). Returns class index;
+# negation as -(ci+1).
+fn _vim_parse_class() {
+    var ci = _vim_alloc_class();
+    if (_vim_err != VIM_E_OK) { return ci; }
+    var neg = 0;
+    if (_vim_pos < _vim_pat_len && load8(_vim_pat + _vim_pos) == 94) {
+        neg = 1;
+        _vim_pos = _vim_pos + 1;
+    }
+    var first = 1;
+    var done = 0;
+    while (done == 0) {
+        if (_vim_pos >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0 - 1; }
+        var pc = load8(_vim_pat + _vim_pos);
+        if (pc == 93 && first == 0) {
+            _vim_pos = _vim_pos + 1;
+            done = 1;
+        }
+        # POSIX bracket class: [: ... :]
+        elif (pc == 91 && _vim_pos + 1 < _vim_pat_len && load8(_vim_pat + _vim_pos + 1) == 58) {
+            _vim_pos = _vim_pos + 2;  # consume "[:"
+            var category = _vim_match_posix_class();
+            if (category == 0) {
+                _vim_err = VIM_E_SYNTAX;
+                return 0 - 1;
+            }
+            _vim_class_apply_posix(ci, category);
+            first = 0;
+        }
+        elif (pc == 92 && _vim_pos + 1 < _vim_pat_len) {
+            var nx = load8(_vim_pat + _vim_pos + 1);
+            if (nx == 100)      { _vim_class_fill_digit(ci); _vim_pos = _vim_pos + 2; }
+            elif (nx == 119)    { _vim_class_fill_word(ci);  _vim_pos = _vim_pos + 2; }
+            elif (nx == 115)    { _vim_class_fill_space(ci); _vim_pos = _vim_pos + 2; }
+            elif (nx == 68) {
+                var tmp = _vim_alloc_class();
+                if (_vim_err != VIM_E_OK) { return 0 - 1; }
+                _vim_class_fill_digit(tmp);
+                _vim_class_invert(tmp);
+                var z = 0;
+                while (z < 32) {
+                    var d = _vim_class_base + ci * 32 + z;
+                    var s = _vim_class_base + tmp * 32 + z;
+                    store8(d, load8(d) | load8(s));
+                    z = z + 1;
+                }
+                _vim_class_n = _vim_class_n - 1;
+                _vim_pos = _vim_pos + 2;
+            }
+            elif (nx == 87) {
+                var tmp2 = _vim_alloc_class();
+                if (_vim_err != VIM_E_OK) { return 0 - 1; }
+                _vim_class_fill_word(tmp2);
+                _vim_class_invert(tmp2);
+                var z2 = 0;
+                while (z2 < 32) {
+                    var d2 = _vim_class_base + ci * 32 + z2;
+                    var s2 = _vim_class_base + tmp2 * 32 + z2;
+                    store8(d2, load8(d2) | load8(s2));
+                    z2 = z2 + 1;
+                }
+                _vim_class_n = _vim_class_n - 1;
+                _vim_pos = _vim_pos + 2;
+            }
+            elif (nx == 83) {
+                var tmp3 = _vim_alloc_class();
+                if (_vim_err != VIM_E_OK) { return 0 - 1; }
+                _vim_class_fill_space(tmp3);
+                _vim_class_invert(tmp3);
+                var z3 = 0;
+                while (z3 < 32) {
+                    var d3 = _vim_class_base + ci * 32 + z3;
+                    var s3 = _vim_class_base + tmp3 * 32 + z3;
+                    store8(d3, load8(d3) | load8(s3));
+                    z3 = z3 + 1;
+                }
+                _vim_class_n = _vim_class_n - 1;
+                _vim_pos = _vim_pos + 2;
+            }
+            else {
+                var lc = _vim_lit_byte();
+                if (_vim_err != VIM_E_OK) { return 0 - 1; }
+                if (_vim_pos + 1 < _vim_pat_len && load8(_vim_pat + _vim_pos) == 45 && load8(_vim_pat + _vim_pos + 1) != 93) {
+                    _vim_pos = _vim_pos + 1;
+                    var hi = _vim_lit_byte();
+                    if (_vim_err != VIM_E_OK) { return 0 - 1; }
+                    _vim_class_range(ci, lc, hi);
+                } else {
+                    _vim_class_set(ci, lc);
+                }
+            }
+            first = 0;
+        }
+        else {
+            var lc2 = _vim_lit_byte();
+            if (_vim_err != VIM_E_OK) { return 0 - 1; }
+            if (_vim_pos + 1 < _vim_pat_len && load8(_vim_pat + _vim_pos) == 45 && load8(_vim_pat + _vim_pos + 1) != 93) {
+                _vim_pos = _vim_pos + 1;
+                var hi2 = _vim_lit_byte();
+                if (_vim_err != VIM_E_OK) { return 0 - 1; }
+                _vim_class_range(ci, lc2, hi2);
+            } else {
+                _vim_class_set(ci, lc2);
+            }
+            first = 0;
+        }
+    }
+    if (neg == 1) { return 0 - (ci + 1); }
+    return ci;
+}
+
+# === Recursive-descent vim compiler ==================================
+
+fn _vim_parse_primary(at_start) {
+    if (_vim_pos >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0; }
+    var c = load8(_vim_pat + _vim_pos);
+
+    # Bare `^` BOL anchor?
+    if (_vim_anchor_bol_bare(c, at_start) == 1) {
+        _vim_pos = _vim_pos + 1;
+        _vim_emit_op(VIM_OP_BOL);
+        return 0;
+    }
+
+    # Bare `$` EOL anchor? Need to check if at end of pattern.
+    if (c == 36) {
+        var at_end = 0;
+        if (_vim_pos + 1 == _vim_pat_len) { at_end = 1; }
+        # also at end of group: next char would be `\)` or `)` — but we
+        # treat any `$` not followed by more pattern in the current
+        # concat as anchor. Simpler: just check at_end-of-pattern.
+        if (_vim_anchor_eol_bare(c, at_end) == 1) {
+            _vim_pos = _vim_pos + 1;
+            _vim_emit_op(VIM_OP_EOL);
+            return 0;
+        }
+    }
+
+    # Bare `.` any-byte?
+    if (_vim_dot_bare(c) == 1) {
+        _vim_pos = _vim_pos + 1;
+        _vim_emit_op(VIM_OP_ANY);
+        return 0;
+    }
+
+    # Bare `[` bracket class?
+    if (_vim_bracket_open_bare(c) == 1) {
+        _vim_pos = _vim_pos + 1;
+        var ci = _vim_parse_class();
+        if (_vim_err != VIM_E_OK) { return 0; }
+        var neg = 0;
+        if (ci < 0) { neg = 1; ci = 0 - (ci + 1); }
+        _vim_emit_class(neg, ci);
+        return 0;
+    }
+
+    # Bare `(` open-group (very-magic only)?
+    if (_vim_open_paren_bare(c) == 1) {
+        _vim_pos = _vim_pos + 1;
+        _vim_capture_n = _vim_capture_n + 1;
+        var capture_idx = _vim_capture_n;
+        if (capture_idx > 9) { _vim_err = VIM_E_SYNTAX; return 0; }
+        _vim_emit_save(capture_idx * 2);
+        _vim_parse_alt();
+        if (_vim_err != VIM_E_OK) { return 0; }
+        if (_vim_pos >= _vim_pat_len || load8(_vim_pat + _vim_pos) != 41) { _vim_err = VIM_E_SYNTAX; return 0; }
+        _vim_pos = _vim_pos + 1;
+        _vim_emit_save(capture_idx * 2 + 1);
+        return 0;
+    }
+
+    # Backslash forms.
+    if (c == 92) {
+        if (_vim_pos + 1 >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0; }
+        var e = load8(_vim_pat + _vim_pos + 1);
+
+        # \1-\9 — REJECTED per ADR 0006 (M4 default; v0.9.0 revisit).
+        if (e >= 49 && e <= 57) {
+            _vim_err = VIM_E_BACKREF_UNSUPPORTED;
+            return 0;
+        }
+
+        # \( open-group (in m, M, V).
+        if (_vim_open_paren_after_bs(e) == 1) {
+            _vim_pos = _vim_pos + 2;
+            _vim_capture_n = _vim_capture_n + 1;
+            var capture_idx2 = _vim_capture_n;
+            if (capture_idx2 > 9) { _vim_err = VIM_E_SYNTAX; return 0; }
+            _vim_emit_save(capture_idx2 * 2);
+            _vim_parse_alt();
+            if (_vim_err != VIM_E_OK) { return 0; }
+            # Expect `\)`.
+            if (_vim_pos + 1 >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0; }
+            if (load8(_vim_pat + _vim_pos) != 92 || load8(_vim_pat + _vim_pos + 1) != 41) {
+                _vim_err = VIM_E_SYNTAX; return 0;
+            }
+            _vim_pos = _vim_pos + 2;
+            _vim_emit_save(capture_idx2 * 2 + 1);
+            return 0;
+        }
+
+        # \) outside group is syntax error (handled by alt-parser stop).
+        if (_vim_close_paren_after_bs(e) == 1) {
+            _vim_err = VIM_E_SYNTAX; return 0;
+        }
+
+        # \< start-of-word boundary (BOUNDARY at word-start position is
+        # close enough to vim's semantics; vim's \< is essentially \b).
+        if (e == 60) {
+            _vim_pos = _vim_pos + 2;
+            _vim_emit_op(VIM_OP_BOUNDARY);
+            return 0;
+        }
+
+        # \> end-of-word boundary.
+        if (e == 62) {
+            _vim_pos = _vim_pos + 2;
+            _vim_emit_op(VIM_OP_BOUNDARY);
+            return 0;
+        }
+
+        # \zs — match-start marker. Emit SAVE 0 (overrides implicit start).
+        if (e == 122 && _vim_pos + 2 < _vim_pat_len && load8(_vim_pat + _vim_pos + 2) == 115) {
+            _vim_pos = _vim_pos + 3;
+            _vim_emit_save(0);
+            return 0;
+        }
+
+        # \ze — match-end marker. Emit SAVE 1; suppress implicit final SAVE 1.
+        if (e == 122 && _vim_pos + 2 < _vim_pat_len && load8(_vim_pat + _vim_pos + 2) == 101) {
+            _vim_pos = _vim_pos + 3;
+            _vim_emit_save(1);
+            _vim_saw_ze = 1;
+            return 0;
+        }
+
+        # Predefined classes: \d \D \w \W \s \S
+        if (e == 100) {
+            _vim_pos = _vim_pos + 2;
+            var cd = _vim_alloc_class(); if (_vim_err != VIM_E_OK) { return 0; }
+            _vim_class_fill_digit(cd);
+            _vim_emit_class(0, cd);
+            return 0;
+        }
+        if (e == 68) {
+            _vim_pos = _vim_pos + 2;
+            var cD = _vim_alloc_class(); if (_vim_err != VIM_E_OK) { return 0; }
+            _vim_class_fill_digit(cD);
+            _vim_emit_class(1, cD);
+            return 0;
+        }
+        if (e == 119) {
+            _vim_pos = _vim_pos + 2;
+            var cw = _vim_alloc_class(); if (_vim_err != VIM_E_OK) { return 0; }
+            _vim_class_fill_word(cw);
+            _vim_emit_class(0, cw);
+            return 0;
+        }
+        if (e == 87) {
+            _vim_pos = _vim_pos + 2;
+            var cW = _vim_alloc_class(); if (_vim_err != VIM_E_OK) { return 0; }
+            _vim_class_fill_word(cW);
+            _vim_emit_class(1, cW);
+            return 0;
+        }
+        if (e == 115) {
+            _vim_pos = _vim_pos + 2;
+            var cs = _vim_alloc_class(); if (_vim_err != VIM_E_OK) { return 0; }
+            _vim_class_fill_space(cs);
+            _vim_emit_class(0, cs);
+            return 0;
+        }
+        if (e == 83) {
+            _vim_pos = _vim_pos + 2;
+            var cS = _vim_alloc_class(); if (_vim_err != VIM_E_OK) { return 0; }
+            _vim_class_fill_space(cS);
+            _vim_emit_class(1, cS);
+            return 0;
+        }
+
+        # \. \* \[ \] etc. — backslashed-special-char in lower modes,
+        # but interpreted as literals here. Dispatch: if the char
+        # would be bare-special in this mode, the `\` makes it literal.
+        # Otherwise the char is just a literal byte.
+        # \^ \$ are literal in any mode.
+        # In nomagic and very-nomagic, \. and \* may be specials
+        # (becoming dot-any / star-quantifier). We don't yet have
+        # mode-dependent backslash-special for these in this branch —
+        # the ones we DO handle are nomagic-special quantifiers and
+        # parens (above). For nomagic+below:
+        #   \. → dot-any (since . is literal in nomagic; \. is special)
+        if (e == 46 && (_vim_mode == VIM_MODE_NOMAGIC || _vim_mode == VIM_MODE_VERY_NOMAGIC)) {
+            _vim_pos = _vim_pos + 2;
+            _vim_emit_op(VIM_OP_ANY);
+            return 0;
+        }
+        if (e == 91 && (_vim_mode == VIM_MODE_NOMAGIC || _vim_mode == VIM_MODE_VERY_NOMAGIC)) {
+            _vim_pos = _vim_pos + 2;
+            var cci = _vim_parse_class();
+            if (_vim_err != VIM_E_OK) { return 0; }
+            var neg2 = 0;
+            if (cci < 0) { neg2 = 1; cci = 0 - (cci + 1); }
+            _vim_emit_class(neg2, cci);
+            return 0;
+        }
+        # \^ in very-nomagic = anchor BOL (at pattern-start).
+        if (e == 94 && _vim_mode == VIM_MODE_VERY_NOMAGIC && at_start == 1) {
+            _vim_pos = _vim_pos + 2;
+            _vim_emit_op(VIM_OP_BOL);
+            return 0;
+        }
+        # \$ in very-nomagic = anchor EOL (at pattern-end).
+        if (e == 36 && _vim_mode == VIM_MODE_VERY_NOMAGIC) {
+            var at_end2 = 0;
+            if (_vim_pos + 2 == _vim_pat_len) { at_end2 = 1; }
+            if (at_end2 == 1) {
+                _vim_pos = _vim_pos + 2;
+                _vim_emit_op(VIM_OP_EOL);
+                return 0;
+            }
+        }
+
+        # Otherwise: plain escape -> literal byte.
+        var lc = _vim_lit_byte();
+        if (_vim_err == VIM_E_OK) { _vim_emit_char(lc); }
+        return 0;
+    }
+
+    # In very-magic mode, `|` `)` are reserved (not literal).
+    if (_vim_mode == VIM_MODE_VERY_MAGIC) {
+        if (c == 124 || c == 41 || c == 42 || c == 43 || c == 63 || c == 123 || c == 125) {
+            _vim_err = VIM_E_SYNTAX; return 0;
+        }
+    }
+
+    # Otherwise: literal byte.
+    _vim_pos = _vim_pos + 1;
+    _vim_emit_char(c);
+    return 0;
+}
+
+fn _vim_apply_simple_q(atom_start, op_char, lazy) {
+    var atom_end = _vim_instr_n;
+    if (atom_end == atom_start) { _vim_err = VIM_E_SYNTAX; return 0; }
+    if (op_char == 42) {
+        _vim_shift_right(atom_start, atom_end);
+        _vim_shift_targets_one(atom_start, atom_end);
+        _vim_instr_n = _vim_instr_n + 1;
+        var body_pc = atom_start + 1;
+        if (lazy == 1) {
+            store64(_vim_instr_base + atom_start * 16, _vim_w0(VIM_OP_SPLIT, 0, 0));
+            store64(_vim_instr_base + atom_start * 16 + 8, body_pc);
+        } else {
+            store64(_vim_instr_base + atom_start * 16, _vim_w0(VIM_OP_SPLIT, 0, body_pc));
+            store64(_vim_instr_base + atom_start * 16 + 8, 0);
+        }
+        _vim_emit_jmp(atom_start);
+        var exit_pc = _vim_instr_n;
+        if (lazy == 1) { _vim_patch_arg1(atom_start, exit_pc); }
+        else            { _vim_patch_arg2(atom_start, exit_pc); }
+    }
+    elif (op_char == 43) {
+        if (lazy == 1) {
+            var s = _vim_emit_split(0, atom_start);
+            _vim_patch_arg1(s, _vim_instr_n);
+        } else {
+            var s2 = _vim_emit_split(atom_start, 0);
+            _vim_patch_arg2(s2, _vim_instr_n);
+        }
+    }
+    elif (op_char == 63) {
+        _vim_shift_right(atom_start, atom_end);
+        _vim_shift_targets_one(atom_start, atom_end);
+        _vim_instr_n = _vim_instr_n + 1;
+        var body = atom_start + 1;
+        if (lazy == 1) {
+            store64(_vim_instr_base + atom_start * 16, _vim_w0(VIM_OP_SPLIT, 0, 0));
+            store64(_vim_instr_base + atom_start * 16 + 8, body);
+            _vim_patch_arg1(atom_start, _vim_instr_n);
+        } else {
+            store64(_vim_instr_base + atom_start * 16, _vim_w0(VIM_OP_SPLIT, 0, body));
+            store64(_vim_instr_base + atom_start * 16 + 8, _vim_instr_n);
+        }
+    }
+    return 0;
+}
+
+fn _vim_apply_star_inline(body_start, lazy) {
+    var body_end = _vim_instr_n;
+    _vim_shift_right(body_start, body_end);
+    _vim_shift_targets_one(body_start, body_end);
+    _vim_instr_n = _vim_instr_n + 1;
+    var body_pc = body_start + 1;
+    if (lazy == 1) {
+        store64(_vim_instr_base + body_start * 16, _vim_w0(VIM_OP_SPLIT, 0, 0));
+        store64(_vim_instr_base + body_start * 16 + 8, body_pc);
+    } else {
+        store64(_vim_instr_base + body_start * 16, _vim_w0(VIM_OP_SPLIT, 0, body_pc));
+        store64(_vim_instr_base + body_start * 16 + 8, 0);
+    }
+    _vim_emit_jmp(body_start);
+    var exit_pc = _vim_instr_n;
+    if (lazy == 1) { _vim_patch_arg1(body_start, exit_pc); }
+    else            { _vim_patch_arg2(body_start, exit_pc); }
+    return 0;
+}
+
+# Apply brace quantifier: {n} {n,m} {n,} optionally with `-` for lazy.
+# At entry, _vim_pos is just past the opening `{` (whether bare or
+# backslash-prefixed). Caller passed `save_primary_start` to re-parse.
+fn _vim_apply_brace_q(save_primary_start, atom_start, has_bs) {
+    if (_vim_instr_n == atom_start) { _vim_err = VIM_E_SYNTAX; return 0; }
+    var lazy = 0;
+    if (_vim_pos < _vim_pat_len && load8(_vim_pat + _vim_pos) == 45) {
+        # `\{-` or `{-` is lazy variant.
+        lazy = 1;
+        _vim_pos = _vim_pos + 1;
+    }
+    var n_min = 0;
+    var have_min = 0;
+    while (_vim_pos < _vim_pat_len && load8(_vim_pat + _vim_pos) >= 48 && load8(_vim_pat + _vim_pos) <= 57) {
+        n_min = n_min * 10 + (load8(_vim_pat + _vim_pos) - 48);
+        _vim_pos = _vim_pos + 1;
+        have_min = 1;
+    }
+    var n_max = n_min;
+    var open_ended = 0;
+    if (_vim_pos < _vim_pat_len && load8(_vim_pat + _vim_pos) == 44) {
+        _vim_pos = _vim_pos + 1;
+        n_max = 0;
+        var have_max = 0;
+        while (_vim_pos < _vim_pat_len && load8(_vim_pat + _vim_pos) >= 48 && load8(_vim_pat + _vim_pos) <= 57) {
+            n_max = n_max * 10 + (load8(_vim_pat + _vim_pos) - 48);
+            _vim_pos = _vim_pos + 1;
+            have_max = 1;
+        }
+        if (have_max == 0) { open_ended = 1; n_max = 0; }
+    }
+    if (have_min == 0 && lazy == 0) { _vim_err = VIM_E_SYNTAX; return 0; }
+    if (lazy == 1 && have_min == 0) {
+        # `\{-}` (vim shorthand for lazy `*`).
+        n_min = 0;
+        open_ended = 1;
+    }
+    # Expect closing brace. In magic+below: `\}`. In very-magic: `}`.
+    if (has_bs == 1) {
+        if (_vim_pos + 1 >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0; }
+        if (load8(_vim_pat + _vim_pos) != 92 || load8(_vim_pat + _vim_pos + 1) != 125) {
+            _vim_err = VIM_E_SYNTAX; return 0;
+        }
+        _vim_pos = _vim_pos + 2;
+    } else {
+        if (_vim_pos >= _vim_pat_len || load8(_vim_pat + _vim_pos) != 125) {
+            _vim_err = VIM_E_SYNTAX; return 0;
+        }
+        _vim_pos = _vim_pos + 1;
+    }
+    var pos_after_q = _vim_pos;
+    if (open_ended == 0 && n_max < n_min) { _vim_err = VIM_E_SYNTAX; return 0; }
+    if (n_max > 1000) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+    if (n_min == 0) {
+        _vim_instr_n = atom_start;
+        if (open_ended == 1) {
+            var ts = _vim_instr_n;
+            _vim_pos = save_primary_start;
+            _vim_parse_primary(0);
+            if (_vim_err != VIM_E_OK) { return 0; }
+            _vim_apply_star_inline(ts, lazy);
+        } else {
+            var sn = 0;
+            var k = 0;
+            while (k < n_max) {
+                if (sn >= 64) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+                var sx = _vim_emit_split(0, 0);
+                store64(_vim_q_splits + sn * 8, sx);
+                sn = sn + 1;
+                _vim_pos = save_primary_start;
+                _vim_parse_primary(0);
+                if (_vim_err != VIM_E_OK) { return 0; }
+                k = k + 1;
+            }
+            var exit_pc = _vim_instr_n;
+            var ti = 0;
+            while (ti < sn) {
+                var sxi = load64(_vim_q_splits + ti * 8);
+                if (lazy == 1) { _vim_patch_arg1(sxi, exit_pc); _vim_patch_arg2(sxi, sxi + 1); }
+                else            { _vim_patch_arg1(sxi, sxi + 1); _vim_patch_arg2(sxi, exit_pc); }
+                ti = ti + 1;
+            }
+        }
+    } else {
+        var k1 = 1;
+        while (k1 < n_min) {
+            _vim_pos = save_primary_start;
+            _vim_parse_primary(0);
+            if (_vim_err != VIM_E_OK) { return 0; }
+            k1 = k1 + 1;
+        }
+        if (open_ended == 1) {
+            var ts2 = _vim_instr_n;
+            _vim_pos = save_primary_start;
+            _vim_parse_primary(0);
+            if (_vim_err != VIM_E_OK) { return 0; }
+            _vim_apply_star_inline(ts2, lazy);
+        } elif (n_max > n_min) {
+            var sn2 = 0;
+            var k2 = n_min;
+            while (k2 < n_max) {
+                if (sn2 >= 64) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+                var sy = _vim_emit_split(0, 0);
+                store64(_vim_q_splits + sn2 * 8, sy);
+                sn2 = sn2 + 1;
+                _vim_pos = save_primary_start;
+                _vim_parse_primary(0);
+                if (_vim_err != VIM_E_OK) { return 0; }
+                k2 = k2 + 1;
+            }
+            var exit_pc2 = _vim_instr_n;
+            var tj = 0;
+            while (tj < sn2) {
+                var syi = load64(_vim_q_splits + tj * 8);
+                if (lazy == 1) { _vim_patch_arg1(syi, exit_pc2); _vim_patch_arg2(syi, syi + 1); }
+                else            { _vim_patch_arg1(syi, syi + 1); _vim_patch_arg2(syi, exit_pc2); }
+                tj = tj + 1;
+            }
+        }
+    }
+    _vim_pos = pos_after_q;
+    return 0;
+}
+
+fn _vim_parse_atom(at_start) {
+    var save_primary_start = _vim_pos;
+    var atom_start = _vim_instr_n;
+    _vim_parse_primary(at_start);
+    if (_vim_err != VIM_E_OK) { return 0; }
+    if (_vim_pos >= _vim_pat_len) { return 0; }
+    var c = load8(_vim_pat + _vim_pos);
+
+    # Bare quantifier?
+    if (_vim_quant_bare(c) == 1) {
+        _vim_pos = _vim_pos + 1;
+        _vim_apply_simple_q(atom_start, _vim_quant_op(c), 0);
+        return 0;
+    }
+
+    # Bare brace-quantifier?
+    if (_vim_brace_open_bare(c) == 1) {
+        _vim_pos = _vim_pos + 1;
+        _vim_apply_brace_q(save_primary_start, atom_start, 0);
+        return 0;
+    }
+
+    # Backslash quantifier?
+    if (c == 92 && _vim_pos + 1 < _vim_pat_len) {
+        var e = load8(_vim_pat + _vim_pos + 1);
+        if (_vim_quant_after_bs(e) == 1) {
+            _vim_pos = _vim_pos + 2;
+            _vim_apply_simple_q(atom_start, _vim_quant_op(e), 0);
+            return 0;
+        }
+        if (_vim_brace_open_after_bs(e) == 1) {
+            _vim_pos = _vim_pos + 2;
+            _vim_apply_brace_q(save_primary_start, atom_start, 1);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+fn _vim_parse_concat(at_start) {
+    var first = at_start;
+    while (_vim_pos < _vim_pat_len) {
+        # Stop at alternation or close-paren.
+        var c = load8(_vim_pat + _vim_pos);
+        if (_vim_alt_bare(c) == 1) { return 0; }
+        if (_vim_close_paren_bare(c) == 1) { return 0; }
+        if (c == 92 && _vim_pos + 1 < _vim_pat_len) {
+            var e = load8(_vim_pat + _vim_pos + 1);
+            if (_vim_alt_after_bs(e) == 1) { return 0; }
+            if (_vim_close_paren_after_bs(e) == 1) { return 0; }
+        }
+        _vim_parse_atom(first);
+        first = 0;
+        if (_vim_err != VIM_E_OK) { return 0; }
+    }
+    return 0;
+}
+
+fn _vim_parse_alt() {
+    var left_start = _vim_instr_n;
+    _vim_parse_concat(0);
+    if (_vim_err != VIM_E_OK) { return 0; }
+    while (_vim_pos < _vim_pat_len) {
+        var c = load8(_vim_pat + _vim_pos);
+        var is_alt = 0;
+        if (_vim_alt_bare(c) == 1) { is_alt = 1; _vim_pos = _vim_pos + 1; }
+        elif (c == 92 && _vim_pos + 1 < _vim_pat_len) {
+            var e = load8(_vim_pat + _vim_pos + 1);
+            if (_vim_alt_after_bs(e) == 1) { is_alt = 1; _vim_pos = _vim_pos + 2; }
+        }
+        if (is_alt == 0) { return 0; }
+        var left_end = _vim_instr_n;
+        _vim_shift_right(left_start, left_end);
+        _vim_shift_targets_one(left_start, left_end);
+        _vim_instr_n = _vim_instr_n + 1;
+        store64(_vim_instr_base + left_start * 16, _vim_w0(VIM_OP_SPLIT, 0, left_start + 1));
+        store64(_vim_instr_base + left_start * 16 + 8, 0);
+        var jmp_idx = _vim_emit_jmp(0);
+        var right_start = _vim_instr_n;
+        _vim_patch_arg2(left_start, right_start);
+        _vim_parse_concat(0);
+        if (_vim_err != VIM_E_OK) { return 0; }
+        _vim_patch_arg1(jmp_idx, _vim_instr_n);
+    }
+    return 0;
+}
+
+# === Compiler entry ==================================================
+
+fn niyama_vim_compile_opts(pat, mode) {
+    _vim_lazy_init();
+    if (mode < 0 || mode > 3) {
+        _vim_last_err = VIM_E_INVALID_MODE;
+        return 0;
+    }
+    var n = strlen(pat);
+    var instr_bytes = VIM_MAX_INSTRS * 16;
+    var class_bytes = VIM_MAX_CLASSES * 32;
+    var nfa = alloc(VIM_NFA_HEADER_SIZE + instr_bytes + class_bytes);
+    var instrs = nfa + VIM_NFA_HEADER_SIZE;
+    var classes = instrs + instr_bytes;
+    store64(nfa + VIM_OFF_INSTRS_OFF,  VIM_NFA_HEADER_SIZE);
+    store64(nfa + VIM_OFF_CLASSES_OFF, VIM_NFA_HEADER_SIZE + instr_bytes);
+    store64(nfa + VIM_OFF_MATCH_START, 0 - 1);
+    store64(nfa + VIM_OFF_MATCH_END,   0 - 1);
+    var sv = 0;
+    while (sv < VIM_MAX_SAVES) {
+        store64(nfa + VIM_OFF_SAVES + sv * 8, 0 - 1);
+        sv = sv + 1;
+    }
+    _vim_pat = pat;
+    _vim_pat_len = n;
+    _vim_pos = 0;
+    _vim_mode = mode;
+    _vim_nfa = nfa;
+    _vim_instr_base = instrs;
+    _vim_class_base = classes;
+    _vim_instr_n = 0;
+    _vim_class_n = 0;
+    _vim_capture_n = 0;
+    _vim_err = VIM_E_OK;
+    _vim_saw_ze = 0;
+    _vim_emit_save(0);
+    # Top-level concat (handles alternations).
+    # at_start = 1 for first primary so `^` is recognized as anchor.
+    var lstart = _vim_instr_n;
+    _vim_parse_concat(1);
+    if (_vim_err != VIM_E_OK) {
+        _vim_last_err = _vim_err;
+        return 0;
+    }
+    while (_vim_pos < _vim_pat_len) {
+        var c = load8(_vim_pat + _vim_pos);
+        var is_alt = 0;
+        if (_vim_alt_bare(c) == 1) { is_alt = 1; _vim_pos = _vim_pos + 1; }
+        elif (c == 92 && _vim_pos + 1 < _vim_pat_len) {
+            var e = load8(_vim_pat + _vim_pos + 1);
+            if (_vim_alt_after_bs(e) == 1) { is_alt = 1; _vim_pos = _vim_pos + 2; }
+        }
+        if (is_alt == 0) { _vim_err = VIM_E_SYNTAX; _vim_last_err = _vim_err; return 0; }
+        var lend = _vim_instr_n;
+        _vim_shift_right(lstart, lend);
+        _vim_shift_targets_one(lstart, lend);
+        _vim_instr_n = _vim_instr_n + 1;
+        store64(_vim_instr_base + lstart * 16, _vim_w0(VIM_OP_SPLIT, 0, lstart + 1));
+        store64(_vim_instr_base + lstart * 16 + 8, 0);
+        var jidx = _vim_emit_jmp(0);
+        var rstart = _vim_instr_n;
+        _vim_patch_arg2(lstart, rstart);
+        _vim_parse_concat(0);
+        if (_vim_err != VIM_E_OK) { _vim_last_err = _vim_err; return 0; }
+        _vim_patch_arg1(jidx, _vim_instr_n);
+    }
+    if (_vim_pos != _vim_pat_len) {
+        _vim_err = VIM_E_SYNTAX; _vim_last_err = _vim_err; return 0;
+    }
+    if (_vim_saw_ze == 0) {
+        _vim_emit_save(1);
+    }
+    _vim_emit_op(VIM_OP_MATCH);
+    if (_vim_err != VIM_E_OK) { _vim_last_err = _vim_err; return 0; }
+    store64(nfa + VIM_OFF_INSTR_COUNT, _vim_instr_n);
+    store64(nfa + VIM_OFF_CLASS_COUNT, _vim_class_n);
+    store64(nfa + VIM_OFF_CAPTURES,    _vim_capture_n);
+    _vim_last_err = VIM_E_OK;
+    return nfa;
+}
+
+fn niyama_vim_compile(pat) {
+    return niyama_vim_compile_opts(pat, VIM_MODE_MAGIC);
+}
+
+fn niyama_vim_last_error() {
+    return _vim_last_err;
+}
+
+# === Pike NFA matcher (mirrors re2.cyr) ==============================
+
+fn _vim_at_word_char(input, input_len, pos) {
+    if (pos < 0)         { return 0; }
+    if (pos >= input_len){ return 0; }
+    var c = load8(input + pos);
+    if (c >= 48 && c <= 57)   { return 1; }
+    if (c >= 65 && c <= 90)   { return 1; }
+    if (c >= 97 && c <= 122)  { return 1; }
+    if (c == 95)              { return 1; }
+    return 0;
+}
+
+fn _vim_is_boundary(input, input_len, pos) {
+    var l = _vim_at_word_char(input, input_len, pos - 1);
+    var r = _vim_at_word_char(input, input_len, pos);
+    if (l != r) { return 1; }
+    return 0;
+}
+
+fn _vim_class_get_at(class_base, ci, c) {
+    if (c < 0)   { return 0; }
+    if (c > 255) { return 0; }
+    var off = class_base + ci * 32 + (c >> 3);
+    var b = load8(off);
+    if ((b >> (c & 7)) & 1) { return 1; }
+    return 0;
+}
+
+fn _vim_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
+    if (pc < 0)                 { return 0; }
+    if (load64(_vim_m_lastgen + pc * 8) == _vim_m_gen) { return 0; }
+    store64(_vim_m_lastgen + pc * 8, _vim_m_gen);
+    var off = instrs + pc * 16;
+    var w0 = load64(off);
+    var op = w0 & 0xFF;
+    if (op == VIM_OP_JMP) {
+        var t = (w0 >> 32) & 0xFFFFFFFF;
+        _vim_add_thread(list_base, t, input, input_len, pos, saves, instrs);
+    }
+    elif (op == VIM_OP_SPLIT) {
+        var a = (w0 >> 32) & 0xFFFFFFFF;
+        var b = load64(off + 8);
+        _vim_add_thread(list_base, a, input, input_len, pos, saves, instrs);
+        _vim_add_thread(list_base, b, input, input_len, pos, saves, instrs);
+    }
+    elif (op == VIM_OP_SAVE) {
+        var idx = (w0 >> 8) & 0xFF;
+        var prev = load64(saves + idx * 8);
+        store64(saves + idx * 8, pos);
+        _vim_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        store64(saves + idx * 8, prev);
+    }
+    elif (op == VIM_OP_BOL) {
+        var ok = 0;
+        if (pos == 0) { ok = 1; }
+        else {
+            if (load8(input + pos - 1) == 10) { ok = 1; }
+        }
+        if (ok == 1) { _vim_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs); }
+    }
+    elif (op == VIM_OP_EOL) {
+        var ok2 = 0;
+        if (pos == input_len) { ok2 = 1; }
+        elif (load8(input + pos) == 10) { ok2 = 1; }
+        if (ok2 == 1) { _vim_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs); }
+    }
+    elif (op == VIM_OP_BOUNDARY) {
+        if (_vim_is_boundary(input, input_len, pos) == 1) {
+            _vim_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
+    }
+    elif (op == VIM_OP_NBOUNDARY) {
+        if (_vim_is_boundary(input, input_len, pos) == 0) {
+            _vim_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
+    }
+    else {
+        var n = load64(list_base);
+        store64(list_base + 8 + n * 168, pc);
+        var k = 0;
+        while (k < VIM_MAX_SAVES) {
+            var v = load64(saves + k * 8);
+            store64(list_base + 8 + n * 168 + 8 + k * 8, v);
+            k = k + 1;
+        }
+        store64(list_base, n + 1);
+    }
+    return 0;
+}
+
+fn _vim_pike_run(nfa, input, input_len, start_pos) {
+    _vim_lazy_init();
+    var instrs = nfa + load64(nfa + VIM_OFF_INSTRS_OFF);
+    var class_base = nfa + load64(nfa + VIM_OFF_CLASSES_OFF);
+    var matched = 0 - 1;
+    var saves_scratch = alloc(VIM_MAX_SAVES * 8);
+    var k = 0;
+    while (k < VIM_MAX_SAVES) {
+        store64(saves_scratch + k * 8, 0 - 1);
+        k = k + 1;
+    }
+    var match_saves = alloc(VIM_MAX_SAVES * 8);
+    var k2 = 0;
+    while (k2 < VIM_MAX_SAVES) {
+        store64(match_saves + k2 * 8, 0 - 1);
+        k2 = k2 + 1;
+    }
+    var cur = _vim_m_cur;
+    var nxt = _vim_m_next;
+    store64(cur, 0);
+    store64(nxt, 0);
+    _vim_m_gen = _vim_m_gen + 1;
+    _vim_add_thread(cur, 0, input, input_len, start_pos, saves_scratch, instrs);
+    var pos = start_pos;
+    var done = 0;
+    while (done == 0) {
+        var c = 0 - 1;
+        if (pos < input_len) { c = load8(input + pos); }
+        _vim_m_gen = _vim_m_gen + 1;
+        var n_cur = load64(cur);
+        var ti = 0;
+        while (ti < n_cur) {
+            var pc = load64(cur + 8 + ti * 168);
+            var iw0 = load64(instrs + pc * 16);
+            var iop = iw0 & 0xFF;
+            if (iop == VIM_OP_MATCH) {
+                matched = pos;
+                var ks = 0;
+                while (ks < VIM_MAX_SAVES) {
+                    store64(match_saves + ks * 8, load64(cur + 8 + ti * 168 + 8 + ks * 8));
+                    ks = ks + 1;
+                }
+                ti = n_cur;
+            }
+            elif (iop == VIM_OP_CHAR) {
+                var want = (iw0 >> 8) & 0xFF;
+                if (c >= 0 && c == want) {
+                    var ks2 = 0;
+                    while (ks2 < VIM_MAX_SAVES) {
+                        store64(saves_scratch + ks2 * 8, load64(cur + 8 + ti * 168 + 8 + ks2 * 8));
+                        ks2 = ks2 + 1;
+                    }
+                    _vim_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                }
+            }
+            elif (iop == VIM_OP_ANY) {
+                if (c >= 0) {
+                    var ks3 = 0;
+                    while (ks3 < VIM_MAX_SAVES) {
+                        store64(saves_scratch + ks3 * 8, load64(cur + 8 + ti * 168 + 8 + ks3 * 8));
+                        ks3 = ks3 + 1;
+                    }
+                    _vim_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                }
+            }
+            elif (iop == VIM_OP_CLASS || iop == VIM_OP_NCLASS) {
+                if (c >= 0) {
+                    var ci = (iw0 >> 8) & 0xFF;
+                    var hit = _vim_class_get_at(class_base, ci, c);
+                    if (iop == VIM_OP_NCLASS) {
+                        if (hit == 1) { hit = 0; } else { hit = 1; }
+                    }
+                    if (hit == 1) {
+                        var ks4 = 0;
+                        while (ks4 < VIM_MAX_SAVES) {
+                            store64(saves_scratch + ks4 * 8, load64(cur + 8 + ti * 168 + 8 + ks4 * 8));
+                            ks4 = ks4 + 1;
+                        }
+                        _vim_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    }
+                }
+            }
+            ti = ti + 1;
+        }
+        var swap = cur;
+        cur = nxt;
+        nxt = swap;
+        store64(nxt, 0);
+        if (pos > input_len) { done = 1; }
+        elif (load64(cur) == 0) { done = 1; }
+        else { pos = pos + 1; }
+    }
+    if (matched >= 0) {
+        var ks5 = 0;
+        while (ks5 < VIM_MAX_SAVES) {
+            store64(nfa + VIM_OFF_SAVES + ks5 * 8, load64(match_saves + ks5 * 8));
+            ks5 = ks5 + 1;
+        }
+        store64(nfa + VIM_OFF_MATCH_START, load64(match_saves));
+        store64(nfa + VIM_OFF_MATCH_END,   matched);
+    } else {
+        store64(nfa + VIM_OFF_MATCH_START, 0 - 1);
+        store64(nfa + VIM_OFF_MATCH_END,   0 - 1);
+    }
+    return matched;
+}
+
+# === Public API ======================================================
+
+fn niyama_vim_match(nfa, s) {
+    if (nfa == 0) { return 0; }
+    var len = strlen(s);
+    var r = _vim_pike_run(nfa, s, len, 0);
+    if (r >= 0) { return 1; }
+    return 0;
+}
+
+fn niyama_vim_search(nfa, s) {
+    if (nfa == 0) { return 0 - 1; }
+    var len = strlen(s);
+    return niyama_vim_search_at(nfa, s, len, 0);
+}
+
+fn niyama_vim_search_at(nfa, s, len, from) {
+    if (nfa == 0) { return 0 - 1; }
+    var i = from;
+    while (i <= len) {
+        var r = _vim_pike_run(nfa, s, len, i);
+        if (r >= 0) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn niyama_vim_group_start(nfa, n) {
+    if (nfa == 0)        { return 0 - 1; }
+    if (n < 0 || n > 9)  { return 0 - 1; }
+    return load64(nfa + VIM_OFF_SAVES + n * 16);
+}
+
+fn niyama_vim_group_end(nfa, n) {
+    if (nfa == 0)        { return 0 - 1; }
+    if (n < 0 || n > 9)  { return 0 - 1; }
+    return load64(nfa + VIM_OFF_SAVES + n * 16 + 8);
+}
