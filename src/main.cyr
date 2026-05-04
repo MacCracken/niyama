@@ -5,7 +5,7 @@
 # lives in programs/ at each milestone.
 
 fn main() {
-    syscall(1, 1, "niyama 0.2.0 - additional regex engines (M1: bre)\n", 51);
+    syscall(1, 1, "niyama 0.3.0 - additional regex engines (M2: bre + re2)\n", 57);
     return 0;
 }
 

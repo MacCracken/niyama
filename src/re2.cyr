@@ -1,0 +1,1071 @@
+# re2.cyr — niyama RE2-flavor engine.
+#
+# Linear-time Pike NFA matcher with ERE-flavor parser, exposed via the
+# niyama_re2_* ABI defined in docs/adr/0003-re2-engine-abi-and-scope.md.
+#
+# What re2 adds over stdlib lib/regex.cyr's already-present Pike NFA:
+#   - Compile-time rejection of features that BREAK linear-time matching
+#     (backref, lookaround, atomic groups, recursion). Each gets a
+#     distinct error code so consumers know exactly which engine to fall
+#     back to (niyama_pcre at M3).
+#   - The advertised guarantee at the API level: any pattern that
+#     niyama_re2_compile accepts is matchable in O(N × M) time
+#     regardless of pattern shape. Catastrophic-backtracking inputs
+#     terminate in linear time.
+#
+# Architecture: forked from src/bre.cyr (which itself forks the cyrius
+# stdlib lib/regex.cyr Pike NFA). Same instruction model, same matcher
+# kernel; the parser is ERE-flavor instead of POSIX BRE.
+#
+# Public API (mirrors niyama_bre_* per ADR 0002):
+#   niyama_re2_compile(pat)       -> opaque NFA pointer or 0 on error
+#   niyama_re2_match(nfa, s)      -> 1 if anchored match, else 0
+#   niyama_re2_search(nfa, s)     -> first match offset, or -1
+#   niyama_re2_search_at(...)     -> first match offset starting at `from`
+#   niyama_re2_group_start(nfa,n) -> group n start or -1
+#   niyama_re2_group_end(nfa,n)   -> group n end or -1
+#   niyama_re2_last_error()       -> error code from most recent compile
+#
+# Out of scope for M2 (deferred per ADR 0003):
+#   - Named captures (?P<name>...) — post-M3 cross-engine API consolidation.
+#   - Unicode property classes \p{L} — M2 is ASCII-only.
+#   - Inline flags (?i) (?m) (?s) — post-v1.0 unless consumer asks.
+#
+# Precondition: alloc_init() must have been called.
+#
+# All globals are `_re2_*`-prefixed for collision-free coexistence with
+# niyama_bre and stdlib regex.cyr in the same program.
+
+# === Constants ========================================================
+
+var RE2_OP_MATCH     = 0;
+var RE2_OP_CHAR      = 1;
+var RE2_OP_ANY       = 2;
+var RE2_OP_CLASS     = 3;
+var RE2_OP_NCLASS    = 4;
+var RE2_OP_JMP       = 5;
+var RE2_OP_SPLIT     = 6;
+var RE2_OP_SAVE      = 7;
+var RE2_OP_BOL       = 8;
+var RE2_OP_EOL       = 9;
+var RE2_OP_BOUNDARY  = 10;
+var RE2_OP_NBOUNDARY = 11;
+
+var RE2_NFA_HEADER_SIZE = 216;
+var RE2_OFF_INSTR_COUNT = 0;
+var RE2_OFF_INSTRS_OFF  = 8;
+var RE2_OFF_CLASS_COUNT = 16;
+var RE2_OFF_CLASSES_OFF = 24;
+var RE2_OFF_CAPTURES    = 32;
+var RE2_OFF_MATCH_START = 40;
+var RE2_OFF_MATCH_END   = 48;
+var RE2_OFF_SAVES       = 56;
+
+var RE2_MAX_INSTRS  = 4096;
+var RE2_MAX_CLASSES = 64;
+var RE2_MAX_SAVES   = 20;
+
+# Error codes — frozen-at-M2 ABI per ADR 0003.
+var RE2_E_OK                    = 0;
+var RE2_E_SYNTAX                = 1;
+var RE2_E_BACKREF_UNSUPPORTED   = 2;  # \1-\9 — non-regular
+var RE2_E_LOOKAROUND_UNSUPPORTED = 3; # (?=...) (?!...) (?<=...) (?<!...)
+var RE2_E_ATOMIC_UNSUPPORTED    = 4;  # (?>...) — backtracking-only
+var RE2_E_RECURSION_UNSUPPORTED = 5;  # (?R) (?P>name) — non-regular
+var RE2_E_TOO_LARGE             = 6;
+
+# === Compile-time globals ============================================
+
+var _re2_pat = 0;
+var _re2_pat_len = 0;
+var _re2_pos = 0;
+var _re2_nfa = 0;
+var _re2_instr_base = 0;
+var _re2_class_base = 0;
+var _re2_instr_n = 0;
+var _re2_class_n = 0;
+var _re2_capture_n = 0;
+var _re2_err = 0;
+var _re2_last_err = 0;
+
+# Process-lifetime scratch (lazy-init).
+var _re2_m_init = 0;
+var _re2_m_cur = 0;
+var _re2_m_next = 0;
+var _re2_m_lastgen = 0;
+var _re2_m_gen = 0;
+var _re2_q_splits = 0;
+
+fn _re2_lazy_init() {
+    if (_re2_m_init == 1) { return 0; }
+    _re2_m_cur     = alloc(8 + RE2_MAX_INSTRS * 168);
+    _re2_m_next    = alloc(8 + RE2_MAX_INSTRS * 168);
+    _re2_m_lastgen = alloc(RE2_MAX_INSTRS * 8);
+    _re2_q_splits  = alloc(64 * 8);
+    var i = 0;
+    while (i < RE2_MAX_INSTRS) {
+        store64(_re2_m_lastgen + i * 8, 0);
+        i = i + 1;
+    }
+    _re2_m_init = 1;
+    _re2_m_gen = 1;
+    return 0;
+}
+
+# === Instruction emit / patch helpers ================================
+
+fn _re2_w0(op, small, arg1) {
+    return op | (small << 8) | (arg1 << 32);
+}
+
+fn _re2_emit_raw(w0, w1) {
+    var i = _re2_instr_n;
+    if (i >= RE2_MAX_INSTRS) { _re2_err = RE2_E_TOO_LARGE; return i; }
+    store64(_re2_instr_base + i * 16, w0);
+    store64(_re2_instr_base + i * 16 + 8, w1);
+    _re2_instr_n = i + 1;
+    return i;
+}
+
+fn _re2_emit_op(op)        { return _re2_emit_raw(op, 0); }
+fn _re2_emit_char(c)       { return _re2_emit_raw(RE2_OP_CHAR | (c << 8), 0); }
+fn _re2_emit_class(neg, ci) {
+    var op = RE2_OP_CLASS;
+    if (neg == 1) { op = RE2_OP_NCLASS; }
+    return _re2_emit_raw(op | (ci << 8), 0);
+}
+fn _re2_emit_save(idx)     { return _re2_emit_raw(RE2_OP_SAVE | (idx << 8), 0); }
+fn _re2_emit_jmp(target)   { return _re2_emit_raw(RE2_OP_JMP | (target << 32), 0); }
+fn _re2_emit_split(a, b)   { return _re2_emit_raw(RE2_OP_SPLIT | (a << 32), b); }
+
+fn _re2_patch_arg1(idx, arg1) {
+    var off = _re2_instr_base + idx * 16;
+    var w0 = load64(off);
+    store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
+    return 0;
+}
+
+fn _re2_patch_arg2(idx, arg2) {
+    store64(_re2_instr_base + idx * 16 + 8, arg2);
+    return 0;
+}
+
+fn _re2_shift_right(lo, hi) {
+    var k = (hi - lo) * 16 - 1;
+    while (k >= 0) {
+        var src = _re2_instr_base + lo * 16 + k;
+        store8(src + 16, load8(src));
+        k = k - 1;
+    }
+    return 0;
+}
+
+fn _re2_shift_targets_one(lo, hi) {
+    var i = lo + 1;
+    var end = hi + 1;
+    while (i < end) {
+        var off = _re2_instr_base + i * 16;
+        var w0 = load64(off);
+        var op = w0 & 0xFF;
+        var is_branch = 0;
+        if (op == RE2_OP_JMP)   { is_branch = 1; }
+        if (op == RE2_OP_SPLIT) { is_branch = 1; }
+        if (is_branch == 1) {
+            var arg1 = (w0 >> 32) & 0xFFFFFFFF;
+            if (arg1 >= lo && arg1 <= hi) {
+                _re2_patch_arg1(i, arg1 + 1);
+            }
+            if (op == RE2_OP_SPLIT) {
+                var arg2 = load64(off + 8);
+                if (arg2 >= lo && arg2 <= hi) {
+                    _re2_patch_arg2(i, arg2 + 1);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# === Class bitmap helpers ============================================
+
+fn _re2_alloc_class() {
+    var ci = _re2_class_n;
+    if (ci >= RE2_MAX_CLASSES) { _re2_err = RE2_E_TOO_LARGE; return ci; }
+    var z = 0;
+    while (z < 32) {
+        store8(_re2_class_base + ci * 32 + z, 0);
+        z = z + 1;
+    }
+    _re2_class_n = ci + 1;
+    return ci;
+}
+
+fn _re2_class_set(ci, c) {
+    if (c < 0)   { return 0; }
+    if (c > 255) { return 0; }
+    var off = _re2_class_base + ci * 32 + (c >> 3);
+    store8(off, load8(off) | (1 << (c & 7)));
+    return 0;
+}
+
+fn _re2_class_range(ci, lo, hi) {
+    var c = lo;
+    while (c <= hi) {
+        _re2_class_set(ci, c);
+        c = c + 1;
+    }
+    return 0;
+}
+
+fn _re2_class_invert(ci) {
+    var z = 0;
+    while (z < 32) {
+        var off = _re2_class_base + ci * 32 + z;
+        store8(off, 255 ^ load8(off));
+        z = z + 1;
+    }
+    return 0;
+}
+
+fn _re2_class_fill_digit(ci) { _re2_class_range(ci, 48, 57); return 0; }
+
+fn _re2_class_fill_word(ci) {
+    _re2_class_range(ci, 48, 57);
+    _re2_class_range(ci, 65, 90);
+    _re2_class_range(ci, 97, 122);
+    _re2_class_set(ci, 95);
+    return 0;
+}
+
+fn _re2_class_fill_space(ci) {
+    _re2_class_set(ci, 32);
+    _re2_class_set(ci, 9);
+    _re2_class_set(ci, 10);
+    _re2_class_set(ci, 11);
+    _re2_class_set(ci, 12);
+    _re2_class_set(ci, 13);
+    return 0;
+}
+
+# === Pattern decoder =================================================
+
+fn _re2_lit_byte() {
+    if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
+    var c = load8(_re2_pat + _re2_pos);
+    _re2_pos = _re2_pos + 1;
+    if (c != 92) { return c; }
+    if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
+    var e = load8(_re2_pat + _re2_pos);
+    _re2_pos = _re2_pos + 1;
+    if (e == 110) { return 10; }
+    if (e == 114) { return 13; }
+    if (e == 116) { return 9; }
+    if (e == 48)  { return 0; }
+    if (e == 97)  { return 7; }
+    if (e == 102) { return 12; }
+    if (e == 118) { return 11; }
+    return e;
+}
+
+# Parse a `[...]` bracket-expression body. Returns the class index;
+# negation encoded as -(ci+1).
+fn _re2_parse_class() {
+    var ci = _re2_alloc_class();
+    if (_re2_err != RE2_E_OK) { return ci; }
+    var neg = 0;
+    if (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) == 94) {
+        neg = 1;
+        _re2_pos = _re2_pos + 1;
+    }
+    var first = 1;
+    var done = 0;
+    while (done == 0) {
+        if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0 - 1; }
+        var pc = load8(_re2_pat + _re2_pos);
+        if (pc == 93 && first == 0) {
+            _re2_pos = _re2_pos + 1;
+            done = 1;
+        }
+        elif (pc == 92 && _re2_pos + 1 < _re2_pat_len) {
+            var nx = load8(_re2_pat + _re2_pos + 1);
+            if (nx == 100)      { _re2_class_fill_digit(ci); _re2_pos = _re2_pos + 2; }
+            elif (nx == 119)    { _re2_class_fill_word(ci);  _re2_pos = _re2_pos + 2; }
+            elif (nx == 115)    { _re2_class_fill_space(ci); _re2_pos = _re2_pos + 2; }
+            elif (nx == 68) {
+                # \D inside [...]: union the negation of digits.
+                var tmp = _re2_alloc_class();
+                if (_re2_err != RE2_E_OK) { return 0 - 1; }
+                _re2_class_fill_digit(tmp);
+                _re2_class_invert(tmp);
+                var z = 0;
+                while (z < 32) {
+                    var d = _re2_class_base + ci * 32 + z;
+                    var s = _re2_class_base + tmp * 32 + z;
+                    store8(d, load8(d) | load8(s));
+                    z = z + 1;
+                }
+                _re2_class_n = _re2_class_n - 1;
+                _re2_pos = _re2_pos + 2;
+            }
+            elif (nx == 87) {
+                var tmp2 = _re2_alloc_class();
+                if (_re2_err != RE2_E_OK) { return 0 - 1; }
+                _re2_class_fill_word(tmp2);
+                _re2_class_invert(tmp2);
+                var z2 = 0;
+                while (z2 < 32) {
+                    var d2 = _re2_class_base + ci * 32 + z2;
+                    var s2 = _re2_class_base + tmp2 * 32 + z2;
+                    store8(d2, load8(d2) | load8(s2));
+                    z2 = z2 + 1;
+                }
+                _re2_class_n = _re2_class_n - 1;
+                _re2_pos = _re2_pos + 2;
+            }
+            elif (nx == 83) {
+                var tmp3 = _re2_alloc_class();
+                if (_re2_err != RE2_E_OK) { return 0 - 1; }
+                _re2_class_fill_space(tmp3);
+                _re2_class_invert(tmp3);
+                var z3 = 0;
+                while (z3 < 32) {
+                    var d3 = _re2_class_base + ci * 32 + z3;
+                    var s3 = _re2_class_base + tmp3 * 32 + z3;
+                    store8(d3, load8(d3) | load8(s3));
+                    z3 = z3 + 1;
+                }
+                _re2_class_n = _re2_class_n - 1;
+                _re2_pos = _re2_pos + 2;
+            }
+            else {
+                var lc = _re2_lit_byte();
+                if (_re2_err != RE2_E_OK) { return 0 - 1; }
+                if (_re2_pos + 1 < _re2_pat_len && load8(_re2_pat + _re2_pos) == 45 && load8(_re2_pat + _re2_pos + 1) != 93) {
+                    _re2_pos = _re2_pos + 1;
+                    var hi = _re2_lit_byte();
+                    if (_re2_err != RE2_E_OK) { return 0 - 1; }
+                    _re2_class_range(ci, lc, hi);
+                } else {
+                    _re2_class_set(ci, lc);
+                }
+            }
+            first = 0;
+        }
+        else {
+            var lc2 = _re2_lit_byte();
+            if (_re2_err != RE2_E_OK) { return 0 - 1; }
+            if (_re2_pos + 1 < _re2_pat_len && load8(_re2_pat + _re2_pos) == 45 && load8(_re2_pat + _re2_pos + 1) != 93) {
+                _re2_pos = _re2_pos + 1;
+                var hi2 = _re2_lit_byte();
+                if (_re2_err != RE2_E_OK) { return 0 - 1; }
+                _re2_class_range(ci, lc2, hi2);
+            } else {
+                _re2_class_set(ci, lc2);
+            }
+            first = 0;
+        }
+    }
+    if (neg == 1) { return 0 - (ci + 1); }
+    return ci;
+}
+
+# === Recursive-descent ERE compiler ==================================
+#
+# The non-regular-feature rejection lives here. After consuming `(`, we
+# inspect the next bytes to detect:
+#   `(?:` -> non-capturing group (allowed)
+#   `(?=` `(?!` -> lookahead (REJECT: RE2_E_LOOKAROUND_UNSUPPORTED)
+#   `(?<=` `(?<!` -> lookbehind (REJECT)
+#   `(?<...>` -> named capture (REJECT for now: RE2_E_SYNTAX, deferred)
+#   `(?>` -> atomic group (REJECT: RE2_E_ATOMIC_UNSUPPORTED)
+#   `(?P<...>` -> named capture (REJECT for now)
+#   `(?P>` -> recursion (REJECT: RE2_E_RECURSION_UNSUPPORTED)
+#   `(?R)` -> recursion (REJECT)
+#   `(?...)` (anything else) -> RE2_E_SYNTAX
+
+fn _re2_parse_primary() {
+    if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
+    var c = load8(_re2_pat + _re2_pos);
+    if (c == 46) {
+        _re2_pos = _re2_pos + 1;
+        _re2_emit_op(RE2_OP_ANY);
+    }
+    elif (c == 94) {
+        _re2_pos = _re2_pos + 1;
+        _re2_emit_op(RE2_OP_BOL);
+    }
+    elif (c == 36) {
+        _re2_pos = _re2_pos + 1;
+        _re2_emit_op(RE2_OP_EOL);
+    }
+    elif (c == 40) {
+        # `(` — group. Inspect for `(?...)` sub-syntax.
+        _re2_pos = _re2_pos + 1;
+        var capture_idx = 0 - 1;
+        if (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) == 63) {
+            # `(?` — must be one of: `(?:` `(?=` `(?!` `(?<=` `(?<!` `(?<NAME>` `(?>` `(?P<NAME>` `(?P>NAME` `(?R)` ...
+            if (_re2_pos + 1 >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
+            var n1 = load8(_re2_pat + _re2_pos + 1);
+            # `(?:` non-capturing — allowed.
+            if (n1 == 58) {
+                _re2_pos = _re2_pos + 2;
+                # fall through to body parse below (no save emitted)
+            }
+            elif (n1 == 61 || n1 == 33) {
+                # (?=...) lookahead, (?!...) negative lookahead
+                _re2_err = RE2_E_LOOKAROUND_UNSUPPORTED;
+                return 0;
+            }
+            elif (n1 == 60) {
+                # (?<=...) lookbehind, (?<!...) negative lookbehind, OR
+                # (?<NAME>...) named capture.
+                if (_re2_pos + 2 >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
+                var n2 = load8(_re2_pat + _re2_pos + 2);
+                if (n2 == 61 || n2 == 33) {
+                    _re2_err = RE2_E_LOOKAROUND_UNSUPPORTED;
+                    return 0;
+                }
+                # `(?<NAME>...)` named capture — deferred per ADR 0003.
+                # Treat as syntax error so consumers know to switch to pcre
+                # at M3 (which will share the named-capture API surface).
+                _re2_err = RE2_E_SYNTAX;
+                return 0;
+            }
+            elif (n1 == 62) {
+                # (?>...) atomic group
+                _re2_err = RE2_E_ATOMIC_UNSUPPORTED;
+                return 0;
+            }
+            elif (n1 == 80) {
+                # `(?P<NAME>` named capture or `(?P>NAME)` recursion.
+                if (_re2_pos + 2 >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
+                var p2 = load8(_re2_pat + _re2_pos + 2);
+                if (p2 == 62) {
+                    # (?P>NAME) — subroutine call / recursion.
+                    _re2_err = RE2_E_RECURSION_UNSUPPORTED;
+                    return 0;
+                }
+                # Anything else under (?P — named capture — deferred.
+                _re2_err = RE2_E_SYNTAX;
+                return 0;
+            }
+            elif (n1 == 82) {
+                # (?R) — recursion
+                _re2_err = RE2_E_RECURSION_UNSUPPORTED;
+                return 0;
+            }
+            else {
+                # (?something_we_dont_recognize) — generic syntax error.
+                # Inline flags `(?i)` `(?m)` `(?s)` would land here; per ADR
+                # 0003 they're post-v1.0 work so they go through SYNTAX
+                # rather than a dedicated error code.
+                _re2_err = RE2_E_SYNTAX;
+                return 0;
+            }
+        }
+        else {
+            # Plain `(` — capturing group.
+            _re2_capture_n = _re2_capture_n + 1;
+            capture_idx = _re2_capture_n;
+            if (capture_idx > 9) { _re2_err = RE2_E_SYNTAX; return 0; }
+            _re2_emit_save(capture_idx * 2);
+        }
+        _re2_parse_alt();
+        if (_re2_err != RE2_E_OK) { return 0; }
+        if (_re2_pos >= _re2_pat_len || load8(_re2_pat + _re2_pos) != 41) { _re2_err = RE2_E_SYNTAX; return 0; }
+        _re2_pos = _re2_pos + 1;
+        if (capture_idx >= 0) { _re2_emit_save(capture_idx * 2 + 1); }
+    }
+    elif (c == 91) {
+        _re2_pos = _re2_pos + 1;
+        var ci = _re2_parse_class();
+        if (_re2_err != RE2_E_OK) { return 0; }
+        var neg = 0;
+        if (ci < 0) { neg = 1; ci = 0 - (ci + 1); }
+        _re2_emit_class(neg, ci);
+    }
+    elif (c == 92) {
+        if (_re2_pos + 1 >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
+        var e = load8(_re2_pat + _re2_pos + 1);
+        # `\1`-`\9` backref — REJECT explicitly per ADR 0003.
+        if (e >= 49 && e <= 57) {
+            _re2_err = RE2_E_BACKREF_UNSUPPORTED;
+            return 0;
+        }
+        if (e == 100) {
+            _re2_pos = _re2_pos + 2;
+            var ci2 = _re2_alloc_class(); if (_re2_err != RE2_E_OK) { return 0; }
+            _re2_class_fill_digit(ci2);
+            _re2_emit_class(0, ci2);
+        }
+        elif (e == 68) {
+            _re2_pos = _re2_pos + 2;
+            var ci3 = _re2_alloc_class(); if (_re2_err != RE2_E_OK) { return 0; }
+            _re2_class_fill_digit(ci3);
+            _re2_emit_class(1, ci3);
+        }
+        elif (e == 119) {
+            _re2_pos = _re2_pos + 2;
+            var ci4 = _re2_alloc_class(); if (_re2_err != RE2_E_OK) { return 0; }
+            _re2_class_fill_word(ci4);
+            _re2_emit_class(0, ci4);
+        }
+        elif (e == 87) {
+            _re2_pos = _re2_pos + 2;
+            var ci5 = _re2_alloc_class(); if (_re2_err != RE2_E_OK) { return 0; }
+            _re2_class_fill_word(ci5);
+            _re2_emit_class(1, ci5);
+        }
+        elif (e == 115) {
+            _re2_pos = _re2_pos + 2;
+            var ci6 = _re2_alloc_class(); if (_re2_err != RE2_E_OK) { return 0; }
+            _re2_class_fill_space(ci6);
+            _re2_emit_class(0, ci6);
+        }
+        elif (e == 83) {
+            _re2_pos = _re2_pos + 2;
+            var ci7 = _re2_alloc_class(); if (_re2_err != RE2_E_OK) { return 0; }
+            _re2_class_fill_space(ci7);
+            _re2_emit_class(1, ci7);
+        }
+        elif (e == 98) {
+            _re2_pos = _re2_pos + 2;
+            _re2_emit_op(RE2_OP_BOUNDARY);
+        }
+        elif (e == 66) {
+            _re2_pos = _re2_pos + 2;
+            _re2_emit_op(RE2_OP_NBOUNDARY);
+        }
+        else {
+            var lc = _re2_lit_byte();
+            if (_re2_err == RE2_E_OK) { _re2_emit_char(lc); }
+        }
+    }
+    elif (c == 124 || c == 41 || c == 42 || c == 43 || c == 63 || c == 123 || c == 125 || c == 93) {
+        _re2_err = RE2_E_SYNTAX; return 0;
+    }
+    else {
+        _re2_pos = _re2_pos + 1;
+        _re2_emit_char(c);
+    }
+    return 0;
+}
+
+fn _re2_apply_simple_q(atom_start, op_char) {
+    var atom_end = _re2_instr_n;
+    if (atom_end == atom_start) { _re2_err = RE2_E_SYNTAX; return 0; }
+    _re2_pos = _re2_pos + 1;
+    var lazy = 0;
+    if (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) == 63) {
+        lazy = 1;
+        _re2_pos = _re2_pos + 1;
+    }
+    if (op_char == 42) {
+        # a* -> SPLIT body, exit ; body ; JMP back ; exit
+        _re2_shift_right(atom_start, atom_end);
+        _re2_shift_targets_one(atom_start, atom_end);
+        _re2_instr_n = _re2_instr_n + 1;
+        var body_pc = atom_start + 1;
+        if (lazy == 1) {
+            store64(_re2_instr_base + atom_start * 16, _re2_w0(RE2_OP_SPLIT, 0, 0));
+            store64(_re2_instr_base + atom_start * 16 + 8, body_pc);
+        } else {
+            store64(_re2_instr_base + atom_start * 16, _re2_w0(RE2_OP_SPLIT, 0, body_pc));
+            store64(_re2_instr_base + atom_start * 16 + 8, 0);
+        }
+        _re2_emit_jmp(atom_start);
+        var exit_pc = _re2_instr_n;
+        if (lazy == 1) { _re2_patch_arg1(atom_start, exit_pc); }
+        else            { _re2_patch_arg2(atom_start, exit_pc); }
+    }
+    elif (op_char == 43) {
+        # a+ -> body ; SPLIT body, exit (greedy) | SPLIT exit, body (lazy)
+        if (lazy == 1) {
+            var s = _re2_emit_split(0, atom_start);
+            _re2_patch_arg1(s, _re2_instr_n);
+        } else {
+            var s2 = _re2_emit_split(atom_start, 0);
+            _re2_patch_arg2(s2, _re2_instr_n);
+        }
+    }
+    elif (op_char == 63) {
+        # a? -> SPLIT body, exit (greedy) | SPLIT exit, body (lazy)
+        _re2_shift_right(atom_start, atom_end);
+        _re2_shift_targets_one(atom_start, atom_end);
+        _re2_instr_n = _re2_instr_n + 1;
+        var body = atom_start + 1;
+        if (lazy == 1) {
+            store64(_re2_instr_base + atom_start * 16, _re2_w0(RE2_OP_SPLIT, 0, 0));
+            store64(_re2_instr_base + atom_start * 16 + 8, body);
+            _re2_patch_arg1(atom_start, _re2_instr_n);
+        } else {
+            store64(_re2_instr_base + atom_start * 16, _re2_w0(RE2_OP_SPLIT, 0, body));
+            store64(_re2_instr_base + atom_start * 16 + 8, _re2_instr_n);
+        }
+    }
+    return 0;
+}
+
+fn _re2_apply_star_inline(body_start, lazy) {
+    var body_end = _re2_instr_n;
+    _re2_shift_right(body_start, body_end);
+    _re2_shift_targets_one(body_start, body_end);
+    _re2_instr_n = _re2_instr_n + 1;
+    var body_pc = body_start + 1;
+    if (lazy == 1) {
+        store64(_re2_instr_base + body_start * 16, _re2_w0(RE2_OP_SPLIT, 0, 0));
+        store64(_re2_instr_base + body_start * 16 + 8, body_pc);
+    } else {
+        store64(_re2_instr_base + body_start * 16, _re2_w0(RE2_OP_SPLIT, 0, body_pc));
+        store64(_re2_instr_base + body_start * 16 + 8, 0);
+    }
+    _re2_emit_jmp(body_start);
+    var exit_pc = _re2_instr_n;
+    if (lazy == 1) { _re2_patch_arg1(body_start, exit_pc); }
+    else            { _re2_patch_arg2(body_start, exit_pc); }
+    return 0;
+}
+
+fn _re2_apply_brace_q(save_primary_start, atom_start) {
+    if (_re2_instr_n == atom_start) { _re2_err = RE2_E_SYNTAX; return 0; }
+    _re2_pos = _re2_pos + 1;
+    var n_min = 0;
+    var have_min = 0;
+    while (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) >= 48 && load8(_re2_pat + _re2_pos) <= 57) {
+        n_min = n_min * 10 + (load8(_re2_pat + _re2_pos) - 48);
+        _re2_pos = _re2_pos + 1;
+        have_min = 1;
+    }
+    if (have_min == 0) { _re2_err = RE2_E_SYNTAX; return 0; }
+    var n_max = n_min;
+    var open_ended = 0;
+    if (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) == 44) {
+        _re2_pos = _re2_pos + 1;
+        n_max = 0;
+        var have_max = 0;
+        while (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) >= 48 && load8(_re2_pat + _re2_pos) <= 57) {
+            n_max = n_max * 10 + (load8(_re2_pat + _re2_pos) - 48);
+            _re2_pos = _re2_pos + 1;
+            have_max = 1;
+        }
+        if (have_max == 0) { open_ended = 1; n_max = 0; }
+    }
+    if (_re2_pos >= _re2_pat_len || load8(_re2_pat + _re2_pos) != 125) { _re2_err = RE2_E_SYNTAX; return 0; }
+    _re2_pos = _re2_pos + 1;
+    var lazy = 0;
+    if (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) == 63) {
+        lazy = 1;
+        _re2_pos = _re2_pos + 1;
+    }
+    var pos_after_q = _re2_pos;
+    if (open_ended == 0 && n_max < n_min) { _re2_err = RE2_E_SYNTAX; return 0; }
+    if (n_max > 1000) { _re2_err = RE2_E_TOO_LARGE; return 0; }
+    if (n_min == 0) {
+        _re2_instr_n = atom_start;
+        if (open_ended == 1) {
+            var ts = _re2_instr_n;
+            _re2_pos = save_primary_start;
+            _re2_parse_primary();
+            if (_re2_err != RE2_E_OK) { return 0; }
+            _re2_apply_star_inline(ts, lazy);
+        } else {
+            var sn = 0;
+            var k = 0;
+            while (k < n_max) {
+                if (sn >= 64) { _re2_err = RE2_E_TOO_LARGE; return 0; }
+                var sx = _re2_emit_split(0, 0);
+                store64(_re2_q_splits + sn * 8, sx);
+                sn = sn + 1;
+                _re2_pos = save_primary_start;
+                _re2_parse_primary();
+                if (_re2_err != RE2_E_OK) { return 0; }
+                k = k + 1;
+            }
+            var exit_pc = _re2_instr_n;
+            var ti = 0;
+            while (ti < sn) {
+                var sxi = load64(_re2_q_splits + ti * 8);
+                if (lazy == 1) { _re2_patch_arg1(sxi, exit_pc); _re2_patch_arg2(sxi, sxi + 1); }
+                else            { _re2_patch_arg1(sxi, sxi + 1); _re2_patch_arg2(sxi, exit_pc); }
+                ti = ti + 1;
+            }
+        }
+    } else {
+        var k1 = 1;
+        while (k1 < n_min) {
+            _re2_pos = save_primary_start;
+            _re2_parse_primary();
+            if (_re2_err != RE2_E_OK) { return 0; }
+            k1 = k1 + 1;
+        }
+        if (open_ended == 1) {
+            var ts2 = _re2_instr_n;
+            _re2_pos = save_primary_start;
+            _re2_parse_primary();
+            if (_re2_err != RE2_E_OK) { return 0; }
+            _re2_apply_star_inline(ts2, lazy);
+        } elif (n_max > n_min) {
+            var sn2 = 0;
+            var k2 = n_min;
+            while (k2 < n_max) {
+                if (sn2 >= 64) { _re2_err = RE2_E_TOO_LARGE; return 0; }
+                var sy = _re2_emit_split(0, 0);
+                store64(_re2_q_splits + sn2 * 8, sy);
+                sn2 = sn2 + 1;
+                _re2_pos = save_primary_start;
+                _re2_parse_primary();
+                if (_re2_err != RE2_E_OK) { return 0; }
+                k2 = k2 + 1;
+            }
+            var exit_pc2 = _re2_instr_n;
+            var tj = 0;
+            while (tj < sn2) {
+                var syi = load64(_re2_q_splits + tj * 8);
+                if (lazy == 1) { _re2_patch_arg1(syi, exit_pc2); _re2_patch_arg2(syi, syi + 1); }
+                else            { _re2_patch_arg1(syi, syi + 1); _re2_patch_arg2(syi, exit_pc2); }
+                tj = tj + 1;
+            }
+        }
+    }
+    _re2_pos = pos_after_q;
+    return 0;
+}
+
+fn _re2_parse_atom() {
+    var save_primary_start = _re2_pos;
+    var atom_start = _re2_instr_n;
+    _re2_parse_primary();
+    if (_re2_err != RE2_E_OK) { return 0; }
+    if (_re2_pos >= _re2_pat_len) { return 0; }
+    var c = load8(_re2_pat + _re2_pos);
+    if (c == 42 || c == 43 || c == 63) {
+        _re2_apply_simple_q(atom_start, c);
+    }
+    elif (c == 123) {
+        _re2_apply_brace_q(save_primary_start, atom_start);
+    }
+    return 0;
+}
+
+fn _re2_parse_concat() {
+    while (_re2_pos < _re2_pat_len) {
+        var c = load8(_re2_pat + _re2_pos);
+        if (c == 124 || c == 41) { return 0; }
+        _re2_parse_atom();
+        if (_re2_err != RE2_E_OK) { return 0; }
+    }
+    return 0;
+}
+
+fn _re2_parse_alt() {
+    var left_start = _re2_instr_n;
+    _re2_parse_concat();
+    if (_re2_err != RE2_E_OK) { return 0; }
+    while (_re2_pos < _re2_pat_len && load8(_re2_pat + _re2_pos) == 124) {
+        _re2_pos = _re2_pos + 1;
+        var left_end = _re2_instr_n;
+        _re2_shift_right(left_start, left_end);
+        _re2_shift_targets_one(left_start, left_end);
+        _re2_instr_n = _re2_instr_n + 1;
+        store64(_re2_instr_base + left_start * 16, _re2_w0(RE2_OP_SPLIT, 0, left_start + 1));
+        store64(_re2_instr_base + left_start * 16 + 8, 0);
+        var jmp_idx = _re2_emit_jmp(0);
+        var right_start = _re2_instr_n;
+        _re2_patch_arg2(left_start, right_start);
+        _re2_parse_concat();
+        if (_re2_err != RE2_E_OK) { return 0; }
+        _re2_patch_arg1(jmp_idx, _re2_instr_n);
+    }
+    return 0;
+}
+
+# === Compiler entry ==================================================
+
+fn niyama_re2_compile(pat) {
+    _re2_lazy_init();
+    var n = strlen(pat);
+    var instr_bytes = RE2_MAX_INSTRS * 16;
+    var class_bytes = RE2_MAX_CLASSES * 32;
+    var nfa = alloc(RE2_NFA_HEADER_SIZE + instr_bytes + class_bytes);
+    var instrs = nfa + RE2_NFA_HEADER_SIZE;
+    var classes = instrs + instr_bytes;
+    store64(nfa + RE2_OFF_INSTRS_OFF,  RE2_NFA_HEADER_SIZE);
+    store64(nfa + RE2_OFF_CLASSES_OFF, RE2_NFA_HEADER_SIZE + instr_bytes);
+    store64(nfa + RE2_OFF_MATCH_START, 0 - 1);
+    store64(nfa + RE2_OFF_MATCH_END,   0 - 1);
+    var sv = 0;
+    while (sv < RE2_MAX_SAVES) {
+        store64(nfa + RE2_OFF_SAVES + sv * 8, 0 - 1);
+        sv = sv + 1;
+    }
+    _re2_pat = pat;
+    _re2_pat_len = n;
+    _re2_pos = 0;
+    _re2_nfa = nfa;
+    _re2_instr_base = instrs;
+    _re2_class_base = classes;
+    _re2_instr_n = 0;
+    _re2_class_n = 0;
+    _re2_capture_n = 0;
+    _re2_err = RE2_E_OK;
+    _re2_emit_save(0);
+    _re2_parse_alt();
+    if (_re2_err != RE2_E_OK || _re2_pos != _re2_pat_len) {
+        if (_re2_err == RE2_E_OK) { _re2_err = RE2_E_SYNTAX; }
+        _re2_last_err = _re2_err;
+        return 0;
+    }
+    _re2_emit_save(1);
+    _re2_emit_op(RE2_OP_MATCH);
+    if (_re2_err != RE2_E_OK) {
+        _re2_last_err = _re2_err;
+        return 0;
+    }
+    store64(nfa + RE2_OFF_INSTR_COUNT, _re2_instr_n);
+    store64(nfa + RE2_OFF_CLASS_COUNT, _re2_class_n);
+    store64(nfa + RE2_OFF_CAPTURES,    _re2_capture_n);
+    _re2_last_err = RE2_E_OK;
+    return nfa;
+}
+
+fn niyama_re2_last_error() {
+    return _re2_last_err;
+}
+
+# === Pike NFA matcher ================================================
+
+fn _re2_at_word_char(input, input_len, pos) {
+    if (pos < 0)         { return 0; }
+    if (pos >= input_len){ return 0; }
+    var c = load8(input + pos);
+    if (c >= 48 && c <= 57)   { return 1; }
+    if (c >= 65 && c <= 90)   { return 1; }
+    if (c >= 97 && c <= 122)  { return 1; }
+    if (c == 95)              { return 1; }
+    return 0;
+}
+
+fn _re2_is_boundary(input, input_len, pos) {
+    var l = _re2_at_word_char(input, input_len, pos - 1);
+    var r = _re2_at_word_char(input, input_len, pos);
+    if (l != r) { return 1; }
+    return 0;
+}
+
+fn _re2_class_get_at(class_base, ci, c) {
+    if (c < 0)   { return 0; }
+    if (c > 255) { return 0; }
+    var off = class_base + ci * 32 + (c >> 3);
+    var b = load8(off);
+    if ((b >> (c & 7)) & 1) { return 1; }
+    return 0;
+}
+
+fn _re2_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
+    if (pc < 0)                 { return 0; }
+    if (load64(_re2_m_lastgen + pc * 8) == _re2_m_gen) { return 0; }
+    store64(_re2_m_lastgen + pc * 8, _re2_m_gen);
+    var off = instrs + pc * 16;
+    var w0 = load64(off);
+    var op = w0 & 0xFF;
+    if (op == RE2_OP_JMP) {
+        var t = (w0 >> 32) & 0xFFFFFFFF;
+        _re2_add_thread(list_base, t, input, input_len, pos, saves, instrs);
+    }
+    elif (op == RE2_OP_SPLIT) {
+        var a = (w0 >> 32) & 0xFFFFFFFF;
+        var b = load64(off + 8);
+        _re2_add_thread(list_base, a, input, input_len, pos, saves, instrs);
+        _re2_add_thread(list_base, b, input, input_len, pos, saves, instrs);
+    }
+    elif (op == RE2_OP_SAVE) {
+        var idx = (w0 >> 8) & 0xFF;
+        var prev = load64(saves + idx * 8);
+        store64(saves + idx * 8, pos);
+        _re2_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        store64(saves + idx * 8, prev);
+    }
+    elif (op == RE2_OP_BOL) {
+        var ok = 0;
+        if (pos == 0) { ok = 1; }
+        else {
+            if (load8(input + pos - 1) == 10) { ok = 1; }
+        }
+        if (ok == 1) { _re2_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs); }
+    }
+    elif (op == RE2_OP_EOL) {
+        var ok2 = 0;
+        if (pos == input_len) { ok2 = 1; }
+        elif (load8(input + pos) == 10) { ok2 = 1; }
+        if (ok2 == 1) { _re2_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs); }
+    }
+    elif (op == RE2_OP_BOUNDARY) {
+        if (_re2_is_boundary(input, input_len, pos) == 1) {
+            _re2_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
+    }
+    elif (op == RE2_OP_NBOUNDARY) {
+        if (_re2_is_boundary(input, input_len, pos) == 0) {
+            _re2_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
+    }
+    else {
+        var n = load64(list_base);
+        store64(list_base + 8 + n * 168, pc);
+        var k = 0;
+        while (k < RE2_MAX_SAVES) {
+            var v = load64(saves + k * 8);
+            store64(list_base + 8 + n * 168 + 8 + k * 8, v);
+            k = k + 1;
+        }
+        store64(list_base, n + 1);
+    }
+    return 0;
+}
+
+fn _re2_pike_run(nfa, input, input_len, start_pos) {
+    _re2_lazy_init();
+    var instrs = nfa + load64(nfa + RE2_OFF_INSTRS_OFF);
+    var class_base = nfa + load64(nfa + RE2_OFF_CLASSES_OFF);
+    var matched = 0 - 1;
+    var saves_scratch = alloc(RE2_MAX_SAVES * 8);
+    var k = 0;
+    while (k < RE2_MAX_SAVES) {
+        store64(saves_scratch + k * 8, 0 - 1);
+        k = k + 1;
+    }
+    var match_saves = alloc(RE2_MAX_SAVES * 8);
+    var k2 = 0;
+    while (k2 < RE2_MAX_SAVES) {
+        store64(match_saves + k2 * 8, 0 - 1);
+        k2 = k2 + 1;
+    }
+    var cur = _re2_m_cur;
+    var nxt = _re2_m_next;
+    store64(cur, 0);
+    store64(nxt, 0);
+    _re2_m_gen = _re2_m_gen + 1;
+    _re2_add_thread(cur, 0, input, input_len, start_pos, saves_scratch, instrs);
+    var pos = start_pos;
+    var done = 0;
+    while (done == 0) {
+        var c = 0 - 1;
+        if (pos < input_len) { c = load8(input + pos); }
+        _re2_m_gen = _re2_m_gen + 1;
+        var n_cur = load64(cur);
+        var ti = 0;
+        while (ti < n_cur) {
+            var pc = load64(cur + 8 + ti * 168);
+            var iw0 = load64(instrs + pc * 16);
+            var iop = iw0 & 0xFF;
+            if (iop == RE2_OP_MATCH) {
+                matched = pos;
+                var ks = 0;
+                while (ks < RE2_MAX_SAVES) {
+                    store64(match_saves + ks * 8, load64(cur + 8 + ti * 168 + 8 + ks * 8));
+                    ks = ks + 1;
+                }
+                ti = n_cur;
+            }
+            elif (iop == RE2_OP_CHAR) {
+                var want = (iw0 >> 8) & 0xFF;
+                if (c >= 0 && c == want) {
+                    var ks2 = 0;
+                    while (ks2 < RE2_MAX_SAVES) {
+                        store64(saves_scratch + ks2 * 8, load64(cur + 8 + ti * 168 + 8 + ks2 * 8));
+                        ks2 = ks2 + 1;
+                    }
+                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                }
+            }
+            elif (iop == RE2_OP_ANY) {
+                if (c >= 0) {
+                    var ks3 = 0;
+                    while (ks3 < RE2_MAX_SAVES) {
+                        store64(saves_scratch + ks3 * 8, load64(cur + 8 + ti * 168 + 8 + ks3 * 8));
+                        ks3 = ks3 + 1;
+                    }
+                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                }
+            }
+            elif (iop == RE2_OP_CLASS || iop == RE2_OP_NCLASS) {
+                if (c >= 0) {
+                    var ci = (iw0 >> 8) & 0xFF;
+                    var hit = _re2_class_get_at(class_base, ci, c);
+                    if (iop == RE2_OP_NCLASS) {
+                        if (hit == 1) { hit = 0; } else { hit = 1; }
+                    }
+                    if (hit == 1) {
+                        var ks4 = 0;
+                        while (ks4 < RE2_MAX_SAVES) {
+                            store64(saves_scratch + ks4 * 8, load64(cur + 8 + ti * 168 + 8 + ks4 * 8));
+                            ks4 = ks4 + 1;
+                        }
+                        _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    }
+                }
+            }
+            ti = ti + 1;
+        }
+        var swap = cur;
+        cur = nxt;
+        nxt = swap;
+        store64(nxt, 0);
+        if (pos > input_len) { done = 1; }
+        elif (load64(cur) == 0) { done = 1; }
+        else { pos = pos + 1; }
+    }
+    if (matched >= 0) {
+        var ks5 = 0;
+        while (ks5 < RE2_MAX_SAVES) {
+            store64(nfa + RE2_OFF_SAVES + ks5 * 8, load64(match_saves + ks5 * 8));
+            ks5 = ks5 + 1;
+        }
+        store64(nfa + RE2_OFF_MATCH_START, load64(match_saves));
+        store64(nfa + RE2_OFF_MATCH_END,   matched);
+    } else {
+        store64(nfa + RE2_OFF_MATCH_START, 0 - 1);
+        store64(nfa + RE2_OFF_MATCH_END,   0 - 1);
+    }
+    return matched;
+}
+
+# === Public API ======================================================
+
+fn niyama_re2_match(nfa, s) {
+    if (nfa == 0) { return 0; }
+    var len = strlen(s);
+    var r = _re2_pike_run(nfa, s, len, 0);
+    if (r >= 0) { return 1; }
+    return 0;
+}
+
+fn niyama_re2_search(nfa, s) {
+    if (nfa == 0) { return 0 - 1; }
+    var len = strlen(s);
+    return niyama_re2_search_at(nfa, s, len, 0);
+}
+
+fn niyama_re2_search_at(nfa, s, len, from) {
+    if (nfa == 0) { return 0 - 1; }
+    var i = from;
+    while (i <= len) {
+        var r = _re2_pike_run(nfa, s, len, i);
+        if (r >= 0) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn niyama_re2_group_start(nfa, n) {
+    if (nfa == 0)        { return 0 - 1; }
+    if (n < 0 || n > 9)  { return 0 - 1; }
+    return load64(nfa + RE2_OFF_SAVES + n * 16);
+}
+
+fn niyama_re2_group_end(nfa, n) {
+    if (nfa == 0)        { return 0 - 1; }
+    if (n < 0 || n > 9)  { return 0 - 1; }
+    return load64(nfa + RE2_OFF_SAVES + n * 16 + 8);
+}

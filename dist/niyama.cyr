@@ -1,6 +1,6 @@
 # niyama.cyr -- bundled distribution
-# Version: 0.2.0
-# Status:  M1 — POSIX BRE engine shipped.
+# Version: 0.3.0
+# Status:  M2 — POSIX BRE + linear-time RE2 engines shipped.
 #
 # Fold-ready single-include artifact. Following the sandhi precedent
 # (cyrius v5.7.0 vendored `dist/sandhi.cyr` byte-identical as
@@ -13,14 +13,21 @@
 #
 # Engines shipped:
 #   - bre (M1, v0.2.0): POSIX BRE — niyama_bre_compile/match/search/...
-#   - re2, pcre, fuzzy, vim: not yet shipped (see roadmap.md)
+#   - re2 (M2, v0.3.0): ERE flavor + linear-time guarantee at API.
+#                       niyama_re2_compile/match/search/... — same shape
+#                       as niyama_bre_*, with compile-time rejection of
+#                       backref / lookaround / atomic / recursion.
+#   - pcre, fuzzy, vim: not yet shipped (see roadmap.md)
 #
 # Precondition: consumers MUST call alloc_init() before any
-# niyama_bre_compile() call.
+# niyama_*_compile() call.
 #
 # Do not edit -- rebuild with: scripts/build-dist.sh (post-M1)
 
-var NIYAMA_VERSION = "0.2.0";
+var NIYAMA_VERSION = "0.3.0";
 
 # === bre engine ======================================================
 include "src/bre.cyr"
+
+# === re2 engine ======================================================
+include "src/re2.cyr"

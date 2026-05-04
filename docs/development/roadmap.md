@@ -78,7 +78,7 @@ for any consumer that needs `grep` / `sed` BRE semantics.
 - `[:alpha:]` POSIX bracket character classes → M4.
 - Backref support → potentially post-v1.0, per ADR 0002.
 
-### M2 — re2 engine (v0.3.0) — Thompson NFA, linear-time guarantee
+### M2 — re2 engine (v0.3.0) — Thompson NFA, linear-time guarantee — ✅ shipped 2026-05-03
 
 **Why second.** DoS-safe regex for untrusted patterns is a real
 need (agnoshi log analysis, daimon agent pattern gates). RE2's
@@ -88,15 +88,32 @@ Architecturally similar to stdlib's Pike NFA but with the safety
 guarantees made explicit at the API level (any pattern that requires
 backref or backtracking gets rejected at compile time).
 
-**Acceptance:**
+**Acceptance — done:**
 
-- Compile-time rejection of features that break linear-time guarantee
-  (no `\1`-style backref, no lookaround, no recursion).
-- Linear-time complexity verified by benchmark on adversarial
-  patterns (`(a|a|a)*`-class catastrophic-backtracking inputs).
-- Conformance vs. Google's RE2 test corpus where applicable.
-- Fuzz harness with adversarial pattern generator.
-- cyim-side: `--regex=re2` flavor.
+- ✅ Compile-time rejection of features that break linear-time
+  guarantee. Each gets its own error code so consumers know which
+  engine to fall back to: `RE2_E_BACKREF_UNSUPPORTED`,
+  `RE2_E_LOOKAROUND_UNSUPPORTED`, `RE2_E_ATOMIC_UNSUPPORTED`,
+  `RE2_E_RECURSION_UNSUPPORTED` (per ADR 0003).
+- ✅ Linear-time complexity verified by benchmark on adversarial
+  patterns. `(a|a)*b` against 200 `a`s, `(a*)*b` against 200 `a`s,
+  Cox's `a?{30}a{30}` adversary all complete in <250μs.
+- ✅ ERE conformance covered: literals, `.`, anchors, char classes,
+  `\d`/`\w`/`\s`/`\b` predefined, alternation `|`, capturing +
+  non-capturing groups, greedy + lazy `*` `+` `?` `{n,m}`. Bench
+  floor recorded.
+- ✅ `fuzz/re2.fcyr` adversarial pattern generator + 4
+  rejection-invariant checks.
+- 🟦 cyim-side: `--regex=re2` flavor — landing in cyim repo as a
+  separate PR per cyim ADR 0002.
+
+**Deferred from M2 to later milestones:**
+
+- Named captures `(?P<name>...)` / `(?<name>...)` — deferred to
+  post-M3 cross-engine surface consolidation (re2 + pcre share the
+  named-capture API).
+- Unicode property classes `\p{L}` — post-v1.0 unless asked.
+- Inline flags `(?i)` `(?m)` `(?s)` — post-v1.0 unless asked.
 
 ### M3 — pcre engine (v0.4.0) — Perl-compatible
 

@@ -1,0 +1,185 @@
+# tests/re2.tcyr — niyama_re2 ERE engine + linear-time-guarantee tests.
+#
+# Coverage: ERE feature surface (per ADR 0003) + each rejection error
+# code (backref, lookaround, atomic, recursion) + adversarial linear-
+# time matching (catastrophic-backtracking-class patterns must complete
+# fast, since Pike NFA dedup precludes exponential-time backtracking).
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/re2.cyr"
+
+fn t_match(pat, input) {
+    var nfa = niyama_re2_compile(pat);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_re2_match(nfa, input);
+}
+
+fn t_search(pat, input) {
+    var nfa = niyama_re2_compile(pat);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_re2_search(nfa, input);
+}
+
+fn t_err(pat) {
+    var nfa = niyama_re2_compile(pat);
+    if (nfa != 0) { return 0; }
+    return niyama_re2_last_error();
+}
+
+fn main() {
+    alloc_init();
+
+    # === ERE basics ===================================================
+    test_group("re2-basics");
+    assert_eq(t_match("abc", "abc"), 1, "literal exact");
+    assert_eq(t_match("abc", "abd"), 0, "literal mismatch");
+    assert_eq(t_match("a.c", "axc"), 1, ". any-byte");
+    assert_eq(t_search("xyz", "abxyzde"), 2, "search hit");
+
+    # === Quantifiers (ERE — `+` and `?` ARE quantifiers, unlike BRE) ==
+    test_group("re2-quantifiers");
+    assert_eq(t_match("a+", "aaa"), 1, "+ one-or-more");
+    assert_eq(t_match("a+", ""), 0, "+ rejects empty");
+    assert_eq(t_match("ab?c", "ac"), 1, "? optional");
+    assert_eq(t_match("ab?c", "abc"), 1, "? present");
+    assert_eq(t_match("a*", ""), 1, "* zero-or-more");
+    assert_eq(t_match("a*", "aaaa"), 1, "* multi");
+    assert_eq(t_match("a{2,4}", "aa"), 1, "{2,4} min");
+    assert_eq(t_match("a{2,4}", "aaaa"), 1, "{2,4} max");
+    assert_eq(t_match("a{2,4}", "a"), 0, "{2,4} reject under-min");
+    assert_eq(t_match("a{3}", "aaa"), 1, "{n} exact");
+    assert_eq(t_match("a{2,}", "aaaaa"), 1, "{n,} open-ended");
+
+    # === Lazy quantifiers ============================================
+    test_group("re2-lazy");
+    var nfa_lazy = niyama_re2_compile("a.*?b");
+    assert_neq(nfa_lazy, 0, "lazy compiles");
+    var r1 = niyama_re2_search(nfa_lazy, "axxxbxxx");
+    assert_eq(r1, 0, "lazy search starts at 0");
+    # Lazy match prefers shortest; group 0 spans [0, 5).
+    assert_eq(niyama_re2_group_end(nfa_lazy, 0), 5, "lazy stops at first b");
+
+    # === Alternation =================================================
+    test_group("re2-alternation");
+    assert_eq(t_match("cat|dog|fish", "cat"), 1, "alt first");
+    assert_eq(t_match("cat|dog|fish", "dog"), 1, "alt mid");
+    assert_eq(t_match("cat|dog|fish", "fish"), 1, "alt last");
+    assert_eq(t_match("cat|dog|fish", "bird"), 0, "alt none");
+
+    # === Char classes + predefined ===================================
+    test_group("re2-classes");
+    assert_eq(t_match("\\d+", "12345"), 1, "\\d+ digits");
+    assert_eq(t_match("\\d+", "abc"), 0, "\\d+ rejects letters");
+    assert_eq(t_match("\\w+", "abc_123"), 1, "\\w+ word chars");
+    assert_eq(t_match("\\s", " "), 1, "\\s space");
+    assert_eq(t_match("\\s", "\t"), 1, "\\s tab");
+    assert_eq(t_match("\\D", "5"), 0, "\\D rejects digit");
+    assert_eq(t_match("\\D", "a"), 1, "\\D accepts letter");
+    assert_eq(t_match("[a-zA-Z]+", "Hello"), 1, "ascii letter range");
+    assert_eq(t_match("[^0-9]", "x"), 1, "negated digit-class");
+
+    # === Word boundaries =============================================
+    test_group("re2-boundaries");
+    assert_eq(t_search("\\bfoo\\b", "say foo bar"), 4, "\\b boundary");
+    assert_eq(t_search("\\bfoo\\b", "saysfoosbar"), 0 - 1, "\\b no boundary");
+
+    # === Anchors =====================================================
+    test_group("re2-anchors");
+    assert_eq(t_search("^abc", "abc"), 0, "^ start");
+    assert_eq(t_search("^abc", "xabc"), 0 - 1, "^ rejects mid");
+    assert_eq(t_search("xyz$", "wxyz"), 1, "$ end");
+    assert_eq(t_search("xyz$", "xyzw"), 0 - 1, "$ rejects mid");
+
+    # === Groups (capturing + non-capturing) ==========================
+    test_group("re2-groups");
+    var nfa_g = niyama_re2_compile("(\\w+)@(\\w+)");
+    assert_neq(nfa_g, 0, "groups compile");
+    assert_eq(niyama_re2_match(nfa_g, "user@domain"), 1, "groups match");
+    assert_eq(niyama_re2_group_start(nfa_g, 1), 0, "g1 start");
+    assert_eq(niyama_re2_group_end(nfa_g, 1), 4, "g1 end");
+    assert_eq(niyama_re2_group_start(nfa_g, 2), 5, "g2 start");
+    assert_eq(niyama_re2_group_end(nfa_g, 2), 11, "g2 end");
+
+    var nfa_nc = niyama_re2_compile("(?:foo)+bar");
+    assert_neq(nfa_nc, 0, "(?:) non-capturing compiles");
+    assert_eq(niyama_re2_match(nfa_nc, "foofoobar"), 1, "(?:) matches");
+    # Non-capturing means no group 1.
+    assert_eq(niyama_re2_group_start(nfa_nc, 1), 0 - 1, "(?:) no group 1");
+
+    # === Rejection paths (linear-time guarantee preservers) ===========
+    test_group("re2-rejection");
+
+    # Backref — \1-\9
+    assert_eq(t_err("(foo)\\1"), RE2_E_BACKREF_UNSUPPORTED, "\\1 rejected");
+    assert_eq(t_err("foo\\5"), RE2_E_BACKREF_UNSUPPORTED, "\\5 rejected");
+    assert_eq(t_err("\\9"), RE2_E_BACKREF_UNSUPPORTED, "\\9 rejected");
+    # \0 is NUL escape, not backref.
+    var nfa_nul = niyama_re2_compile("\\0");
+    assert_neq(nfa_nul, 0, "\\0 is NUL, not a backref");
+
+    # Lookaround — (?=...) (?!...) (?<=...) (?<!...)
+    assert_eq(t_err("(?=foo)bar"), RE2_E_LOOKAROUND_UNSUPPORTED, "(?=...) rejected");
+    assert_eq(t_err("(?!foo)bar"), RE2_E_LOOKAROUND_UNSUPPORTED, "(?!...) rejected");
+    assert_eq(t_err("(?<=foo)bar"), RE2_E_LOOKAROUND_UNSUPPORTED, "(?<=...) rejected");
+    assert_eq(t_err("(?<!foo)bar"), RE2_E_LOOKAROUND_UNSUPPORTED, "(?<!...) rejected");
+
+    # Atomic groups — (?>...)
+    assert_eq(t_err("(?>foo)"), RE2_E_ATOMIC_UNSUPPORTED, "(?>...) rejected");
+
+    # Recursion — (?R) (?P>name)
+    assert_eq(t_err("(?R)"), RE2_E_RECURSION_UNSUPPORTED, "(?R) rejected");
+    assert_eq(t_err("(?P>name)"), RE2_E_RECURSION_UNSUPPORTED, "(?P>name) rejected");
+
+    # Named captures (?<name>...) and (?P<name>...) — deferred (per ADR 0003).
+    # They should produce a syntax error, not silently parse as something else.
+    assert_eq(t_err("(?<name>foo)"), RE2_E_SYNTAX, "(?<name>) deferred -> SYNTAX");
+    assert_eq(t_err("(?P<name>foo)"), RE2_E_SYNTAX, "(?P<name>) deferred -> SYNTAX");
+
+    # Inline flags — also generic SYNTAX (post-v1.0 work).
+    assert_eq(t_err("(?i)foo"), RE2_E_SYNTAX, "(?i) flag -> SYNTAX");
+
+    # === Generic syntax errors ========================================
+    test_group("re2-syntax-errors");
+    assert_eq(t_err("("), RE2_E_SYNTAX, "unclosed group");
+    assert_eq(t_err(")"), RE2_E_SYNTAX, "stray close");
+    assert_eq(t_err("a{"), RE2_E_SYNTAX, "unclosed quantifier");
+    assert_eq(t_err("a{2,1}"), RE2_E_SYNTAX, "{n,m} m<n");
+    assert_eq(t_err("\\"), RE2_E_SYNTAX, "trailing backslash");
+
+    # === Linear-time DoS-resistance ==================================
+    # The signature defense — patterns that DoS PCRE/Perl/Python
+    # backtracking engines must terminate in linear time on Pike NFA.
+    # Pike NFA's per-PC-per-step dedup means each (pc, pos) pair is
+    # visited at most once; total work is O(N × M).
+    test_group("re2-linear-time");
+
+    # Classic catastrophic-backtracking pattern.
+    var nfa_d1 = niyama_re2_compile("(a|a)*b");
+    assert_neq(nfa_d1, 0, "(a|a)* compiles");
+    assert_eq(niyama_re2_match(nfa_d1, "aaaaaaaaaaaaaaaaaaaab"), 1, "(a|a)* matches");
+    assert_eq(niyama_re2_match(nfa_d1, "aaaaaaaaaaaaaaaaaaaa"), 0, "(a|a)* no-match terminates");
+
+    # Nested quantifier — `(a*)*` would be catastrophic in backtracking.
+    var nfa_d2 = niyama_re2_compile("(a*)*b");
+    assert_neq(nfa_d2, 0, "(a*)* compiles");
+    assert_eq(niyama_re2_match(nfa_d2, "aaaaaaaaaaaaaaaaaaaab"), 1, "(a*)* matches");
+    assert_eq(niyama_re2_match(nfa_d2, "aaaaaaaaaaaaaaaaaaaa"), 0, "(a*)* no-match");
+
+    # `a?{N}a{N}` — the original Cox-paper adversary.
+    var nfa_d3 = niyama_re2_compile("a?a?a?a?a?a?a?a?a?a?a?a?aaaaaaaaaaaa");
+    assert_neq(nfa_d3, 0, "Cox-pathological compiles");
+    assert_eq(niyama_re2_match(nfa_d3, "aaaaaaaaaaaa"), 1, "Cox-pathological matches");
+
+    # 50-deep alternation × repetition — PCRE chokes on inputs like this.
+    var nfa_d4 = niyama_re2_compile("(a|b|c|d|e|f|g)*z");
+    assert_neq(nfa_d4, 0, "alt-repeat compiles");
+    assert_eq(niyama_re2_match(nfa_d4, "abcdefgabcdefgabcdefgabcdefgz"), 1, "alt-repeat matches");
+    assert_eq(niyama_re2_match(nfa_d4, "abcdefgabcdefgabcdefgabcdefgX"), 0, "alt-repeat no-match terminates");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

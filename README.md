@@ -12,13 +12,15 @@ fit the universal-floor case Cyrius stdlib already covers.
 
 ## Status
 
-**0.2.0** (M1, 2026-05-03) — POSIX BRE engine (`niyama_bre_*`)
-shipped. ADR 0002 records the per-engine ABI shape that M2+ engines
-mirror; backref support is rejected at compile time and deferred to
-potentially post-v1.0. Next: M2 (`re2`, linear-time-safe). See
+**0.3.0** (M2, 2026-05-03) — POSIX BRE (`niyama_bre_*`) + linear-time
+RE2 (`niyama_re2_*`) engines shipped. niyama_re2 makes Pike NFA's
+DoS-resistance an advertised, compile-time-enforced API guarantee
+(per ADR 0003): backreferences, lookaround, atomic groups, and
+recursion all reject with distinct error codes pointing consumers
+toward niyama_pcre at M3. Next: M3 (`pcre`, full Perl-compat). See
 [`docs/development/state.md`](docs/development/state.md) for the
 live snapshot and [`docs/development/roadmap.md`](docs/development/roadmap.md)
-for the full M2+ plan.
+for the full M3+ plan.
 
 ## Why niyama exists
 
@@ -74,7 +76,7 @@ then demand):
 |-----------|--------|----------------|
 | **M0** | scaffold | Done — first-party-standards conformance, ABI sketch, dist artifact stub. |
 | **M1** | **bre** (POSIX BRE) | ✅ Done (v0.2.0). 68 unit tests, fuzz harness, bench floor recorded. ABI shape (per ADR 0002) is the template M2+ engines mirror. |
-| **M2** | **re2** (Thompson NFA, linear-time) | DoS-safe regex for untrusted patterns. Architecturally similar to stdlib's Pike NFA but with safety guarantees made explicit. |
+| **M2** | **re2** (Thompson NFA, linear-time) | ✅ Done (v0.3.0). 76 unit tests + adversarial fuzz. `(a\|a)*b` on 200 `a`s matches in ~84μs (would DoS backtracking engines). Compile rejects backref/lookaround/atomic/recursion with distinct error codes per ADR 0003. |
 | **M3** | **pcre** (Perl-compatible) | Power-user features: lookaround, atomic groups, named captures, backrefs, Unicode properties. Largest fuzz target — comes after re2 for diff-test fallback. |
 | **M3.5** | **fuzzy** (Levenshtein) | Typo-tolerant matching. Not strict regex but lives in the neighborhood. agnoshi shell completion + daimon agent fuzzy-name-match are immediate consumers. |
 | **M4** | **vim** (vim/cyim flavor) | Magic / nomagic modes, `\<`/`\>`, `\zs`/`\ze`. cyim's `:s/old/new/` and ex-mode pattern history are the consumer. |

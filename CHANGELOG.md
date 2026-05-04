@@ -4,6 +4,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-03
+
+M2 — second engine: re2 (`niyama_re2_*`). Linear-time Pike NFA matcher
+with ERE-flavor parser and **explicit compile-time rejection of every
+feature that would break the linear-time guarantee**. Each
+non-regular construct gets its own error code so consumers know
+exactly which engine to fall back to (niyama_pcre at M3). Per ADR
+0003.
+
+### Added
+
+- `src/re2.cyr` — Pike NFA matcher with ERE syntax: `\d` `\D` `\w`
+  `\W` `\s` `\S` `\b` `\B`, alternation `|`, `(...)` capturing
+  groups, `(?:...)` non-capturing, greedy AND lazy quantifiers
+  (`*` `+` `?` `{n,m}` and lazy variants). Same Pike NFA matcher
+  kernel as niyama_bre — the linear-time guarantee is structural.
+- Public ABI: `niyama_re2_compile`, `niyama_re2_match`,
+  `niyama_re2_search`, `niyama_re2_search_at`,
+  `niyama_re2_group_start`, `niyama_re2_group_end`,
+  `niyama_re2_last_error`. Mirrors `niyama_bre_*` shape per ADR
+  0002.
+- **Compile-time rejection** of features that would break linear
+  time, each with its own error code:
+  - `RE2_E_BACKREF_UNSUPPORTED` (= 2) — `\1`-`\9` backreferences.
+  - `RE2_E_LOOKAROUND_UNSUPPORTED` (= 3) — `(?=...)` `(?!...)`
+    `(?<=...)` `(?<!...)` lookaround.
+  - `RE2_E_ATOMIC_UNSUPPORTED` (= 4) — `(?>...)` atomic groups.
+  - `RE2_E_RECURSION_UNSUPPORTED` (= 5) — `(?R)` `(?P>name)`
+    recursion / subroutine calls.
+  - `RE2_E_TOO_LARGE` (= 6) — pattern compile exceeds instruction
+    or class limits.
+- ADR 0003 — niyama_re2 engine ABI shape and scope. Records the
+  ERE feature set, the linear-time guarantee, the rejection
+  contract, and the deferred-to-post-M3 named-capture decision.
+- `tests/re2.tcyr` — 76 unit tests across 11 feature groups,
+  including each rejection error code AND adversarial linear-time
+  patterns (`(a|a)*b`, `(a*)*b`, Cox's `a?{30}a{30}` adversary,
+  deep alternation × repetition).
+- `fuzz/re2.fcyr` — 221-assertion harness, including the four
+  rejection-invariant checks (every pattern matching `\1`/`(?=`/
+  `(?>`/`(?R` MUST yield the corresponding error code).
+- `tests/re2.bcyr` — bench harness with **dedicated DoS-resistance
+  benches**: `(a|a)*b` and `(a*)*b` against 200-`a` inputs that
+  would DoS a backtracking engine.
+
+### Performance floor (M2, x86_64, cyrius 5.8.42)
+
+- `re2_compile_*` — 3-5 μs avg (literal, alt, email-class).
+- `re2_search_literal` (256-byte input): ~44 μs.
+- `re2_search_alt` (3-way alt over 256-byte input): ~73 μs.
+- `re2_search_email`: ~15 μs.
+- **DoS-resistance** (the headline numbers — these would never
+  terminate on a backtracking engine):
+  - `(a|a)*b` against 200 `a`s, no match: ~84 μs.
+  - `(a*)*b` against 200 `a`s, no match: ~60 μs.
+  - Cox's `a?{30}a{30}` adversary, match: ~201 μs.
+
+### Changed
+
+- `dist/niyama.cyr` — bundle now includes `src/re2.cyr` alongside
+  `src/bre.cyr`. `NIYAMA_VERSION` → `"0.3.0"`.
+- `src/main.cyr` smoke banner reflects M2 status.
+
+### Deferred (not in M2)
+
+- Named captures `(?P<name>...)` / `(?<name>...)` — deferred to
+  post-M3. Both re2 and pcre will share the named-capture API
+  surface; designing it once with both engines in hand avoids
+  shipping it twice.
+- Unicode property classes `\p{L}` — M2 is ASCII-only.
+- Inline flags `(?i)` `(?m)` `(?s)` — post-v1.0 unless asked.
+
 ## [0.2.0] — 2026-05-03
 
 M1 — first engine shipped: POSIX BRE (`niyama_bre_*`). Per ADR 0002,

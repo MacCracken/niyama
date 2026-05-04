@@ -21,3 +21,4 @@ Decisions about niyama — what we chose, the context, and the consequences we a
 
 - [0001 — niyama is the additional-engines repo, following the sandhi-pattern fold lifecycle](0001-additional-engines-repo-sandhi-pattern.md)
 - [0002 — niyama_bre engine ABI shape and scope](0002-bre-engine-abi-and-scope.md)
+- [0003 — niyama_re2 engine ABI shape and scope](0003-re2-engine-abi-and-scope.md)

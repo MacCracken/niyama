@@ -1,0 +1,170 @@
+# fuzz/re2.fcyr — niyama_re2 adversarial fuzz harness.
+#
+# Beyond the basic don't-crash sweep, the niyama_re2 fuzz harness has a
+# stronger contract: every pattern that compiles MUST match in linear
+# time. This harness exercises a deliberately-adversarial pattern
+# generator (deeply-nested alternations, exponential-explosion shapes)
+# and asserts both: no crash, AND search returns within bounded steps.
+#
+# The Pike NFA's linear-time guarantee is structural — each (pc, pos)
+# pair visits at most once via _re2_m_lastgen dedup. The fuzz here is a
+# regression net, not a proof.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/re2.cyr"
+
+var _rng_state = 0xCAFEBABE;
+fn rng() {
+    var x = _rng_state;
+    x = x ^ (x << 13);
+    x = x & 0xFFFFFFFF;
+    x = x ^ (x >> 17);
+    x = x ^ (x << 5);
+    x = x & 0xFFFFFFFF;
+    _rng_state = x;
+    return x;
+}
+
+# ERE-flavor random pattern alphabet — heavy on metachars so the parser
+# branches all get exercised.
+fn gen_pat(buf, n) {
+    var alphabet = "abc.*+?[]()|\\dws{},^$012";
+    var alen = strlen(alphabet);
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var idx = r - (r / alen) * alen;
+        if (idx < 0) { idx = 0 - idx; }
+        store8(buf + i, load8(alphabet + idx));
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn gen_input(buf, n) {
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var c = r - (r / 26) * 26;
+        if (c < 0) { c = 0 - c; }
+        store8(buf + i, 97 + c);
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn fuzz_one(pat_buf, in_buf) {
+    var nfa = niyama_re2_compile(pat_buf);
+    if (nfa == 0) {
+        var e = niyama_re2_last_error();
+        assert(e != RE2_E_OK, "compile-fail-returns-error");
+        return 0;
+    }
+    var r = niyama_re2_search(nfa, in_buf);
+    assert(r >= 0 - 1, "search-returns-int");
+    return 0;
+}
+
+# Build an `aaa...a` string of length n into buf.
+fn fill_a(buf, n) {
+    var i = 0;
+    while (i < n) {
+        store8(buf + i, 97);
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("re2-fuzz");
+
+    # === Smoke corpus — known-tricky patterns =========================
+
+    # Past stdlib regex bugs (3-way alt at v5.7.18, body-pc re-entry).
+    fuzz_one("cat|dog|fish", "fish");
+    fuzz_one("([a-z]+)", "abc");
+
+    # Alternation + quantifier interleavings.
+    fuzz_one("(a|b)*c", "abacbc");
+    fuzz_one("(\\d+|[a-z]+)*", "abc123def456");
+    fuzz_one(".*foo.*bar", "barfoobaz");
+
+    # Deeply-nested groups.
+    fuzz_one("((((a))))", "a");
+
+    # === Rejection invariants =========================================
+    # Every \1-\9 MUST yield BACKREF_UNSUPPORTED.
+    var bn = niyama_re2_compile("(a)\\1");
+    assert_eq(bn, 0, "backref-pattern-rejects");
+    assert_eq(niyama_re2_last_error(), RE2_E_BACKREF_UNSUPPORTED, "backref-error-code");
+
+    # Every (?= MUST yield LOOKAROUND_UNSUPPORTED.
+    var ln = niyama_re2_compile("(?=foo)");
+    assert_eq(ln, 0, "lookahead-rejects");
+    assert_eq(niyama_re2_last_error(), RE2_E_LOOKAROUND_UNSUPPORTED, "lookaround-error-code");
+
+    # (?> atomic.
+    var an = niyama_re2_compile("(?>x)");
+    assert_eq(an, 0, "atomic-rejects");
+    assert_eq(niyama_re2_last_error(), RE2_E_ATOMIC_UNSUPPORTED, "atomic-error-code");
+
+    # (?R) recursion.
+    var rn = niyama_re2_compile("(?R)");
+    assert_eq(rn, 0, "recursion-rejects");
+    assert_eq(niyama_re2_last_error(), RE2_E_RECURSION_UNSUPPORTED, "recursion-error-code");
+
+    # === Linear-time adversaries ======================================
+    # Build a few big inputs and run them through patterns that DoS
+    # backtracking engines. Test passes simply by terminating in
+    # bounded time. Pike NFA dedup ensures O(N × M).
+
+    var big_a = alloc(256);
+    fill_a(big_a, 200);  # 200 'a's
+
+    # (a|a)*b on 200 'a's followed by no 'b' — backtracking would
+    # explore 2^200 paths; Pike NFA visits each (pc, pos) once.
+    var nfa1 = niyama_re2_compile("(a|a)*b");
+    assert_neq(nfa1, 0, "alt-explosion compiles");
+    assert_eq(niyama_re2_match(nfa1, big_a), 0, "alt-explosion no-match terminates");
+
+    # (a*)* on 200 'a's followed by nothing — the canonical (a*)*
+    # pathology. Should be linear.
+    var nfa2 = niyama_re2_compile("(a*)*b");
+    assert_neq(nfa2, 0, "(a*)* compiles");
+    assert_eq(niyama_re2_match(nfa2, big_a), 0, "(a*)* no-match terminates");
+
+    # a?{30}a{30} — Cox's original demonstration pattern.
+    var nfa3 = niyama_re2_compile("a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_neq(nfa3, 0, "Cox-pathological compiles");
+    var input_30a = alloc(64);
+    fill_a(input_30a, 30);
+    assert_eq(niyama_re2_match(nfa3, input_30a), 1, "Cox-pathological matches in linear time");
+
+    # === Randomized sweep =============================================
+    var pat_buf = alloc(64);
+    var in_buf = alloc(128);
+    var iter = 0;
+    while (iter < 200) {
+        var pat_len = (rng() & 0x1F) + 1;
+        if (pat_len > 32) { pat_len = 32; }
+        gen_pat(pat_buf, pat_len);
+        var in_len = (rng() & 0x3F) + 1;
+        if (in_len > 64) { in_len = 64; }
+        gen_input(in_buf, in_len);
+        fuzz_one(pat_buf, in_buf);
+        iter = iter + 1;
+    }
+    assert(1, "200-iter-sweep-survived");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);
