@@ -115,23 +115,42 @@ backref or backtracking gets rejected at compile time).
 - Unicode property classes `\p{L}` — post-v1.0 unless asked.
 - Inline flags `(?i)` `(?m)` `(?s)` — post-v1.0 unless asked.
 
-### M3 — pcre engine (v0.4.0) — Perl-compatible
+### M3 — pcre engine (v0.4.0) — Perl-compatible — ✅ shipped 2026-05-03
 
 **Why third.** Largest surface, largest fuzz target. Comes after re2
 so we have a battle-tested simpler engine to fall back to in
 diff-testing.
 
-**Acceptance:**
+**Acceptance — done (per ADR 0004):**
 
-- PCRE feature set TBD per per-engine ADR. Initial scope: non-capturing
-  groups `(?:...)`, named captures `(?<name>...)`, lookaround `(?=...)`
-  / `(?<=...)`, atomic groups `(?>...)`, backreferences `\1`/`\2`,
-  Unicode property classes `\p{L}`. Conditional patterns and recursion
-  deferred unless demand surfaces.
-- Strong fuzz coverage — PCRE is historically a CVE-rich engine;
-  reference vim/PCRE CVE history for known patterns.
-- Diff-test against re2 + bre on overlapping syntax.
-- cyim-side: `--regex=pcre` flavor.
+- ✅ Backtracking matcher (new — distinct from the Pike NFA kernel
+  bre/re2 share). Catastrophic-backtracking risk bounded by
+  configurable step-limit (default 1M) + hard recursion-depth bound
+  (256).
+- ✅ Backreferences `\1`-`\9`.
+- ✅ Lookahead `(?=...)`, `(?!...)` (variable-width, forward-only).
+- ✅ Atomic groups `(?>...)` + possessive quantifiers `*+`, `++`,
+  `?+`, `{n,m}+` (desugared to atomic-wrapping).
+- ✅ Named captures `(?<name>...)` and `(?P<name>...)` — both
+  syntaxes, lookup via `niyama_pcre_group_by_name(nfa, name)`.
+- ✅ Step-limit observability: `niyama_pcre_last_step_count()`.
+- ✅ `tests/pcre.tcyr` — 83 unit tests; `fuzz/pcre.fcyr` —
+  229-assertion harness with adversarial pattern generator and 5
+  rejection-invariant checks.
+- ✅ Bench floor recorded.
+- 🟦 cyim-side: `--regex=pcre` flavor — landing in cyim repo as a
+  separate PR.
+
+**Deferred from M3 — post-v1.0 unless a consumer asks (per ADR 0004):**
+
+- Lookbehind `(?<=...)` `(?<!...)` — needs fixed-width analysis.
+  M3.5 candidate.
+- Unicode property classes `\p{L}` — needs Unicode database.
+- POSIX bracket classes `[:alpha:]` — deferred to M4 (vim inherits).
+- Recursion `(?R)`, `(?P>name)`.
+- Conditional patterns `(?(cond)yes|no)`.
+- Inline flags `(?i)` `(?m)` `(?s)`.
+- Branch-reset groups, callouts, `\K`.
 
 ### M3.5 — fuzzy engine (v0.5.0) — Levenshtein / typo-tolerant
 

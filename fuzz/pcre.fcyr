@@ -1,0 +1,199 @@
+# fuzz/pcre.fcyr — niyama_pcre adversarial fuzz harness.
+#
+# PCRE has the richest CVE history of any regex engine in production —
+# this harness specifically exercises the catastrophic-backtracking
+# guard, the recursion-heavy code paths (lookahead, atomic), and the
+# named-capture validator.
+#
+# The step-limit guard is the load-bearing safety property: every fuzz
+# iteration sets a tight step limit, and the assertion is "any pattern
+# either compiles + matches in bounded steps OR rejects at compile."
+# A SIGSEGV / unbounded-loop would fail the test by causing the runner
+# to be killed, not by an assertion.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/pcre.cyr"
+
+var _rng_state = 0xDEADBEEF;
+fn rng() {
+    var x = _rng_state;
+    x = x ^ (x << 13);
+    x = x & 0xFFFFFFFF;
+    x = x ^ (x >> 17);
+    x = x ^ (x << 5);
+    x = x & 0xFFFFFFFF;
+    _rng_state = x;
+    return x;
+}
+
+# PCRE-flavor random pattern alphabet — heavy on metachars + backref +
+# group-introducer chars to stress the parser branches.
+fn gen_pat(buf, n) {
+    var alphabet = "abc.*+?[]()|\\dws{},^$0123<>=!:>P&";
+    var alen = strlen(alphabet);
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var idx = r - (r / alen) * alen;
+        if (idx < 0) { idx = 0 - idx; }
+        store8(buf + i, load8(alphabet + idx));
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn gen_input(buf, n) {
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var c = r - (r / 26) * 26;
+        if (c < 0) { c = 0 - c; }
+        store8(buf + i, 97 + c);
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn fuzz_one(pat_buf, in_buf) {
+    var nfa = niyama_pcre_compile(pat_buf);
+    if (nfa == 0) {
+        var e = niyama_pcre_last_error();
+        assert(e != PCRE_E_OK, "compile-fail-returns-error");
+        return 0;
+    }
+    var r = niyama_pcre_search(nfa, in_buf);
+    assert(r >= 0 - 1, "search-returns-int");
+    return 0;
+}
+
+fn fill_a(buf, n) {
+    var i = 0;
+    while (i < n) {
+        store8(buf + i, 97);
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("pcre-fuzz");
+
+    # === Smoke corpus — known-tricky PCRE patterns ====================
+    fuzz_one("(\\w+) \\1", "hello hello");
+    fuzz_one("a(?=b)", "ab");
+    fuzz_one("a(?!b)", "ac");
+    fuzz_one("(?>a*)b", "aaab");
+    fuzz_one("(?<name>\\w+)", "test");
+
+    # Nested lookahead.
+    fuzz_one("a(?=b(?=c))", "abc");
+
+    # Atomic + alternation.
+    fuzz_one("(?>a|b)c", "ac");
+
+    # Backref under quantifier.
+    fuzz_one("(\\w)\\1+", "aaaa");
+
+    # === Rejection invariants =========================================
+
+    # Lookbehind MUST yield LOOKBEHIND_UNSUPPORTED.
+    var l1 = niyama_pcre_compile("(?<=foo)bar");
+    assert_eq(l1, 0, "lookbehind rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_LOOKBEHIND_UNSUPPORTED, "lookbehind error");
+
+    # Unicode property MUST yield UNICODE_PROP_UNSUPPORTED.
+    var u1 = niyama_pcre_compile("\\p{L}");
+    assert_eq(u1, 0, "unicode-prop rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_UNICODE_PROP_UNSUPPORTED, "unicode error");
+
+    # Recursion.
+    var r1 = niyama_pcre_compile("(?R)");
+    assert_eq(r1, 0, "recursion rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_RECURSION_UNSUPPORTED, "recursion error");
+
+    # Conditional.
+    var c1 = niyama_pcre_compile("(?(1)a|b)");
+    assert_eq(c1, 0, "conditional rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_CONDITIONAL_UNSUPPORTED, "conditional error");
+
+    # Duplicate names.
+    var d1 = niyama_pcre_compile("(?<x>a)(?<x>b)");
+    assert_eq(d1, 0, "dup-name rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_DUPLICATE_NAME, "dup-name error");
+
+    # === Catastrophic-backtracking guard =============================
+    # Each pattern below would loop ~2^N times in an unbounded
+    # backtracking matcher. With the step limit, they bail out fast.
+
+    niyama_pcre_set_step_limit(50000);
+
+    var big_a = alloc(64);
+    fill_a(big_a, 30);  # 30 'a's
+
+    # (a+)+b — classic catastrophic.
+    var nfa1 = niyama_pcre_compile("(a+)+b");
+    assert_neq(nfa1, 0, "(a+)+ compiles");
+    assert_eq(niyama_pcre_match(nfa1, big_a), 0, "(a+)+ on 30a no-b -> bounded");
+
+    # (a*)*b.
+    var nfa2 = niyama_pcre_compile("(a*)*b");
+    assert_neq(nfa2, 0, "(a*)* compiles");
+    assert_eq(niyama_pcre_match(nfa2, big_a), 0, "(a*)* on 30a no-b -> bounded");
+
+    # (a|a)*b.
+    var nfa3 = niyama_pcre_compile("(a|a)*b");
+    assert_neq(nfa3, 0, "(a|a)* compiles");
+    assert_eq(niyama_pcre_match(nfa3, big_a), 0, "(a|a)* on 30a no-b -> bounded");
+
+    # ^(a*)*$ no-anchor mismatch.
+    var nfa4 = niyama_pcre_compile("(a*)*$");
+    assert_neq(nfa4, 0, "(a*)*$ compiles");
+    var fixedlen_input = alloc(64);
+    fill_a(fixedlen_input, 20);
+    store8(fixedlen_input + 20, 98);  # 'b' at the end
+    store8(fixedlen_input + 21, 0);
+    var r_anchor = niyama_pcre_match(nfa4, fixedlen_input);
+    # Either matches or doesn't, but must terminate.
+    assert(r_anchor == 0 || r_anchor == 1, "(a*)*$ anchored terminates");
+
+    # Atomic groups should still work under tight limit (they don't
+    # backtrack so the bound shouldn't kick in).
+    var nfa_at = niyama_pcre_compile("(?>a*)b");
+    assert_neq(nfa_at, 0, "atomic compiles");
+    assert_eq(niyama_pcre_match(nfa_at, "aaab"), 1, "atomic friendly works");
+
+    # Restore default.
+    niyama_pcre_set_step_limit(1000000);
+
+    # === Randomized sweep =============================================
+    # Reset to a high limit but still finite — we don't want a hung
+    # fuzzer if a generated pattern is genuinely pathological.
+    niyama_pcre_set_step_limit(500000);
+
+    var pat_buf = alloc(64);
+    var in_buf = alloc(128);
+    var iter = 0;
+    while (iter < 200) {
+        var pat_len = (rng() & 0x1F) + 1;
+        if (pat_len > 32) { pat_len = 32; }
+        gen_pat(pat_buf, pat_len);
+        var in_len = (rng() & 0x3F) + 1;
+        if (in_len > 64) { in_len = 64; }
+        gen_input(in_buf, in_len);
+        fuzz_one(pat_buf, in_buf);
+        iter = iter + 1;
+    }
+    assert(1, "200-iter-sweep-survived");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

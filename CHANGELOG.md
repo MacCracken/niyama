@@ -4,6 +4,93 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-03
+
+M3 — third engine: pcre (`niyama_pcre_*`). Backtracking matcher (the
+first non-Pike-NFA engine in niyama) bringing the features re2
+deliberately rejects: backreferences, lookahead, atomic groups, named
+captures, possessive quantifiers. Catastrophic-backtracking risk is
+mitigated by an explicit step-limit guard with a configurable budget
+(default 1M steps) and a hard recursion-depth bound (256). Per ADR
+0004.
+
+### Added
+
+- `src/pcre.cyr` — backtracking matcher with PCRE-flavor parser,
+  ~1100 lines. New opcodes: `PCRE_OP_BACKREF`, `PCRE_OP_LOOKAHEAD`,
+  `PCRE_OP_NLOOKAHEAD`, `PCRE_OP_LOOKAHEAD_END`, `PCRE_OP_ATOMIC`,
+  `PCRE_OP_ATOMIC_END`. Same instruction layout as bre/re2 for
+  shared opcodes.
+- Public ABI mirroring niyama_bre / niyama_re2 plus pcre-specific
+  extensions:
+  - `niyama_pcre_compile` / `_match` / `_search` / `_search_at`
+  - `niyama_pcre_group_start` / `_group_end` (groups 0..9)
+  - `niyama_pcre_group_by_name(nfa, name)` — named-capture lookup
+  - `niyama_pcre_last_error()` — frozen error code set
+  - `niyama_pcre_set_step_limit(n)` — configurable step budget
+  - `niyama_pcre_last_step_count()` — observability hook
+- **PCRE feature set in M3**: ERE base (literals, `.`, anchors,
+  `\d`/`\w`/`\s`/`\b`, classes, `*` `+` `?` `{n,m}`, lazy,
+  alternation, capturing + non-capturing), plus:
+  - **Backreferences `\1`-`\9`** — the headline PCRE feature.
+  - **Lookahead `(?=...)` and `(?!...)`** — variable-width.
+  - **Atomic groups `(?>...)`** — no internal backtracking.
+  - **Possessive quantifiers `*+`, `++`, `?+`, `{n,m}+`** —
+    desugared to atomic-wrapping at compile.
+  - **Named captures `(?<name>...)` and `(?P<name>...)`** — both
+    syntaxes; lookup by name. Up to 9 named (shared with positional).
+  - Step-limit + depth-limit catastrophic-backtracking guard.
+- ADR 0004 — niyama_pcre engine ABI shape, matcher architecture,
+  and scope. Records the backtracking-vs-Pike-NFA decision, the
+  step-limit semantics, and the deferral list.
+- `tests/pcre.tcyr` — 83 unit tests across 13 groups, including
+  backref correctness, lookahead semantics, atomic-blocks-backtracking
+  demo, named-capture lookup, all 7 deferred-feature rejection codes,
+  and the step-limit guard kicking in on `(a+)+b` against 25 'a's.
+- `fuzz/pcre.fcyr` — 229-assertion harness with adversarial pattern
+  generator, every rejection invariant, and 4 catastrophic-backtracking
+  patterns under tight step limit.
+- `tests/pcre.bcyr` — bench harness covering compile + search +
+  PCRE-specific features + the bounded-DoS bench (`(a+)+b` on 30
+  'a's with `step_limit=50k` terminates in ~2.4ms).
+
+### Performance floor (M3, x86_64, cyrius 5.8.42)
+
+- `pcre_compile_*` — 4-5 μs avg (literal, email-class, backref,
+  lookahead).
+- `pcre_search_literal` (256-byte input): ~17 μs.
+- `pcre_search_email`: ~9 μs.
+- `pcre_search_alt` (3-way alt): ~61 μs.
+- `pcre_backref` (`(\w+) \1` on `hello hello world`): ~2 μs.
+- `pcre_lookahead` (`\w+(?=@)` on 256-byte input): ~180 μs (largest
+  search bench — lookahead validates against multiple match start
+  positions).
+- `pcre_atomic` (`(?>a*)b` on `aaaaaaaaaaaaab`): ~3 μs.
+- `pcre_named_captures`: ~3 μs.
+- **Catastrophic-backtracking guard**: `(a+)+b` against 30 'a's with
+  no terminator, `step_limit=50000` — ~2.4 ms. Without the limit
+  this pattern would explore ~2^30 paths (would never terminate in
+  practice).
+
+### Changed
+
+- `dist/niyama.cyr` — bundle now includes `src/pcre.cyr` alongside
+  `src/bre.cyr` and `src/re2.cyr`. `NIYAMA_VERSION` → `"0.4.0"`.
+- `src/main.cyr` smoke banner reflects M3 status.
+
+### Deferred (not in M3 — see ADR 0004 for rationale)
+
+- Lookbehind `(?<=...)` `(?<!...)` — needs fixed-width analysis;
+  M3.5 candidate if a consumer asks. Compile rejects with
+  `PCRE_E_LOOKBEHIND_UNSUPPORTED`.
+- Unicode property classes `\p{L}` — needs Unicode database. Rejects
+  with `PCRE_E_UNICODE_PROP_UNSUPPORTED`.
+- POSIX bracket classes `[:alpha:]` — deferred to M4 (vim flavor
+  inherits the same semantics).
+- Recursion `(?R)` `(?P>name)` — `PCRE_E_RECURSION_UNSUPPORTED`.
+- Conditional patterns `(?(...)...)` — `PCRE_E_CONDITIONAL_UNSUPPORTED`.
+- Inline flags `(?i)` `(?m)` `(?s)` — generic `PCRE_E_SYNTAX`.
+
 ## [0.3.0] — 2026-05-03
 
 M2 — second engine: re2 (`niyama_re2_*`). Linear-time Pike NFA matcher

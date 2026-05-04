@@ -1,0 +1,227 @@
+# tests/pcre.tcyr — niyama_pcre engine tests.
+#
+# Coverage: ERE base features (mirrors re2.tcyr's coverage to verify
+# parity), PCRE-specific features (backref, lookahead, atomic, named
+# captures, possessive), step-limit guard against catastrophic
+# backtracking, deferred-feature rejection paths.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/pcre.cyr"
+
+fn t_match(pat, input) {
+    var nfa = niyama_pcre_compile(pat);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_pcre_match(nfa, input);
+}
+
+fn t_search(pat, input) {
+    var nfa = niyama_pcre_compile(pat);
+    if (nfa == 0) { return 0 - 1; }
+    return niyama_pcre_search(nfa, input);
+}
+
+fn t_err(pat) {
+    var nfa = niyama_pcre_compile(pat);
+    if (nfa != 0) { return 0; }
+    return niyama_pcre_last_error();
+}
+
+fn main() {
+    alloc_init();
+
+    # === Basics — ERE parity =========================================
+    test_group("pcre-basics");
+    assert_eq(t_match("abc", "abc"), 1, "literal");
+    assert_eq(t_match("a.c", "axc"), 1, ". any-byte");
+    assert_eq(t_search("xyz", "abxyzde"), 2, "search hit");
+
+    # === Quantifiers (greedy + lazy + possessive) ====================
+    test_group("pcre-quantifiers");
+    assert_eq(t_match("a*", ""), 1, "* zero");
+    assert_eq(t_match("a+", "aaa"), 1, "+ one-or-more");
+    assert_eq(t_match("a+", ""), 0, "+ rejects empty");
+    assert_eq(t_match("ab?c", "ac"), 1, "? optional missing");
+    assert_eq(t_match("ab?c", "abc"), 1, "? optional present");
+    assert_eq(t_match("a{2,4}", "aaa"), 1, "{2,4}");
+    assert_eq(t_match("a{3}", "aaa"), 1, "{3} exact");
+
+    # Lazy
+    var nfa_lazy = niyama_pcre_compile("a.*?b");
+    assert_neq(nfa_lazy, 0, "lazy compiles");
+    assert_eq(niyama_pcre_search(nfa_lazy, "axxxbxxx"), 0, "lazy");
+    assert_eq(niyama_pcre_group_end(nfa_lazy, 0), 5, "lazy stops early");
+
+    # Possessive — `a*+` is atomic-greedy. `a*+ab` should fail because
+    # the possessive `a*` consumes everything and refuses to give back.
+    var nfa_poss = niyama_pcre_compile("a*+ab");
+    assert_neq(nfa_poss, 0, "possessive compiles");
+    assert_eq(niyama_pcre_match(nfa_poss, "aaab"), 0, "possessive doesn't backtrack");
+
+    # === Char classes ================================================
+    test_group("pcre-classes");
+    assert_eq(t_match("\\d+", "12345"), 1, "\\d+");
+    assert_eq(t_match("\\w+", "abc_123"), 1, "\\w+");
+    assert_eq(t_match("\\s", " "), 1, "\\s");
+    assert_eq(t_match("[a-z]+", "hello"), 1, "[a-z]+");
+    assert_eq(t_match("[^0-9]+", "abc"), 1, "[^0-9]+");
+
+    # === Anchors + boundaries ========================================
+    test_group("pcre-anchors");
+    assert_eq(t_search("^abc", "abc"), 0, "^ start");
+    assert_eq(t_search("xyz$", "wxyz"), 1, "$ end");
+    assert_eq(t_search("\\bfoo\\b", "say foo bar"), 4, "\\b boundary");
+
+    # === Alternation =================================================
+    test_group("pcre-alternation");
+    assert_eq(t_match("cat|dog|fish", "cat"), 1, "alt first");
+    assert_eq(t_match("cat|dog|fish", "fish"), 1, "alt last");
+    assert_eq(t_match("cat|dog|fish", "bird"), 0, "alt none");
+
+    # === Groups ======================================================
+    test_group("pcre-groups");
+    var nfa_g = niyama_pcre_compile("(\\w+)@(\\w+)");
+    assert_neq(nfa_g, 0, "groups compile");
+    assert_eq(niyama_pcre_match(nfa_g, "user@domain"), 1, "groups match");
+    assert_eq(niyama_pcre_group_start(nfa_g, 1), 0, "g1 start");
+    assert_eq(niyama_pcre_group_end(nfa_g, 1), 4, "g1 end");
+    assert_eq(niyama_pcre_group_start(nfa_g, 2), 5, "g2 start");
+
+    # === Backreferences (the headline PCRE feature) ===================
+    test_group("pcre-backref");
+    var nfa_br = niyama_pcre_compile("(\\w+) \\1");
+    assert_neq(nfa_br, 0, "backref compiles");
+    assert_eq(niyama_pcre_match(nfa_br, "hello hello"), 1, "backref matches");
+    assert_eq(niyama_pcre_match(nfa_br, "hello world"), 0, "backref rejects mismatch");
+
+    # Self-referencing pattern: HTML-like tag matching.
+    var nfa_html = niyama_pcre_compile("<(\\w+)>.*</\\1>");
+    assert_neq(nfa_html, 0, "html-tag-pattern compiles");
+    assert_eq(niyama_pcre_match(nfa_html, "<div>x</div>"), 1, "html tag matches");
+    assert_eq(niyama_pcre_match(nfa_html, "<div>x</span>"), 0, "html tag mismatched name");
+
+    # Backref to non-participating group fails.
+    var nfa_npart = niyama_pcre_compile("(a)?\\1");
+    # When (a)? doesn't match (group didn't participate), \1 has -1 bounds.
+    assert_neq(nfa_npart, 0, "non-participating backref compiles");
+    assert_eq(niyama_pcre_match(nfa_npart, "a"), 0, "non-part backref needs participation");
+    assert_eq(niyama_pcre_match(nfa_npart, "aa"), 1, "(a)?\\1 with both");
+
+    # === Lookahead ===================================================
+    test_group("pcre-lookahead");
+    var nfa_la = niyama_pcre_compile("foo(?=bar)");
+    assert_neq(nfa_la, 0, "lookahead compiles");
+    assert_eq(niyama_pcre_search(nfa_la, "foobar"), 0, "lookahead matches");
+    assert_eq(niyama_pcre_match(nfa_la, "foobaz"), 0, "lookahead rejects");
+
+    var nfa_nla = niyama_pcre_compile("foo(?!bar)");
+    assert_neq(nfa_nla, 0, "neg lookahead compiles");
+    assert_eq(niyama_pcre_match(nfa_nla, "foobaz"), 1, "neg lookahead matches");
+    assert_eq(niyama_pcre_match(nfa_nla, "foobar"), 0, "neg lookahead rejects when sub matches");
+
+    # Lookahead doesn't consume — the group end shows pos at start of lookahead.
+    var nfa_la2 = niyama_pcre_compile("(\\w+)(?=:)");
+    assert_neq(nfa_la2, 0, "lookahead with capture");
+    assert_eq(niyama_pcre_search(nfa_la2, "key:value"), 0, "captures key only");
+    assert_eq(niyama_pcre_group_end(nfa_la2, 1), 3, "captures end before colon");
+
+    # === Atomic groups ===============================================
+    test_group("pcre-atomic");
+    # (?>a*)b — atomic a* won't backtrack to give 'a' to 'b'.
+    var nfa_at = niyama_pcre_compile("(?>a*)b");
+    assert_neq(nfa_at, 0, "atomic compiles");
+    assert_eq(niyama_pcre_match(nfa_at, "aaab"), 1, "atomic still matches when b follows");
+    assert_eq(niyama_pcre_match(nfa_at, "aaa"), 0, "atomic no-b fails");
+
+    # The classic atomic-blocks-backtracking demo: a*ab vs (?>a*)ab.
+    # First: a*ab matches "aaab" (a* gives back one 'a' to a).
+    # Second: (?>a*)ab on "aaab" — atomic a* eats all, refuses to give back, fails.
+    var nfa_no_atomic = niyama_pcre_compile("a*ab");
+    assert_eq(niyama_pcre_match(nfa_no_atomic, "aaab"), 1, "non-atomic backtracks");
+    var nfa_atomic = niyama_pcre_compile("(?>a*)ab");
+    assert_eq(niyama_pcre_match(nfa_atomic, "aaab"), 0, "atomic refuses to backtrack");
+
+    # === Named captures ==============================================
+    test_group("pcre-named");
+    var nfa_n1 = niyama_pcre_compile("(?<word>\\w+)");
+    assert_neq(nfa_n1, 0, "(?<word>) compiles");
+    assert_eq(niyama_pcre_match(nfa_n1, "hello"), 1, "named matches");
+    assert_eq(niyama_pcre_group_by_name(nfa_n1, "word"), 1, "name->1");
+    assert_eq(niyama_pcre_group_start(nfa_n1, niyama_pcre_group_by_name(nfa_n1, "word")), 0, "named via lookup");
+
+    # (?P<name>...) Python-style.
+    var nfa_n2 = niyama_pcre_compile("(?P<digit>\\d+)");
+    assert_neq(nfa_n2, 0, "(?P<>) compiles");
+    assert_eq(niyama_pcre_match(nfa_n2, "12345"), 1, "(?P<>) matches");
+    assert_eq(niyama_pcre_group_by_name(nfa_n2, "digit"), 1, "(?P<>) lookup");
+    assert_eq(niyama_pcre_group_by_name(nfa_n2, "missing"), 0 - 1, "missing name -> -1");
+
+    # Multiple named captures.
+    var nfa_multi = niyama_pcre_compile("(?<scheme>https?)://(?<host>[a-z.]+)");
+    assert_neq(nfa_multi, 0, "multi named compiles");
+    assert_eq(niyama_pcre_match(nfa_multi, "https://example.com"), 1, "multi named matches");
+    assert_eq(niyama_pcre_group_by_name(nfa_multi, "scheme"), 1, "scheme=1");
+    assert_eq(niyama_pcre_group_by_name(nfa_multi, "host"), 2, "host=2");
+
+    # Duplicate name rejection.
+    assert_eq(t_err("(?<x>a)(?<x>b)"), PCRE_E_DUPLICATE_NAME, "dup name rejected");
+
+    # === Deferred-feature rejection ==================================
+    test_group("pcre-deferrals");
+
+    # Lookbehind deferred.
+    assert_eq(t_err("(?<=foo)bar"), PCRE_E_LOOKBEHIND_UNSUPPORTED, "(?<=) deferred");
+    assert_eq(t_err("(?<!foo)bar"), PCRE_E_LOOKBEHIND_UNSUPPORTED, "(?<!) deferred");
+
+    # Unicode property classes deferred.
+    assert_eq(t_err("\\p{L}"), PCRE_E_UNICODE_PROP_UNSUPPORTED, "\\p{L} deferred");
+    assert_eq(t_err("[\\p{L}]"), PCRE_E_UNICODE_PROP_UNSUPPORTED, "[\\p{L}] deferred");
+
+    # Recursion deferred.
+    assert_eq(t_err("(?R)"), PCRE_E_RECURSION_UNSUPPORTED, "(?R) deferred");
+    assert_eq(t_err("(?P>name)"), PCRE_E_RECURSION_UNSUPPORTED, "(?P>name) deferred");
+
+    # Conditional patterns deferred.
+    assert_eq(t_err("(?(1)yes|no)"), PCRE_E_CONDITIONAL_UNSUPPORTED, "(?(...)) deferred");
+
+    # Inline flags — generic SYNTAX (post-v1.0).
+    assert_eq(t_err("(?i)foo"), PCRE_E_SYNTAX, "(?i) syntax err");
+
+    # === Generic syntax errors =======================================
+    test_group("pcre-syntax");
+    assert_eq(t_err("("), PCRE_E_SYNTAX, "unclosed group");
+    assert_eq(t_err(")"), PCRE_E_SYNTAX, "stray close");
+    assert_eq(t_err("a{2,1}"), PCRE_E_SYNTAX, "{n,m} m<n");
+    assert_eq(t_err("\\"), PCRE_E_SYNTAX, "trailing backslash");
+
+    # === Step-limit guard (catastrophic backtracking mitigation) =====
+    test_group("pcre-step-limit");
+
+    # Save default, install a tight limit.
+    niyama_pcre_set_step_limit(10000);
+
+    # (a+)+b with no terminator — backtracking explodes. With the
+    # tight limit, the matcher gives up before exploring the full
+    # search space.
+    var nfa_dos = niyama_pcre_compile("(a+)+b");
+    assert_neq(nfa_dos, 0, "catastrophic-pattern compiles");
+    # 25 a's: roughly 2^25 backtracks if unbounded. With limit=10000 we
+    # bail out fast.
+    var r_dos = niyama_pcre_match(nfa_dos, "aaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_eq(r_dos, 0, "catastrophic input -> no match (step limit kicks in)");
+    # And we can SEE the limit was hit.
+    var sc = niyama_pcre_last_step_count();
+    assert(sc > 5000, "step count is non-trivial");
+
+    # Restore high default for the rest of any future tests.
+    niyama_pcre_set_step_limit(1000000);
+
+    # And a friendly pattern still matches under the high limit.
+    assert_eq(niyama_pcre_match(nfa_dos, "ab"), 1, "friendly match works");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

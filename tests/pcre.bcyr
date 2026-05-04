@@ -1,0 +1,197 @@
+# tests/pcre.bcyr — niyama_pcre benchmarks.
+#
+# Floor recorded for M5 hardening regression detection. Includes
+# PCRE-specific feature benches (backref, lookahead, atomic) plus the
+# step-limit-bounded catastrophic-backtracking patterns to verify the
+# guard fires within budget.
+#
+# Run: cyrius bench tests/pcre.bcyr
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/vec.cyr"
+include "lib/fnptr.cyr"
+include "lib/bench.cyr"
+include "src/pcre.cyr"
+
+var _nfa_literal = 0;
+var _nfa_alt = 0;
+var _nfa_email = 0;
+var _nfa_backref = 0;
+var _nfa_lookahead = 0;
+var _nfa_neg_lookahead = 0;
+var _nfa_atomic = 0;
+var _nfa_named = 0;
+var _nfa_dos = 0;        # (a+)+b — catastrophic, bounded by step limit
+
+var _input_short = 0;
+var _input_long = 0;
+var _input_email = 0;
+var _input_backref = 0;
+var _input_dos = 0;
+
+# === Compile benches =================================================
+
+fn b_compile_literal() {
+    var nfa = niyama_pcre_compile("foobar");
+    if (nfa == 0) { return 0 - 1; }
+    return 0;
+}
+
+fn b_compile_email() {
+    var nfa = niyama_pcre_compile("[a-z]+@[a-z]+\\.[a-z]+");
+    if (nfa == 0) { return 0 - 1; }
+    return 0;
+}
+
+fn b_compile_backref() {
+    var nfa = niyama_pcre_compile("(\\w+) \\1");
+    if (nfa == 0) { return 0 - 1; }
+    return 0;
+}
+
+fn b_compile_lookahead() {
+    var nfa = niyama_pcre_compile("foo(?=bar)");
+    if (nfa == 0) { return 0 - 1; }
+    return 0;
+}
+
+# === Search benches ==================================================
+
+fn b_search_literal() {
+    return niyama_pcre_search(_nfa_literal, _input_long);
+}
+
+fn b_search_alt() {
+    return niyama_pcre_search(_nfa_alt, _input_long);
+}
+
+fn b_search_email() {
+    return niyama_pcre_search(_nfa_email, _input_email);
+}
+
+# === PCRE-specific feature benches ===================================
+
+fn b_backref() {
+    return niyama_pcre_match(_nfa_backref, _input_backref);
+}
+
+fn b_lookahead() {
+    return niyama_pcre_search(_nfa_lookahead, _input_long);
+}
+
+fn b_neg_lookahead() {
+    return niyama_pcre_search(_nfa_neg_lookahead, _input_long);
+}
+
+fn b_atomic() {
+    return niyama_pcre_match(_nfa_atomic, "aaaaaaaaaaaaab");
+}
+
+fn b_named() {
+    return niyama_pcre_match(_nfa_named, "alice@example.com");
+}
+
+# === Step-limit-bounded catastrophic backtracking ====================
+# `(a+)+b` against 30 'a's — would explore ~2^30 paths in an unbounded
+# matcher. With step_limit=50000 the matcher bails out fast.
+
+fn b_dos_bounded() {
+    return niyama_pcre_match(_nfa_dos, _input_dos);
+}
+
+fn fill_a(buf, n) {
+    var i = 0;
+    while (i < n) {
+        store8(buf + i, 97);
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+
+    _nfa_literal       = niyama_pcre_compile("needle");
+    _nfa_alt           = niyama_pcre_compile("cat|dog|fish");
+    _nfa_email         = niyama_pcre_compile("[a-z]+@[a-z]+\\.[a-z]+");
+    _nfa_backref       = niyama_pcre_compile("(\\w+) \\1");
+    _nfa_lookahead     = niyama_pcre_compile("\\w+(?=@)");
+    _nfa_neg_lookahead = niyama_pcre_compile("\\w+(?!@)");
+    _nfa_atomic        = niyama_pcre_compile("(?>a*)b");
+    _nfa_named         = niyama_pcre_compile("(?<user>\\w+)@(?<host>[a-z.]+)");
+    _nfa_dos           = niyama_pcre_compile("(a+)+b");
+
+    _input_short  = "needle in here";
+    _input_long   = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. needle alice42 cat dog fish in the middle. user@example.com sits at the end of this corpus.";
+    _input_email  = "send mail to user@example.com please";
+    _input_backref = "hello hello world";
+    _input_dos = alloc(64);
+    fill_a(_input_dos, 30);  # 30 'a's, no terminator -> catastrophic
+
+    var benches = vec_new();
+
+    var c1 = bench_new("pcre_compile_literal");
+    bench_run(c1, &b_compile_literal, 10000);
+    vec_push(benches, c1);
+
+    var c2 = bench_new("pcre_compile_email");
+    bench_run(c2, &b_compile_email, 10000);
+    vec_push(benches, c2);
+
+    var c3 = bench_new("pcre_compile_backref");
+    bench_run(c3, &b_compile_backref, 10000);
+    vec_push(benches, c3);
+
+    var c4 = bench_new("pcre_compile_lookahead");
+    bench_run(c4, &b_compile_lookahead, 10000);
+    vec_push(benches, c4);
+
+    var s1 = bench_new("pcre_search_literal");
+    bench_run(s1, &b_search_literal, 10000);
+    vec_push(benches, s1);
+
+    var s2 = bench_new("pcre_search_alt");
+    bench_run(s2, &b_search_alt, 10000);
+    vec_push(benches, s2);
+
+    var s3 = bench_new("pcre_search_email");
+    bench_run(s3, &b_search_email, 10000);
+    vec_push(benches, s3);
+
+    var f1 = bench_new("pcre_backref");
+    bench_run(f1, &b_backref, 10000);
+    vec_push(benches, f1);
+
+    var f2 = bench_new("pcre_lookahead");
+    bench_run(f2, &b_lookahead, 10000);
+    vec_push(benches, f2);
+
+    var f3 = bench_new("pcre_neg_lookahead");
+    bench_run(f3, &b_neg_lookahead, 10000);
+    vec_push(benches, f3);
+
+    var f4 = bench_new("pcre_atomic");
+    bench_run(f4, &b_atomic, 10000);
+    vec_push(benches, f4);
+
+    var f5 = bench_new("pcre_named_captures");
+    bench_run(f5, &b_named, 10000);
+    vec_push(benches, f5);
+
+    # The step-limit-bounded catastrophic-backtracking bench. Set tight
+    # limit; assert it terminates within budget.
+    niyama_pcre_set_step_limit(50000);
+    var d1 = bench_new("pcre_dos_bounded (step_limit=50k)");
+    bench_run(d1, &b_dos_bounded, 1000);
+    vec_push(benches, d1);
+    niyama_pcre_set_step_limit(1000000);
+
+    bench_report_all(benches);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);
