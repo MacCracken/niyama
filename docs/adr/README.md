@@ -23,3 +23,4 @@ Decisions about niyama — what we chose, the context, and the consequences we a
 - [0002 — niyama_bre engine ABI shape and scope](0002-bre-engine-abi-and-scope.md)
 - [0003 — niyama_re2 engine ABI shape and scope](0003-re2-engine-abi-and-scope.md)
 - [0004 — niyama_pcre engine ABI shape, matcher architecture, and scope](0004-pcre-engine-abi-and-scope.md)
+- [0005 — niyama_fuzzy engine ABI shape and scope](0005-fuzzy-engine-abi-and-scope.md)

@@ -12,17 +12,16 @@ fit the universal-floor case Cyrius stdlib already covers.
 
 ## Status
 
-**0.4.0** (M3, 2026-05-03) — three engines shipped: POSIX BRE
-(`niyama_bre_*`), linear-time RE2 (`niyama_re2_*`), and Perl-compat
-PCRE (`niyama_pcre_*`). niyama_pcre is a backtracking matcher
-(distinct from the Pike NFA shared by bre/re2) bringing backref,
-lookahead, atomic groups, named captures, and possessive
-quantifiers — with catastrophic-backtracking risk mitigated by a
-configurable step-limit (default 1M) and a hard recursion-depth
-bound (256), per ADR 0004. Next: M3.5 (`fuzzy`, Levenshtein /
-typo-tolerant). See [`docs/development/state.md`](docs/development/state.md)
-for the live snapshot and [`docs/development/roadmap.md`](docs/development/roadmap.md)
-for the full M3.5+ plan.
+**0.5.0** (M3.5, 2026-05-03) — four engines shipped: POSIX BRE
+(`niyama_bre_*`), linear-time RE2 (`niyama_re2_*`), Perl-compat
+PCRE (`niyama_pcre_*`), and Levenshtein fuzzy (`niyama_fuzzy_*`).
+niyama_fuzzy is the one non-regex engine — edit-distance matching
+with anchored / substring / prefix modes for shell completion,
+fuzzy-name lookup, and typo-tolerant command matching, per ADR
+0005. Next: M4 (`vim` flavor) → M5 (hardening + freeze) → v1.0.
+See [`docs/development/state.md`](docs/development/state.md) for
+the live snapshot and [`docs/development/roadmap.md`](docs/development/roadmap.md)
+for the full M4+ plan.
 
 ## Why niyama exists
 
@@ -80,7 +79,7 @@ then demand):
 | **M1** | **bre** (POSIX BRE) | ✅ Done (v0.2.0). 68 unit tests, fuzz harness, bench floor recorded. ABI shape (per ADR 0002) is the template M2+ engines mirror. |
 | **M2** | **re2** (Thompson NFA, linear-time) | ✅ Done (v0.3.0). 76 unit tests + adversarial fuzz. `(a\|a)*b` on 200 `a`s matches in ~84μs (would DoS backtracking engines). Compile rejects backref/lookaround/atomic/recursion with distinct error codes per ADR 0003. |
 | **M3** | **pcre** (Perl-compatible) | ✅ Done (v0.4.0). 83 unit tests + 229-assertion fuzz. Backref + lookahead + atomic + named captures + possessive quantifiers. Catastrophic-backtracking bounded by step-limit (default 1M) + recursion-depth bound (256). Lookbehind / Unicode `\p{L}` / recursion / conditionals deferred per ADR 0004. |
-| **M3.5** | **fuzzy** (Levenshtein) | Typo-tolerant matching. Not strict regex but lives in the neighborhood. agnoshi shell completion + daimon agent fuzzy-name-match are immediate consumers. |
+| **M3.5** | **fuzzy** (Levenshtein) | ✅ Done (v0.5.0). 45 unit tests + 757-assertion fuzz (verifies all 5 Levenshtein mathematical invariants on randomized inputs). Anchored / substring / prefix match modes; ASCII case-fold flag. Per ADR 0005. |
 | **M4** | **vim** (vim/cyim flavor) | Magic / nomagic modes, `\<`/`\>`, `\zs`/`\ze`. cyim's `:s/old/new/` and ex-mode pattern history are the consumer. |
 | **M5** | P(-1) hardening + closeout | Audit, fuzz floor, perf claims, surface freeze. Fold ADR. |
 | **v1.0** | fold-ready release | `dist/niyama.cyr` is byte-identical fold candidate; cyrius stdlib vendors as `lib/niyama.cyr`. |

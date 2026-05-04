@@ -1,0 +1,144 @@
+# tests/fuzzy.tcyr — niyama_fuzzy Levenshtein engine tests.
+#
+# Coverage: distance correctness against known Levenshtein values,
+# all three match modes (anchored/substring/prefix), threshold edge
+# cases, and the case-insensitive flag.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/fuzzy.cyr"
+
+fn d(pat, s) {
+    var h = niyama_fuzzy_compile(pat);
+    if (h == 0) { return 0 - 1; }
+    return niyama_fuzzy_distance(h, s);
+}
+
+fn t_match(pat, s) {
+    var h = niyama_fuzzy_compile(pat);
+    if (h == 0) { return 0 - 1; }
+    return niyama_fuzzy_match(h, s);
+}
+
+fn t_match_k(pat, s, k) {
+    var h = niyama_fuzzy_compile_opts(pat, k, 0);
+    if (h == 0) { return 0 - 1; }
+    return niyama_fuzzy_match(h, s);
+}
+
+fn t_search_k(pat, s, k) {
+    var h = niyama_fuzzy_compile_opts(pat, k, 0);
+    if (h == 0) { return 0 - 1; }
+    return niyama_fuzzy_search(h, s);
+}
+
+fn t_prefix_k(pat, s, k) {
+    var h = niyama_fuzzy_compile_opts(pat, k, 0);
+    if (h == 0) { return 0 - 1; }
+    return niyama_fuzzy_search_prefix(h, s);
+}
+
+fn main() {
+    alloc_init();
+
+    # === Distance correctness — known Levenshtein values =============
+    test_group("fuzzy-distance");
+    assert_eq(d("kitten", "kitten"), 0, "identical strings");
+    assert_eq(d("kitten", "sitten"), 1, "1 substitution (kitten→sitten)");
+    assert_eq(d("kitten", "sitting"), 3, "kitten→sitting (3 edits)");
+    assert_eq(d("", ""), 0, "empty/empty = 0");
+    assert_eq(d("abc", ""), 3, "abc/empty = 3 (deletes)");
+    assert_eq(d("", "abc"), 3, "empty/abc = 3 (inserts)");
+    assert_eq(d("a", "b"), 1, "single substitution");
+    assert_eq(d("hello", "world"), 4, "hello/world = 4");
+    assert_eq(d("Saturday", "Sunday"), 3, "classic Saturday/Sunday");
+
+    # === Match (anchored, default k=2) ===============================
+    test_group("fuzzy-match");
+    assert_eq(t_match("hello", "hello"), 1, "exact match");
+    assert_eq(t_match("hello", "helo"), 1, "1 deletion within k=2");
+    assert_eq(t_match("hello", "hallo"), 1, "1 substitution within k=2");
+    assert_eq(t_match("hello", "world"), 0, "4 edits exceeds k=2");
+    assert_eq(t_match("kitten", "sitting"), 0, "3 edits exceeds k=2");
+
+    # Custom thresholds.
+    assert_eq(t_match_k("kitten", "sitting", 3), 1, "k=3 accepts kitten/sitting");
+    assert_eq(t_match_k("kitten", "sitting", 2), 0, "k=2 rejects kitten/sitting");
+    assert_eq(t_match_k("a", "a", 0), 1, "k=0 exact match still works");
+    assert_eq(t_match_k("a", "b", 0), 0, "k=0 rejects any difference");
+
+    # === Substring search ============================================
+    test_group("fuzzy-search-substring");
+    assert(t_search_k("foo", "the foo bar", 0) >= 0, "exact substring found");
+    assert(t_search_k("fo", "the foo bar", 0) >= 0, "shorter substring found");
+    # 1-typo substring search.
+    assert(t_search_k("foo", "the fox bar", 1) >= 0, "1 typo substring");
+    assert_eq(t_search_k("xyz", "abcdef", 1), 0 - 1, "no fuzzy substring match");
+
+    # === Prefix search ===============================================
+    test_group("fuzzy-prefix");
+    # Pattern is a 1-typo prefix of the text.
+    assert_eq(t_prefix_k("conf", "config-set", 0), 1, "exact prefix");
+    assert_eq(t_prefix_k("cofig", "config-set", 1), 1, "1-typo prefix");
+    assert_eq(t_prefix_k("xyzfg", "config-set", 1), 0, "way-off prefix rejected");
+    # Empty pattern prefixes everything.
+    assert_eq(t_prefix_k("", "anything", 0), 1, "empty prefix");
+
+    # Common shell-completion case: typed `cofig`, candidate `config-set`.
+    var h_complete = niyama_fuzzy_compile_opts("cofig", 1, 0);
+    assert_neq(h_complete, 0, "completion compiles");
+    assert_eq(niyama_fuzzy_search_prefix(h_complete, "config-set"), 1, "cofig matches config-set");
+    assert_eq(niyama_fuzzy_search_prefix(h_complete, "config"), 1, "cofig matches config");
+    assert_eq(niyama_fuzzy_search_prefix(h_complete, "completely"), 0, "cofig doesn't match completely");
+
+    # === Case-insensitive flag =======================================
+    test_group("fuzzy-case");
+    var h_ci = niyama_fuzzy_compile_opts("Hello", 0, FUZZY_FLAG_CASE_INSENSITIVE);
+    assert_neq(h_ci, 0, "case-insensitive compiles");
+    assert_eq(niyama_fuzzy_match(h_ci, "hello"), 1, "Hello vs hello (case-fold)");
+    assert_eq(niyama_fuzzy_match(h_ci, "HELLO"), 1, "Hello vs HELLO");
+    assert_eq(niyama_fuzzy_match(h_ci, "HeLLo"), 1, "Hello vs HeLLo");
+    assert_eq(niyama_fuzzy_distance(h_ci, "hello"), 0, "case-fold gives distance 0");
+    # Without the flag, case matters.
+    var h_cs = niyama_fuzzy_compile_opts("Hello", 0, 0);
+    assert_eq(niyama_fuzzy_match(h_cs, "hello"), 0, "case-sensitive rejects hello");
+    assert_eq(niyama_fuzzy_distance(h_cs, "hello"), 1, "case-sensitive distance 1");
+
+    # === last_distance + last_error ===================================
+    test_group("fuzzy-observability");
+    var h_obs = niyama_fuzzy_compile_opts("hello", 5, 0);
+    niyama_fuzzy_match(h_obs, "world");
+    assert_eq(niyama_fuzzy_last_distance(), 4, "last_distance after match");
+
+    # Compile errors.
+    # Pattern too long.
+    var big_pat = alloc(512);
+    var bp = 0;
+    while (bp < 300) {
+        store8(big_pat + bp, 97);
+        bp = bp + 1;
+    }
+    store8(big_pat + 300, 0);
+    var h_too_long = niyama_fuzzy_compile(big_pat);
+    assert_eq(h_too_long, 0, "too-long pattern rejects");
+    assert_eq(niyama_fuzzy_last_error(), FUZZY_E_PATTERN_TOO_LONG, "PATTERN_TOO_LONG error");
+
+    # Negative threshold.
+    var h_neg = niyama_fuzzy_compile_opts("foo", 0 - 1, 0);
+    assert_eq(h_neg, 0, "negative threshold rejects");
+    assert_eq(niyama_fuzzy_last_error(), FUZZY_E_INVALID_THRESHOLD, "INVALID_THRESHOLD error");
+
+    # === Real-world: command-completion sketch ========================
+    test_group("fuzzy-real-world");
+    # Typo-tolerant command match.
+    assert_eq(t_match_k("config", "configu", 1), 1, "configu/config 1 insertion");
+    assert_eq(t_match_k("config", "cnfig", 1), 1, "cnfig/config 1 deletion");
+    # Reasonable rejection.
+    assert_eq(t_match_k("config", "options", 2), 0, "options/config != fuzzy match");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

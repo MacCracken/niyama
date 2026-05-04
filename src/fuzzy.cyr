@@ -1,0 +1,319 @@
+# fuzzy.cyr — niyama Levenshtein edit-distance engine.
+#
+# The one engine in niyama that ISN'T regex — fuzzy matching for the
+# pattern-matching neighborhood that owns shell completion, fuzzy file
+# finders, typo-tolerant command lookup. Per ADR 0005.
+#
+# Algorithm: standard Levenshtein DP with two-row optimization
+# (Wagner–Fischer). O(n × m) time, O(m+1) memory per row.
+#
+# Public API (mirrors niyama_bre / niyama_re2 / niyama_pcre per ADR 0002):
+#   niyama_fuzzy_compile(pat)              -> handle (default opts)
+#   niyama_fuzzy_compile_opts(pat,k,flags) -> handle (full opts)
+#   niyama_fuzzy_match(h, s)               -> 1 if dist(pat,s) ≤ k
+#   niyama_fuzzy_search(h, s)              -> start offset of best fuzzy
+#                                             substring match, else -1
+#   niyama_fuzzy_search_prefix(h, s)       -> 1 if some prefix of s
+#                                             within k edits of pat
+#   niyama_fuzzy_distance(h, s)            -> Levenshtein distance
+#   niyama_fuzzy_last_distance()           -> distance from last call
+#   niyama_fuzzy_last_error()              -> error code
+#
+# Match modes are explicit (three named functions, not one with a mode
+# flag) per ADR 0005.
+#
+# Out of scope for M3.5 (per ADR 0005):
+#   - Unicode NFD normalization (post-v1.0; needs ~25KB Unicode DB).
+#   - Exact start-position recovery in `_search` (heuristic for now).
+#
+# Precondition: alloc_init() must have been called.
+
+# === Constants =======================================================
+
+var FUZZY_MAX_PAT_LEN  = 256;
+var FUZZY_MAX_TEXT_LEN = 4096;
+var FUZZY_DEFAULT_K    = 2;
+
+var FUZZY_FLAG_CASE_INSENSITIVE = 1;
+
+# Handle layout:
+#   +0   pat_len:   u64
+#   +8   max_edits: i64
+#   +16  flags:     u64
+#   +24  pat:       FUZZY_MAX_PAT_LEN bytes (NUL-padded)
+var FUZZY_OFF_PAT_LEN   = 0;
+var FUZZY_OFF_MAX_EDITS = 8;
+var FUZZY_OFF_FLAGS     = 16;
+var FUZZY_OFF_PAT       = 24;
+var FUZZY_HANDLE_SIZE   = 280;  # 24 + 256
+
+# Error codes (frozen ABI from M3.5 onward).
+var FUZZY_E_OK                 = 0;
+var FUZZY_E_PATTERN_TOO_LONG   = 1;
+var FUZZY_E_INVALID_THRESHOLD  = 2;
+
+# Process-lifetime scratch.
+var _fuzzy_init = 0;
+var _fuzzy_row_a = 0;
+var _fuzzy_row_b = 0;
+var _fuzzy_last_err = 0;
+var _fuzzy_last_dist = 0;
+
+fn _fuzzy_lazy_init() {
+    if (_fuzzy_init == 1) { return 0; }
+    _fuzzy_row_a = alloc((FUZZY_MAX_TEXT_LEN + 1) * 8);
+    _fuzzy_row_b = alloc((FUZZY_MAX_TEXT_LEN + 1) * 8);
+    _fuzzy_init = 1;
+    return 0;
+}
+
+# === Helpers =========================================================
+
+fn _fuzzy_min3(a, b, c) {
+    var m = a;
+    if (b < m) { m = b; }
+    if (c < m) { m = c; }
+    return m;
+}
+
+fn _fuzzy_fold(c, casefold) {
+    if (casefold == 1 && c >= 65 && c <= 90) { return c + 32; }
+    return c;
+}
+
+# === Compile entries =================================================
+
+fn niyama_fuzzy_compile_opts(pat, max_edits, flags) {
+    _fuzzy_lazy_init();
+    if (max_edits < 0) {
+        _fuzzy_last_err = FUZZY_E_INVALID_THRESHOLD;
+        return 0;
+    }
+    var n = strlen(pat);
+    if (n > FUZZY_MAX_PAT_LEN) {
+        _fuzzy_last_err = FUZZY_E_PATTERN_TOO_LONG;
+        return 0;
+    }
+    var h = alloc(FUZZY_HANDLE_SIZE);
+    store64(h + FUZZY_OFF_PAT_LEN,   n);
+    store64(h + FUZZY_OFF_MAX_EDITS, max_edits);
+    store64(h + FUZZY_OFF_FLAGS,     flags);
+    var i = 0;
+    while (i < n) {
+        store8(h + FUZZY_OFF_PAT + i, load8(pat + i));
+        i = i + 1;
+    }
+    while (i < FUZZY_MAX_PAT_LEN) {
+        store8(h + FUZZY_OFF_PAT + i, 0);
+        i = i + 1;
+    }
+    _fuzzy_last_err = FUZZY_E_OK;
+    return h;
+}
+
+fn niyama_fuzzy_compile(pat) {
+    return niyama_fuzzy_compile_opts(pat, FUZZY_DEFAULT_K, 0);
+}
+
+fn niyama_fuzzy_last_error() {
+    return _fuzzy_last_err;
+}
+
+fn niyama_fuzzy_last_distance() {
+    return _fuzzy_last_dist;
+}
+
+# === Levenshtein DP variants =========================================
+
+# Full-string Levenshtein distance between pat (length plen) and s
+# (length slen). Returns the distance.
+#
+# Base case: prev[j] = j (empty pattern → j insertions to match s[0..j]).
+fn _fuzzy_dp_full(pat, plen, s, slen, casefold) {
+    if (slen > FUZZY_MAX_TEXT_LEN) { slen = FUZZY_MAX_TEXT_LEN; }
+    var prev = _fuzzy_row_a;
+    var curr = _fuzzy_row_b;
+    var j = 0;
+    while (j <= slen) {
+        store64(prev + j * 8, j);
+        j = j + 1;
+    }
+    var i = 1;
+    while (i <= plen) {
+        store64(curr, i);  # curr[0] = i
+        var pc = _fuzzy_fold(load8(pat + i - 1), casefold);
+        var k = 1;
+        while (k <= slen) {
+            var sc = _fuzzy_fold(load8(s + k - 1), casefold);
+            var sub_cost = 1;
+            if (sc == pc) { sub_cost = 0; }
+            var del_d = load64(prev + k * 8) + 1;
+            var ins_d = load64(curr + (k - 1) * 8) + 1;
+            var sub_d = load64(prev + (k - 1) * 8) + sub_cost;
+            store64(curr + k * 8, _fuzzy_min3(del_d, ins_d, sub_d));
+            k = k + 1;
+        }
+        var swap = prev;
+        prev = curr;
+        curr = swap;
+        i = i + 1;
+    }
+    return load64(prev + slen * 8);
+}
+
+# Substring DP: minimum Levenshtein distance between pat and any
+# contiguous substring of s. Returns the (best_distance, end_position)
+# packed: best_distance is returned, and the end position is written
+# to *out_end_pos via store64. Caller passes a pointer to an i64.
+#
+# Base case: prev[j] = 0 (empty pattern matches anywhere — no penalty
+# for skipping leading text bytes).
+fn _fuzzy_dp_substring(pat, plen, s, slen, casefold, out_end_pos) {
+    if (slen > FUZZY_MAX_TEXT_LEN) { slen = FUZZY_MAX_TEXT_LEN; }
+    var prev = _fuzzy_row_a;
+    var curr = _fuzzy_row_b;
+    var j = 0;
+    while (j <= slen) {
+        store64(prev + j * 8, 0);
+        j = j + 1;
+    }
+    var i = 1;
+    while (i <= plen) {
+        store64(curr, i);
+        var pc = _fuzzy_fold(load8(pat + i - 1), casefold);
+        var k = 1;
+        while (k <= slen) {
+            var sc = _fuzzy_fold(load8(s + k - 1), casefold);
+            var sub_cost = 1;
+            if (sc == pc) { sub_cost = 0; }
+            var del_d = load64(prev + k * 8) + 1;
+            var ins_d = load64(curr + (k - 1) * 8) + 1;
+            var sub_d = load64(prev + (k - 1) * 8) + sub_cost;
+            store64(curr + k * 8, _fuzzy_min3(del_d, ins_d, sub_d));
+            k = k + 1;
+        }
+        var swap = prev;
+        prev = curr;
+        curr = swap;
+        i = i + 1;
+    }
+    # Find min over prev[0..slen+1] — best ending position.
+    var best = load64(prev);
+    var best_j = 0;
+    var jj = 1;
+    while (jj <= slen) {
+        var v = load64(prev + jj * 8);
+        if (v < best) {
+            best = v;
+            best_j = jj;
+        }
+        jj = jj + 1;
+    }
+    store64(out_end_pos, best_j);
+    return best;
+}
+
+# Prefix DP: minimum Levenshtein distance between pat and any prefix
+# of s. Same DP as full, but final answer is min over the last row.
+fn _fuzzy_dp_prefix(pat, plen, s, slen, casefold) {
+    if (slen > FUZZY_MAX_TEXT_LEN) { slen = FUZZY_MAX_TEXT_LEN; }
+    var prev = _fuzzy_row_a;
+    var curr = _fuzzy_row_b;
+    var j = 0;
+    while (j <= slen) {
+        store64(prev + j * 8, j);
+        j = j + 1;
+    }
+    var i = 1;
+    while (i <= plen) {
+        store64(curr, i);
+        var pc = _fuzzy_fold(load8(pat + i - 1), casefold);
+        var k = 1;
+        while (k <= slen) {
+            var sc = _fuzzy_fold(load8(s + k - 1), casefold);
+            var sub_cost = 1;
+            if (sc == pc) { sub_cost = 0; }
+            var del_d = load64(prev + k * 8) + 1;
+            var ins_d = load64(curr + (k - 1) * 8) + 1;
+            var sub_d = load64(prev + (k - 1) * 8) + sub_cost;
+            store64(curr + k * 8, _fuzzy_min3(del_d, ins_d, sub_d));
+            k = k + 1;
+        }
+        var swap = prev;
+        prev = curr;
+        curr = swap;
+        i = i + 1;
+    }
+    var best = load64(prev);
+    var jj = 1;
+    while (jj <= slen) {
+        var v = load64(prev + jj * 8);
+        if (v < best) { best = v; }
+        jj = jj + 1;
+    }
+    return best;
+}
+
+# === Public matchers =================================================
+
+fn niyama_fuzzy_distance(h, s) {
+    if (h == 0) { return 0 - 1; }
+    var plen = load64(h + FUZZY_OFF_PAT_LEN);
+    var flags = load64(h + FUZZY_OFF_FLAGS);
+    var casefold = 0;
+    if ((flags & FUZZY_FLAG_CASE_INSENSITIVE) != 0) { casefold = 1; }
+    var slen = strlen(s);
+    var d = _fuzzy_dp_full(h + FUZZY_OFF_PAT, plen, s, slen, casefold);
+    _fuzzy_last_dist = d;
+    return d;
+}
+
+fn niyama_fuzzy_match(h, s) {
+    if (h == 0) { return 0; }
+    var max_edits = load64(h + FUZZY_OFF_MAX_EDITS);
+    var d = niyama_fuzzy_distance(h, s);
+    if (d <= max_edits) { return 1; }
+    return 0;
+}
+
+# Substring fuzzy: does some contiguous slice of s have edit distance
+# ≤ max_edits to pat? Returns approximate start offset on hit, or -1.
+# Start is computed as `end - plen` clamped to [0, slen) — exact start
+# recovery is deferred per ADR 0005.
+fn niyama_fuzzy_search(h, s) {
+    if (h == 0) { return 0 - 1; }
+    var plen = load64(h + FUZZY_OFF_PAT_LEN);
+    var max_edits = load64(h + FUZZY_OFF_MAX_EDITS);
+    var flags = load64(h + FUZZY_OFF_FLAGS);
+    var casefold = 0;
+    if ((flags & FUZZY_FLAG_CASE_INSENSITIVE) != 0) { casefold = 1; }
+    var slen = strlen(s);
+    # Allocate a stack slot for the end-pos out param.
+    var end_pos_buf = alloc(8);
+    var d = _fuzzy_dp_substring(h + FUZZY_OFF_PAT, plen, s, slen, casefold, end_pos_buf);
+    _fuzzy_last_dist = d;
+    if (d > max_edits) { return 0 - 1; }
+    var end_pos = load64(end_pos_buf);
+    var start = end_pos - plen;
+    if (start < 0) { start = 0; }
+    if (start >= slen) { start = slen - 1; }
+    if (start < 0) { start = 0; }
+    return start;
+}
+
+# Prefix fuzzy: is some prefix of s within max_edits of pat? Returns 1
+# or 0. Useful for shell completion (typed input is a typo-tolerant
+# prefix of the candidate).
+fn niyama_fuzzy_search_prefix(h, s) {
+    if (h == 0) { return 0; }
+    var plen = load64(h + FUZZY_OFF_PAT_LEN);
+    var max_edits = load64(h + FUZZY_OFF_MAX_EDITS);
+    var flags = load64(h + FUZZY_OFF_FLAGS);
+    var casefold = 0;
+    if ((flags & FUZZY_FLAG_CASE_INSENSITIVE) != 0) { casefold = 1; }
+    var slen = strlen(s);
+    var d = _fuzzy_dp_prefix(h + FUZZY_OFF_PAT, plen, s, slen, casefold);
+    _fuzzy_last_dist = d;
+    if (d <= max_edits) { return 1; }
+    return 0;
+}

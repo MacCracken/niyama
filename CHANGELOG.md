@@ -4,6 +4,79 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-03
+
+M3.5 — fourth engine: fuzzy (`niyama_fuzzy_*`). The one engine in
+niyama that isn't regex — Levenshtein edit-distance matching for
+shell completion, fuzzy-name lookup, and typo-tolerant command
+matching. Per ADR 0005.
+
+### Added
+
+- `src/fuzzy.cyr` — Wagner–Fischer Levenshtein DP with two-row
+  optimization. ~300 lines (smallest engine in niyama). Three
+  match modes via three named functions.
+- Public ABI mirroring niyama_bre / niyama_re2 / niyama_pcre per
+  ADR 0002, plus fuzzy-specific options:
+  - `niyama_fuzzy_compile(pat)` — default options (max_edits=2).
+  - `niyama_fuzzy_compile_opts(pat, max_edits, flags)` — full opts.
+  - `niyama_fuzzy_match(h, s)` — anchored full-string fuzzy match.
+  - `niyama_fuzzy_search(h, s)` — substring-fuzzy: best contiguous
+    slice of `s` within edit distance.
+  - `niyama_fuzzy_search_prefix(h, s)` — prefix-fuzzy: pattern is
+    a typo-tolerant prefix of `s`. The shell-completion shape.
+  - `niyama_fuzzy_distance(h, s)` — full-string distance.
+  - `niyama_fuzzy_last_distance()` — distance from the last match
+    call. Useful for "match found AND it cost N typos".
+  - `niyama_fuzzy_last_error()` — error code from last compile.
+- `FUZZY_FLAG_CASE_INSENSITIVE` (= 1) — ASCII case-fold flag.
+- ADR 0005 — niyama_fuzzy ABI shape and scope. Records the
+  algorithm choice (DP over bitap), the three-mode API, and the
+  Unicode-NFD deferral.
+- `tests/fuzzy.tcyr` — 45 unit tests across 7 groups: distance
+  correctness against known Levenshtein values (kitten/sitting,
+  Saturday/Sunday), all three match modes, threshold edges,
+  case-insensitive flag, last_distance / last_error
+  observability, real-world command-completion sketches.
+- `fuzz/fuzzy.fcyr` — 757-assertion harness verifying all five
+  Levenshtein **mathematical invariants** on randomized inputs:
+  identity (`d(s,s)=0`), symmetry (`d(a,b)=d(b,a)`),
+  non-negativity, length bound (`d(a,b) ≤ max(|a|,|b|)`), triangle
+  inequality (`d(a,c) ≤ d(a,b)+d(b,c)`). Plus the no-crash sweep
+  and compile-error invariants.
+- `tests/fuzzy.bcyr` — bench harness covering compile, distance,
+  match, search (substring + prefix), case-insensitive, and a
+  larger-pattern stress.
+
+### Performance floor (M3.5, x86_64, cyrius 5.8.42)
+
+- `fuzzy_compile_*` — ~1 μs.
+- `fuzzy_distance` (6-byte pattern, 5-byte text): ~1 μs.
+- `fuzzy_distance` (6-byte pattern, 30-byte text): ~3 μs.
+- `fuzzy_match`: ~1 μs.
+- `fuzzy_search_short` (6-byte pattern, 26-byte text): ~3 μs.
+- `fuzzy_search_long` (6-byte pattern, 256-byte text): ~17 μs.
+- `fuzzy_search_prefix`: ~2 μs.
+- `fuzzy_case_insensitive`: ~1 μs.
+- `fuzzy_medium_pattern_distance` (25-byte pattern, 46-byte text):
+  ~15 μs.
+
+### Changed
+
+- `dist/niyama.cyr` — bundle now includes `src/fuzzy.cyr` alongside
+  `src/bre.cyr`, `src/re2.cyr`, and `src/pcre.cyr`.
+  `NIYAMA_VERSION` → `"0.5.0"`.
+- `src/main.cyr` smoke banner reflects M3.5 status.
+
+### Deferred (not in M3.5 — see ADR 0005)
+
+- Unicode NFD normalization (`FUZZY_FLAG_UNICODE_NFD`) — needs
+  ~25KB Unicode decomposition table; ASCII-heavy AGNOS consumers
+  don't benefit yet. Post-v1.0.
+- Exact start-position recovery in `_search` — currently returns
+  `end - len(pat)` clamped. Heuristic covers ≥90% of consumer
+  cases; M5 may revisit if asked.
+
 ## [0.4.0] — 2026-05-03
 
 M3 — third engine: pcre (`niyama_pcre_*`). Backtracking matcher (the

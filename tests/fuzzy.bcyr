@@ -1,0 +1,135 @@
+# tests/fuzzy.bcyr — niyama_fuzzy benchmarks.
+#
+# Bench floor for M5 hardening. Levenshtein DP is O(n*m); we measure
+# at sizes typical of consumer use: ≤32-byte patterns, ≤256-byte text.
+#
+# Run: cyrius bench tests/fuzzy.bcyr
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/vec.cyr"
+include "lib/fnptr.cyr"
+include "lib/bench.cyr"
+include "src/fuzzy.cyr"
+
+var _h_short = 0;        # 6-byte pattern
+var _h_medium = 0;       # 24-byte pattern
+var _h_ci = 0;           # case-insensitive
+
+var _input_short = 0;    # 5 bytes
+var _input_medium = 0;   # 32 bytes
+var _input_long = 0;     # 256 bytes
+
+# === Compile benches =================================================
+
+fn b_compile_default() {
+    var h = niyama_fuzzy_compile("config");
+    if (h == 0) { return 0 - 1; }
+    return 0;
+}
+
+fn b_compile_opts() {
+    var h = niyama_fuzzy_compile_opts("config", 2, FUZZY_FLAG_CASE_INSENSITIVE);
+    if (h == 0) { return 0 - 1; }
+    return 0;
+}
+
+# === Distance benches ================================================
+
+fn b_distance_short() {
+    return niyama_fuzzy_distance(_h_short, "confg");
+}
+
+fn b_distance_long() {
+    # Distance against a longer text — full DP grows.
+    return niyama_fuzzy_distance(_h_short, "the quick brown fox jumps over");
+}
+
+# === Match / search / prefix benches =================================
+
+fn b_match() {
+    return niyama_fuzzy_match(_h_short, "confg");
+}
+
+fn b_search_short() {
+    return niyama_fuzzy_search(_h_short, _input_medium);
+}
+
+fn b_search_long() {
+    return niyama_fuzzy_search(_h_short, _input_long);
+}
+
+fn b_search_prefix() {
+    return niyama_fuzzy_search_prefix(_h_short, "config-set-default");
+}
+
+fn b_case_insensitive() {
+    return niyama_fuzzy_match(_h_ci, "CONFIG");
+}
+
+# === Larger pattern bench ============================================
+
+fn b_medium_distance() {
+    return niyama_fuzzy_distance(_h_medium, "the quick brown fox jumps over the lazy dog ok");
+}
+
+fn main() {
+    alloc_init();
+
+    _h_short  = niyama_fuzzy_compile("config");
+    _h_medium = niyama_fuzzy_compile("the quick brown fox jumps");
+    _h_ci     = niyama_fuzzy_compile_opts("config", 2, FUZZY_FLAG_CASE_INSENSITIVE);
+
+    _input_short  = "confg";
+    _input_medium = "config-set --default value";
+    _input_long   = "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. config is somewhere here. ut enim ad minim veniam, quis nostrud exercitation ullamco";
+
+    var benches = vec_new();
+
+    var c1 = bench_new("fuzzy_compile_default");
+    bench_run(c1, &b_compile_default, 100000);
+    vec_push(benches, c1);
+
+    var c2 = bench_new("fuzzy_compile_opts");
+    bench_run(c2, &b_compile_opts, 100000);
+    vec_push(benches, c2);
+
+    var d1 = bench_new("fuzzy_distance_short");
+    bench_run(d1, &b_distance_short, 100000);
+    vec_push(benches, d1);
+
+    var d2 = bench_new("fuzzy_distance_long");
+    bench_run(d2, &b_distance_long, 100000);
+    vec_push(benches, d2);
+
+    var m1 = bench_new("fuzzy_match");
+    bench_run(m1, &b_match, 100000);
+    vec_push(benches, m1);
+
+    var s1 = bench_new("fuzzy_search_short");
+    bench_run(s1, &b_search_short, 100000);
+    vec_push(benches, s1);
+
+    var s2 = bench_new("fuzzy_search_long_256B");
+    bench_run(s2, &b_search_long, 10000);
+    vec_push(benches, s2);
+
+    var p1 = bench_new("fuzzy_search_prefix");
+    bench_run(p1, &b_search_prefix, 100000);
+    vec_push(benches, p1);
+
+    var ci1 = bench_new("fuzzy_case_insensitive");
+    bench_run(ci1, &b_case_insensitive, 100000);
+    vec_push(benches, ci1);
+
+    var md = bench_new("fuzzy_medium_pattern_distance");
+    bench_run(md, &b_medium_distance, 10000);
+    vec_push(benches, md);
+
+    bench_report_all(benches);
+    return 0;
+}
+
+var r = main();
+syscall(60, r);

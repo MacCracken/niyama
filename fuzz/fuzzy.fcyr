@@ -1,0 +1,164 @@
+# fuzz/fuzzy.fcyr — niyama_fuzzy fuzz harness.
+#
+# The fuzzy engine has a smaller surface than the regex engines, but
+# it's still a real algorithm with invariants we can check:
+#
+#   1. d(s, s) == 0 for all s          (identity)
+#   2. d(a, b) == d(b, a)              (symmetry)
+#   3. d(a, b) ≥ 0                     (non-negativity)
+#   4. d(a, b) ≤ max(|a|, |b|)         (bounded by length)
+#   5. d(a, c) ≤ d(a, b) + d(b, c)     (triangle inequality)
+#
+# This harness exercises all five on randomly-generated short strings
+# plus the standard "no crash on garbage input" sweep.
+
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/assert.cyr"
+include "src/fuzzy.cyr"
+
+var _rng_state = 0xFEEDFACE;
+fn rng() {
+    var x = _rng_state;
+    x = x ^ (x << 13);
+    x = x & 0xFFFFFFFF;
+    x = x ^ (x >> 17);
+    x = x ^ (x << 5);
+    x = x & 0xFFFFFFFF;
+    _rng_state = x;
+    return x;
+}
+
+fn gen_str(buf, n) {
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var c = r - (r / 4) * 4;
+        if (c < 0) { c = 0 - c; }
+        store8(buf + i, 97 + c);  # a-d only -> lots of repeats
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
+fn dist(a, b) {
+    var h = niyama_fuzzy_compile_opts(a, 1000000, 0);
+    if (h == 0) { return 0 - 1; }
+    return niyama_fuzzy_distance(h, b);
+}
+
+fn max_int(x, y) {
+    if (x > y) { return x; }
+    return y;
+}
+
+fn main() {
+    alloc_init();
+
+    test_group("fuzzy-fuzz");
+
+    # === Smoke corpus =================================================
+    assert_eq(dist("a", "a"), 0, "smoke identity");
+    assert_eq(dist("hello", "world"), 4, "smoke hello/world");
+
+    # === Identity invariant: d(s, s) = 0 ==============================
+    var buf = alloc(64);
+    var iter = 0;
+    while (iter < 100) {
+        var n = (rng() & 0x1F) + 1;
+        if (n > 32) { n = 32; }
+        gen_str(buf, n);
+        var di = dist(buf, buf);
+        assert_eq(di, 0, "identity: d(s,s)=0");
+        iter = iter + 1;
+    }
+
+    # === Symmetry: d(a, b) = d(b, a) ==================================
+    var a = alloc(64);
+    var b = alloc(64);
+    iter = 0;
+    while (iter < 100) {
+        var na = (rng() & 0x1F) + 1;
+        if (na > 32) { na = 32; }
+        var nb = (rng() & 0x1F) + 1;
+        if (nb > 32) { nb = 32; }
+        gen_str(a, na);
+        gen_str(b, nb);
+        var dab = dist(a, b);
+        var dba = dist(b, a);
+        assert_eq(dab, dba, "symmetry");
+        iter = iter + 1;
+    }
+
+    # === Non-negativity + length bound ================================
+    iter = 0;
+    while (iter < 100) {
+        var na2 = (rng() & 0x1F) + 1;
+        if (na2 > 32) { na2 = 32; }
+        var nb2 = (rng() & 0x1F) + 1;
+        if (nb2 > 32) { nb2 = 32; }
+        gen_str(a, na2);
+        gen_str(b, nb2);
+        var dab2 = dist(a, b);
+        assert(dab2 >= 0, "non-negativity");
+        var bound = max_int(strlen(a), strlen(b));
+        assert(dab2 <= bound, "bounded by max length");
+        iter = iter + 1;
+    }
+
+    # === Triangle inequality: d(a, c) ≤ d(a, b) + d(b, c) =============
+    var c = alloc(64);
+    iter = 0;
+    while (iter < 50) {
+        var nA = (rng() & 0x0F) + 1;
+        if (nA > 16) { nA = 16; }
+        var nB = (rng() & 0x0F) + 1;
+        if (nB > 16) { nB = 16; }
+        var nC = (rng() & 0x0F) + 1;
+        if (nC > 16) { nC = 16; }
+        gen_str(a, nA);
+        gen_str(b, nB);
+        gen_str(c, nC);
+        var d_ac = dist(a, c);
+        var d_ab = dist(a, b);
+        var d_bc = dist(b, c);
+        assert(d_ac <= d_ab + d_bc, "triangle inequality");
+        iter = iter + 1;
+    }
+
+    # === No-crash sweep + match/search/prefix don't blow up ============
+    var h_smoke = niyama_fuzzy_compile_opts("foo", 2, 0);
+    iter = 0;
+    while (iter < 100) {
+        var nx = (rng() & 0x3F) + 1;
+        if (nx > 64) { nx = 64; }
+        gen_str(buf, nx);
+        var rm = niyama_fuzzy_match(h_smoke, buf);
+        assert(rm >= 0, "match returns int");
+        var rs = niyama_fuzzy_search(h_smoke, buf);
+        assert(rs >= 0 - 1, "search returns int");
+        var rp = niyama_fuzzy_search_prefix(h_smoke, buf);
+        assert(rp >= 0, "prefix returns int");
+        iter = iter + 1;
+    }
+    assert(1, "fuzz sweep survived");
+
+    # === Compile-error invariants =====================================
+    # Pattern too long.
+    var big = alloc(512);
+    var bi = 0;
+    while (bi < 300) { store8(big + bi, 97); bi = bi + 1; }
+    store8(big + 300, 0);
+    assert_eq(niyama_fuzzy_compile(big), 0, "pattern-too-long rejects");
+    assert_eq(niyama_fuzzy_last_error(), FUZZY_E_PATTERN_TOO_LONG, "PATTERN_TOO_LONG code");
+
+    # Negative threshold.
+    assert_eq(niyama_fuzzy_compile_opts("foo", 0 - 1, 0), 0, "negative threshold rejects");
+    assert_eq(niyama_fuzzy_last_error(), FUZZY_E_INVALID_THRESHOLD, "INVALID_THRESHOLD code");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

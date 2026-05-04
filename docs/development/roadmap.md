@@ -152,20 +152,36 @@ diff-testing.
 - Inline flags `(?i)` `(?m)` `(?s)`.
 - Branch-reset groups, callouts, `\K`.
 
-### M3.5 — fuzzy engine (v0.5.0) — Levenshtein / typo-tolerant
+### M3.5 — fuzzy engine (v0.5.0) — Levenshtein / typo-tolerant — ✅ shipped 2026-05-03
 
 **Why folded in.** Not strict regex but lives in the same
 pattern-matching neighborhood. agnoshi shell completion (typo-tolerant
 command match) and daimon agent fuzzy-name-match are immediate
 consumers; cyim's `:e <prefix>` completion is a plausible third.
 
-**Acceptance:**
+**Acceptance — done (per ADR 0005):**
 
-- Edit-distance threshold parameter (default 2 typos).
-- Optional case-folding, optional Unicode-aware (NFD-normalize before
-  match).
-- Substring-fuzzy AND prefix-fuzzy modes (different consumer needs).
-- cyim-side: `--regex=fuzzy` flavor.
+- ✅ Edit-distance threshold parameter (default 2 typos) via
+  `niyama_fuzzy_compile_opts(pat, max_edits, flags)`.
+- ✅ ASCII case-folding via `FUZZY_FLAG_CASE_INSENSITIVE`.
+- ✅ Three match modes as separate functions:
+  `niyama_fuzzy_match` (anchored), `niyama_fuzzy_search`
+  (substring-fuzzy), `niyama_fuzzy_search_prefix` (prefix-fuzzy).
+- ✅ `niyama_fuzzy_distance` + `niyama_fuzzy_last_distance` for
+  observability.
+- ✅ `tests/fuzzy.tcyr` 45 assertions + `fuzz/fuzzy.fcyr` 757
+  assertions (verifies all 5 Levenshtein mathematical invariants
+  on randomized inputs).
+- 🟦 cyim-side: `--regex=fuzzy` flavor — landing in cyim repo as
+  separate PR.
+
+**Deferred from M3.5 — post-v1.0 (per ADR 0005):**
+
+- Unicode NFD normalization (`FUZZY_FLAG_UNICODE_NFD`) — needs
+  ~25KB Unicode decomposition table; ASCII-heavy AGNOS consumers
+  don't benefit yet.
+- Exact start-position recovery in `_search` — currently
+  heuristic.
 
 ### M4 — vim engine (v0.6.0) — vim/cyim flavor
 
