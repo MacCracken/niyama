@@ -176,3 +176,27 @@ fn shadow_name(sprec)        { return load64(sprec); }
 fn shadow_hash(sprec)        { return load64(sprec + 8); }
 # Return days-since-1970 the password was last changed; -1 = unset.
 fn shadow_last_change(sprec) { return load64(sprec + 16); }
+
+# v5.8.31 — ShadowError variants (mirrors PwdError shape).
+include "lib/result.cyr"
+
+enum ShadowError {
+    ShadowNotFound;
+    ShadowLoadFailed;
+    ShadowBufTooSmall;
+    ShadowOther;
+}
+
+# v5.8.31 — Result variant of shadow_getspnam.
+# Note: `ShadowLoadFailed` typically signals "no read access to
+# /etc/shadow" (caller is non-root). For authentication paths
+# that don't need root, see lib/pam.cyr's pam_unix_authenticate
+# (which delegates to a setuid helper).
+fn shadow_getspnam_r(name, sprec, strbuf, strbufsz) {
+    var rc = shadow_getspnam(name, sprec, strbuf, strbufsz);
+    if (rc == 1)      { return Ok(0); }
+    if (rc == 0)      { return Err(ShadowNotFound); }
+    if (rc == 0 - 1)  { return Err(ShadowLoadFailed); }
+    if (rc == 0 - 2)  { return Err(ShadowBufTooSmall); }
+    return Err(ShadowOther);
+}

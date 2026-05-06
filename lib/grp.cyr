@@ -176,6 +176,36 @@ fn grp_getgrnam(name, grrec, strbuf, strbufsz) {
     return _grp_find(&_grp_match_name, name, grrec, strbuf, strbufsz);
 }
 
+# v5.8.31 — GrpError variants (mirrors PwdError shape).
+include "lib/result.cyr"
+
+enum GrpError {
+    GrpNotFound;
+    GrpLoadFailed;
+    GrpBufTooSmall;
+    GrpOther;
+}
+
+# v5.8.31 — Result variant of grp_getgrgid.
+fn grp_getgrgid_r(gid, grrec, strbuf, strbufsz) {
+    var rc = grp_getgrgid(gid, grrec, strbuf, strbufsz);
+    if (rc == 1)      { return Ok(0); }
+    if (rc == 0)      { return Err(GrpNotFound); }
+    if (rc == 0 - 1)  { return Err(GrpLoadFailed); }
+    if (rc == 0 - 2)  { return Err(GrpBufTooSmall); }
+    return Err(GrpOther);
+}
+
+# v5.8.31 — Result variant of grp_getgrnam.
+fn grp_getgrnam_r(name, grrec, strbuf, strbufsz) {
+    var rc = grp_getgrnam(name, grrec, strbuf, strbufsz);
+    if (rc == 1)      { return Ok(0); }
+    if (rc == 0)      { return Err(GrpNotFound); }
+    if (rc == 0 - 1)  { return Err(GrpLoadFailed); }
+    if (rc == 0 - 2)  { return Err(GrpBufTooSmall); }
+    return Err(GrpOther);
+}
+
 # Walk the members field of a single line and check whether
 # `user` (null-terminated cstring) is listed.
 fn _grp_line_has_member(line_start, line_end, user) {
@@ -291,3 +321,17 @@ fn grp_gid(grrec)    { return load64(grrec); }
 fn grp_name(grrec)   { return load64(grrec + 8); }
 # Return the group passwd field (rarely used; usually "x").
 fn grp_passwd(grrec) { return load64(grrec + 16); }
+
+# v5.8.31 — Result variant of grp_getgrouplist.
+# Returns Ok(count) on success; Err on failure. The legacy
+# fn's overflow-as-negative `-(n+2)` encoding collapses to
+# Err(GrpBufTooSmall) here — callers needing the would-have-
+# been count fall back to the int-returning fn.
+fn grp_getgrouplist_r(user, primary_gid, gid_buf, max) {
+    var rc = grp_getgrouplist(user, primary_gid, gid_buf, max);
+    if (rc >= 0)      { return Ok(rc); }
+    if (rc == 0 - 1)  { return Err(GrpLoadFailed); }
+    if (rc == 0 - 2)  { return Err(GrpBufTooSmall); }
+    if (rc <= 0 - 3)  { return Err(GrpBufTooSmall); }
+    return Err(GrpOther);
+}

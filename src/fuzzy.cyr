@@ -23,8 +23,11 @@
 # flag) per ADR 0005.
 #
 # Out of scope for M3.5 (per ADR 0005):
-#   - Unicode NFD normalization (post-v1.0; needs ~25KB Unicode DB).
-#   - Exact start-position recovery in `_search` (heuristic for now).
+#   - Unicode NFD normalization — landed in v0.8.0 (ADR 0008) via stdlib
+#     `lib/unicode/normalize.cyr` (no longer needs niyama-side ~25KB DB).
+#     Opt in with FUZZY_FLAG_UNICODE_NFD.
+#   - Exact start-position recovery in `_search` — landed v0.8.0
+#     (ADR 0008) via reverse-DP pass; previously a heuristic.
 #
 # Precondition: alloc_init() must have been called.
 
@@ -35,6 +38,11 @@ var FUZZY_MAX_TEXT_LEN = 4096;
 var FUZZY_DEFAULT_K    = 2;
 
 var FUZZY_FLAG_CASE_INSENSITIVE = 1;
+# v0.8.0 — NFD-normalize pattern + input via stdlib str_normalize before
+# the Levenshtein DP runs. Composed vs. decomposed forms (café NFC vs.
+# NFD) become equivalence-classed at distance 0. ASCII-only inputs
+# trivially round-trip; cost is paid only when the flag is set.
+var FUZZY_FLAG_UNICODE_NFD      = 2;
 
 # Handle layout:
 #   +0   pat_len:   u64
@@ -51,6 +59,10 @@ var FUZZY_HANDLE_SIZE   = 280;  # 24 + 256
 var FUZZY_E_OK                 = 0;
 var FUZZY_E_PATTERN_TOO_LONG   = 1;
 var FUZZY_E_INVALID_THRESHOLD  = 2;
+# v0.8.0 — NFD normalization may expand pattern bytes (max 3x for
+# Hangul LVT). If the normalized pattern overflows FUZZY_MAX_PAT_LEN,
+# reject at compile time rather than silently truncate.
+var FUZZY_E_NFD_OVERFLOW       = 3;
 
 # Process-lifetime scratch.
 var _fuzzy_init = 0;
@@ -94,13 +106,28 @@ fn niyama_fuzzy_compile_opts(pat, max_edits, flags) {
         _fuzzy_last_err = FUZZY_E_PATTERN_TOO_LONG;
         return 0;
     }
+    # v0.8.0 — under FUZZY_FLAG_UNICODE_NFD, normalize pattern at compile
+    # time so the matcher only pays the per-input normalize cost. Stored
+    # form fits FUZZY_MAX_PAT_LEN or compile fails with NFD_OVERFLOW.
+    var pat_buf = pat;
+    var pat_len = n;
+    if ((flags & FUZZY_FLAG_UNICODE_NFD) != 0) {
+        var src_str = str_new(pat, n);
+        var nfd_str = str_normalize(src_str, NFD);
+        pat_buf = str_data(nfd_str);
+        pat_len = str_len(nfd_str);
+        if (pat_len > FUZZY_MAX_PAT_LEN) {
+            _fuzzy_last_err = FUZZY_E_NFD_OVERFLOW;
+            return 0;
+        }
+    }
     var h = alloc(FUZZY_HANDLE_SIZE);
-    store64(h + FUZZY_OFF_PAT_LEN,   n);
+    store64(h + FUZZY_OFF_PAT_LEN,   pat_len);
     store64(h + FUZZY_OFF_MAX_EDITS, max_edits);
     store64(h + FUZZY_OFF_FLAGS,     flags);
     var i = 0;
-    while (i < n) {
-        store8(h + FUZZY_OFF_PAT + i, load8(pat + i));
+    while (i < pat_len) {
+        store8(h + FUZZY_OFF_PAT + i, load8(pat_buf + i));
         i = i + 1;
     }
     while (i < FUZZY_MAX_PAT_LEN) {
@@ -213,6 +240,58 @@ fn _fuzzy_dp_substring(pat, plen, s, slen, casefold, out_end_pos) {
     return best;
 }
 
+# v0.8.0 — exact start-position recovery for substring search.
+# After the forward substring DP found the best end_pos with distance D,
+# this reverse pass finds the actual start_pos. Runs substring DP with
+# pat read backwards (pat[plen-1-i]) and input read backwards
+# (input[end_pos-1-k]). The "best end" in the reversed problem equals
+# end_pos - start_pos in the original. Same O(plen × end_pos)
+# complexity as the forward pass; reuses the row scratch buffers.
+fn _fuzzy_recover_start(pat, plen, s, end_pos, casefold) {
+    if (end_pos > FUZZY_MAX_TEXT_LEN) { end_pos = FUZZY_MAX_TEXT_LEN; }
+    var prev = _fuzzy_row_a;
+    var curr = _fuzzy_row_b;
+    var j = 0;
+    while (j <= end_pos) {
+        store64(prev + j * 8, 0);
+        j = j + 1;
+    }
+    var i = 1;
+    while (i <= plen) {
+        store64(curr, i);
+        # Read pat backwards: 1-indexed i ↔ pat[plen - i].
+        var pc = _fuzzy_fold(load8(pat + (plen - i)), casefold);
+        var k = 1;
+        while (k <= end_pos) {
+            # Read input backwards: 1-indexed k ↔ s[end_pos - k].
+            var sc = _fuzzy_fold(load8(s + (end_pos - k)), casefold);
+            var sub_cost = 1;
+            if (sc == pc) { sub_cost = 0; }
+            var del_d = load64(prev + k * 8) + 1;
+            var ins_d = load64(curr + (k - 1) * 8) + 1;
+            var sub_d = load64(prev + (k - 1) * 8) + sub_cost;
+            store64(curr + k * 8, _fuzzy_min3(del_d, ins_d, sub_d));
+            k = k + 1;
+        }
+        var swap = prev;
+        prev = curr;
+        curr = swap;
+        i = i + 1;
+    }
+    var best = load64(prev);
+    var best_j = 0;
+    var jj = 1;
+    while (jj <= end_pos) {
+        var v = load64(prev + jj * 8);
+        if (v < best) {
+            best = v;
+            best_j = jj;
+        }
+        jj = jj + 1;
+    }
+    return end_pos - best_j;
+}
+
 # Prefix DP: minimum Levenshtein distance between pat and any prefix
 # of s. Same DP as full, but final answer is min over the last row.
 fn _fuzzy_dp_prefix(pat, plen, s, slen, casefold) {
@@ -256,6 +335,24 @@ fn _fuzzy_dp_prefix(pat, plen, s, slen, casefold) {
 
 # === Public matchers =================================================
 
+# v0.8.0 — if NFD flag is set on the handle, normalize the input string
+# in place via stdlib str_normalize before the DP runs. Returns input
+# pointer + length packed in globals to keep the call sites simple.
+var _fuzzy_norm_buf = 0;
+var _fuzzy_norm_len = 0;
+
+fn _fuzzy_maybe_normalize(s, slen, flags) {
+    if ((flags & FUZZY_FLAG_UNICODE_NFD) == 0) {
+        _fuzzy_norm_buf = s;
+        _fuzzy_norm_len = slen;
+        return 0;
+    }
+    var nfd = str_normalize(str_new(s, slen), NFD);
+    _fuzzy_norm_buf = str_data(nfd);
+    _fuzzy_norm_len = str_len(nfd);
+    return 0;
+}
+
 fn niyama_fuzzy_distance(h, s) {
     if (h == 0) { return 0 - 1; }
     var plen = load64(h + FUZZY_OFF_PAT_LEN);
@@ -263,7 +360,8 @@ fn niyama_fuzzy_distance(h, s) {
     var casefold = 0;
     if ((flags & FUZZY_FLAG_CASE_INSENSITIVE) != 0) { casefold = 1; }
     var slen = strlen(s);
-    var d = _fuzzy_dp_full(h + FUZZY_OFF_PAT, plen, s, slen, casefold);
+    _fuzzy_maybe_normalize(s, slen, flags);
+    var d = _fuzzy_dp_full(h + FUZZY_OFF_PAT, plen, _fuzzy_norm_buf, _fuzzy_norm_len, casefold);
     _fuzzy_last_dist = d;
     return d;
 }
@@ -288,16 +386,19 @@ fn niyama_fuzzy_search(h, s) {
     var casefold = 0;
     if ((flags & FUZZY_FLAG_CASE_INSENSITIVE) != 0) { casefold = 1; }
     var slen = strlen(s);
+    _fuzzy_maybe_normalize(s, slen, flags);
+    var nbuf = _fuzzy_norm_buf;
+    var nlen = _fuzzy_norm_len;
     # Allocate a stack slot for the end-pos out param.
     var end_pos_buf = alloc(8);
-    var d = _fuzzy_dp_substring(h + FUZZY_OFF_PAT, plen, s, slen, casefold, end_pos_buf);
+    var d = _fuzzy_dp_substring(h + FUZZY_OFF_PAT, plen, nbuf, nlen, casefold, end_pos_buf);
     _fuzzy_last_dist = d;
     if (d > max_edits) { return 0 - 1; }
     var end_pos = load64(end_pos_buf);
-    var start = end_pos - plen;
+    # v0.8.0 — exact start via reverse-DP (was: heuristic end_pos - plen).
+    var start = _fuzzy_recover_start(h + FUZZY_OFF_PAT, plen, nbuf, end_pos, casefold);
     if (start < 0) { start = 0; }
-    if (start >= slen) { start = slen - 1; }
-    if (start < 0) { start = 0; }
+    if (start > nlen) { start = nlen; }
     return start;
 }
 
@@ -312,7 +413,8 @@ fn niyama_fuzzy_search_prefix(h, s) {
     var casefold = 0;
     if ((flags & FUZZY_FLAG_CASE_INSENSITIVE) != 0) { casefold = 1; }
     var slen = strlen(s);
-    var d = _fuzzy_dp_prefix(h + FUZZY_OFF_PAT, plen, s, slen, casefold);
+    _fuzzy_maybe_normalize(s, slen, flags);
+    var d = _fuzzy_dp_prefix(h + FUZZY_OFF_PAT, plen, _fuzzy_norm_buf, _fuzzy_norm_len, casefold);
     _fuzzy_last_dist = d;
     if (d <= max_edits) { return 1; }
     return 0;

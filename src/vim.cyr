@@ -47,6 +47,13 @@ var VIM_OP_BOL        = 8;
 var VIM_OP_EOL        = 9;
 var VIM_OP_BOUNDARY   = 10;
 var VIM_OP_NBOUNDARY  = 11;
+# v0.8.0 — Unicode property class \p{L} / \P{L} via stdlib lib/unicode.
+# 30-bit GeneralCategory mask packed into upper 32 bits of word0.
+var VIM_OP_UPROP      = 12;     # \p{NAME} — cp_category(cp) ∈ mask
+var VIM_OP_NUPROP     = 13;     # \P{NAME} — cp_category(cp) ∉ mask
+# v0.8.0 — multi-byte literal char in pattern (codepoint stored in
+# upper 32 bits of word0). See re2.cyr's UCHAR comment for rationale.
+var VIM_OP_UCHAR      = 14;     # codepoint literal — match cp == stored
 
 var VIM_NFA_HEADER_SIZE = 216;
 var VIM_OFF_INSTR_COUNT = 0;
@@ -76,6 +83,7 @@ var VIM_E_SYNTAX               = 1;
 var VIM_E_BACKREF_UNSUPPORTED  = 2;
 var VIM_E_INVALID_MODE         = 3;
 var VIM_E_TOO_LARGE            = 4;
+var VIM_E_BAD_PROPERTY         = 5;  # v0.8.0: \p{Xy} unrecognized name
 
 # === Compile-time globals ============================================
 
@@ -100,6 +108,8 @@ var _vim_m_next = 0;
 var _vim_m_lastgen = 0;
 var _vim_m_gen = 0;
 var _vim_q_splits = 0;
+# v0.8.0 — UTF-8 codepoint scratch slot for UPROP / NUPROP.
+var _vim_m_cp_slot = 0;
 
 fn _vim_lazy_init() {
     if (_vim_m_init == 1) { return 0; }
@@ -107,6 +117,7 @@ fn _vim_lazy_init() {
     _vim_m_next    = alloc(8 + VIM_MAX_INSTRS * 168);
     _vim_m_lastgen = alloc(VIM_MAX_INSTRS * 8);
     _vim_q_splits  = alloc(64 * 8);
+    _vim_m_cp_slot = alloc(8);
     var i = 0;
     while (i < VIM_MAX_INSTRS) {
         store64(_vim_m_lastgen + i * 8, 0);
@@ -142,6 +153,14 @@ fn _vim_emit_class(neg, ci) {
 fn _vim_emit_save(idx)     { return _vim_emit_raw(VIM_OP_SAVE | (idx << 8), 0); }
 fn _vim_emit_jmp(target)   { return _vim_emit_raw(VIM_OP_JMP | (target << 32), 0); }
 fn _vim_emit_split(a, b)   { return _vim_emit_raw(VIM_OP_SPLIT | (a << 32), b); }
+fn _vim_emit_uprop(neg, mask) {
+    var op = VIM_OP_UPROP;
+    if (neg == 1) { op = VIM_OP_NUPROP; }
+    return _vim_emit_raw(op | (mask << 32), 0);
+}
+fn _vim_emit_uchar(cp) {
+    return _vim_emit_raw(VIM_OP_UCHAR | (cp << 32), 0);
+}
 
 fn _vim_patch_arg1(idx, arg1) {
     var off = _vim_instr_base + idx * 16;
@@ -253,150 +272,33 @@ fn _vim_class_fill_space(ci) {
     return 0;
 }
 
-# === POSIX bracket class fillers — shared with v0.9.0 catch-up =======
+# === POSIX bracket classes — delegate to src/posix_classes.cyr (v0.8.0) ==
+#
+# Pre-v0.8.0 vim carried duplicate alpha/alnum/upper/lower/blank/cntrl/
+# print/graph/punct/xdigit fillers and a 12-name keyword recognizer
+# parallel to posix_classes.cyr (deliberate duplication to keep the
+# v0.7.0 catch-up risk-bounded — see ADR 0007). v0.8.0 folds them onto
+# the shared module per ADR 0008's M5-prep cleanup. _vim_class_fill_*
+# survive only for vim-specific classes (\d, \w, \s).
 
-fn _vim_class_fill_alpha(ci) {
-    _vim_class_range(ci, 65, 90);
-    _vim_class_range(ci, 97, 122);
-    return 0;
-}
-
-fn _vim_class_fill_alnum(ci) {
-    _vim_class_fill_alpha(ci);
-    _vim_class_range(ci, 48, 57);
-    return 0;
-}
-
-fn _vim_class_fill_upper(ci) { _vim_class_range(ci, 65, 90); return 0; }
-fn _vim_class_fill_lower(ci) { _vim_class_range(ci, 97, 122); return 0; }
-fn _vim_class_fill_blank(ci) {
-    _vim_class_set(ci, 32);
-    _vim_class_set(ci, 9);
-    return 0;
-}
-
-fn _vim_class_fill_cntrl(ci) {
-    _vim_class_range(ci, 0, 31);
-    _vim_class_set(ci, 127);
-    return 0;
-}
-
-fn _vim_class_fill_print(ci) { _vim_class_range(ci, 32, 126); return 0; }
-fn _vim_class_fill_graph(ci) { _vim_class_range(ci, 33, 126); return 0; }
-
-fn _vim_class_fill_punct(ci) {
-    # ASCII punctuation: !"#$%&'()*+,-./ :;<=>?@ [\]^_` {|}~
-    _vim_class_range(ci, 33, 47);
-    _vim_class_range(ci, 58, 64);
-    _vim_class_range(ci, 91, 96);
-    _vim_class_range(ci, 123, 126);
-    return 0;
-}
-
-fn _vim_class_fill_xdigit(ci) {
-    _vim_class_range(ci, 48, 57);
-    _vim_class_range(ci, 65, 70);
-    _vim_class_range(ci, 97, 102);
-    return 0;
-}
-
-# Match a POSIX class name keyword starting at _vim_pos (which is past
-# the "[:" prefix). Returns the fill function category as integer:
-#   1 = alpha, 2 = digit, 3 = space, 4 = upper, 5 = lower, 6 = alnum,
-#   7 = blank, 8 = cntrl, 9 = graph, 10 = print, 11 = punct, 12 = xdigit
-# 0 = unknown / not a POSIX class. On match, advances _vim_pos past
-# ":]". On mismatch, _vim_pos is unchanged.
+# Match a POSIX class header `[:name:]` starting at _vim_pos (which is
+# past the leading "[:"). Delegates to _posix_match_class_name. On
+# success advances _vim_pos past ":]" and returns the category id
+# (1..12 — same numbering as posix_classes.cyr). On mismatch, returns
+# 0 and leaves _vim_pos unchanged.
 fn _vim_match_posix_class() {
     var save_pos = _vim_pos;
-    # Read the name (a-z chars).
-    var name_start = _vim_pos;
-    var scanning = 1;
-    while (scanning == 1) {
-        if (_vim_pos >= _vim_pat_len) {
-            scanning = 0;
-        } else {
-            var c = load8(_vim_pat + _vim_pos);
-            if (c < 97 || c > 122) {
-                scanning = 0;
-            } else {
-                _vim_pos = _vim_pos + 1;
-            }
-        }
-    }
-    var name_len = _vim_pos - name_start;
-    # Expect ":]".
-    if (_vim_pos + 1 >= _vim_pat_len) {
-        _vim_pos = save_pos;
-        return 0;
-    }
-    if (load8(_vim_pat + _vim_pos) != 58 || load8(_vim_pat + _vim_pos + 1) != 93) {
-        _vim_pos = save_pos;
-        return 0;
-    }
-    # Match the name.
-    var category = 0;
-    if (name_len == 5) {
-        if (load8(_vim_pat + name_start) == 97 && load8(_vim_pat + name_start + 1) == 108 && load8(_vim_pat + name_start + 2) == 112 && load8(_vim_pat + name_start + 3) == 104 && load8(_vim_pat + name_start + 4) == 97) {
-            category = 1;  # alpha
-        }
-        elif (load8(_vim_pat + name_start) == 100 && load8(_vim_pat + name_start + 1) == 105 && load8(_vim_pat + name_start + 2) == 103 && load8(_vim_pat + name_start + 3) == 105 && load8(_vim_pat + name_start + 4) == 116) {
-            category = 2;  # digit
-        }
-        elif (load8(_vim_pat + name_start) == 115 && load8(_vim_pat + name_start + 1) == 112 && load8(_vim_pat + name_start + 2) == 97 && load8(_vim_pat + name_start + 3) == 99 && load8(_vim_pat + name_start + 4) == 101) {
-            category = 3;  # space
-        }
-        elif (load8(_vim_pat + name_start) == 117 && load8(_vim_pat + name_start + 1) == 112 && load8(_vim_pat + name_start + 2) == 112 && load8(_vim_pat + name_start + 3) == 101 && load8(_vim_pat + name_start + 4) == 114) {
-            category = 4;  # upper
-        }
-        elif (load8(_vim_pat + name_start) == 108 && load8(_vim_pat + name_start + 1) == 111 && load8(_vim_pat + name_start + 2) == 119 && load8(_vim_pat + name_start + 3) == 101 && load8(_vim_pat + name_start + 4) == 114) {
-            category = 5;  # lower
-        }
-        elif (load8(_vim_pat + name_start) == 97 && load8(_vim_pat + name_start + 1) == 108 && load8(_vim_pat + name_start + 2) == 110 && load8(_vim_pat + name_start + 3) == 117 && load8(_vim_pat + name_start + 4) == 109) {
-            category = 6;  # alnum
-        }
-        elif (load8(_vim_pat + name_start) == 98 && load8(_vim_pat + name_start + 1) == 108 && load8(_vim_pat + name_start + 2) == 97 && load8(_vim_pat + name_start + 3) == 110 && load8(_vim_pat + name_start + 4) == 107) {
-            category = 7;  # blank
-        }
-        elif (load8(_vim_pat + name_start) == 99 && load8(_vim_pat + name_start + 1) == 110 && load8(_vim_pat + name_start + 2) == 116 && load8(_vim_pat + name_start + 3) == 114 && load8(_vim_pat + name_start + 4) == 108) {
-            category = 8;  # cntrl
-        }
-        elif (load8(_vim_pat + name_start) == 103 && load8(_vim_pat + name_start + 1) == 114 && load8(_vim_pat + name_start + 2) == 97 && load8(_vim_pat + name_start + 3) == 112 && load8(_vim_pat + name_start + 4) == 104) {
-            category = 9;  # graph
-        }
-        elif (load8(_vim_pat + name_start) == 112 && load8(_vim_pat + name_start + 1) == 114 && load8(_vim_pat + name_start + 2) == 105 && load8(_vim_pat + name_start + 3) == 110 && load8(_vim_pat + name_start + 4) == 116) {
-            category = 10;  # print
-        }
-        elif (load8(_vim_pat + name_start) == 112 && load8(_vim_pat + name_start + 1) == 117 && load8(_vim_pat + name_start + 2) == 110 && load8(_vim_pat + name_start + 3) == 99 && load8(_vim_pat + name_start + 4) == 116) {
-            category = 11;  # punct
-        }
-    }
-    elif (name_len == 6) {
-        if (load8(_vim_pat + name_start) == 120 && load8(_vim_pat + name_start + 1) == 100 && load8(_vim_pat + name_start + 2) == 105 && load8(_vim_pat + name_start + 3) == 103 && load8(_vim_pat + name_start + 4) == 105 && load8(_vim_pat + name_start + 5) == 116) {
-            category = 12;  # xdigit
-        }
-    }
+    var category = _posix_match_class_name(_vim_pat, _vim_pos, _vim_pat_len);
     if (category == 0) {
         _vim_pos = save_pos;
         return 0;
     }
-    _vim_pos = _vim_pos + 2;  # consume ":]"
+    _vim_pos = _posix_match_end_pos;
     return category;
 }
 
 fn _vim_class_apply_posix(ci, category) {
-    if (category == 1)  { _vim_class_fill_alpha(ci); }
-    elif (category == 2)  { _vim_class_fill_digit(ci); }
-    elif (category == 3)  { _vim_class_fill_space(ci); }
-    elif (category == 4)  { _vim_class_fill_upper(ci); }
-    elif (category == 5)  { _vim_class_fill_lower(ci); }
-    elif (category == 6)  { _vim_class_fill_alnum(ci); }
-    elif (category == 7)  { _vim_class_fill_blank(ci); }
-    elif (category == 8)  { _vim_class_fill_cntrl(ci); }
-    elif (category == 9)  { _vim_class_fill_graph(ci); }
-    elif (category == 10) { _vim_class_fill_print(ci); }
-    elif (category == 11) { _vim_class_fill_punct(ci); }
-    elif (category == 12) { _vim_class_fill_xdigit(ci); }
-    return 0;
+    return _posix_apply_filler(_vim_class_base, ci, category);
 }
 
 # === Mode dispatch helpers ===========================================
@@ -775,6 +677,20 @@ fn _vim_parse_primary(at_start) {
             return 0;
         }
 
+        # \p{NAME} / \P{NAME} — Unicode property class (v0.8.0, ADR 0008).
+        if (e == 112 || e == 80) {
+            var neg_p = 0;
+            if (e == 80) { neg_p = 1; }
+            var u_mask = _uprops_parse_class(_vim_pat, _vim_pos + 2, _vim_pat_len);
+            if (u_mask == 0) {
+                _vim_err = VIM_E_BAD_PROPERTY;
+                return 0;
+            }
+            _vim_pos = _uprops_match_end_pos;
+            _vim_emit_uprop(neg_p, u_mask);
+            return 0;
+        }
+
         # Predefined classes: \d \D \w \W \s \S
         if (e == 100) {
             _vim_pos = _vim_pos + 2;
@@ -874,9 +790,18 @@ fn _vim_parse_primary(at_start) {
         }
     }
 
-    # Otherwise: literal byte.
-    _vim_pos = _vim_pos + 1;
-    _vim_emit_char(c);
+    # Otherwise: literal char (byte for ASCII, codepoint for multi-byte).
+    if (c >= 128) {
+        # v0.8.0 — multi-byte literal. Codepoint-step the matcher
+        # treats this as one unit; emit single UCHAR.
+        var u_step = _uc_decode_utf8(_vim_pat, _vim_pos, _vim_pat_len, _vim_m_cp_slot);
+        var u_cp = load64(_vim_m_cp_slot);
+        _vim_pos = _vim_pos + u_step;
+        _vim_emit_uchar(u_cp);
+    } else {
+        _vim_pos = _vim_pos + 1;
+        _vim_emit_char(c);
+    }
     return 0;
 }
 
@@ -1363,8 +1288,20 @@ fn _vim_pike_run(nfa, input, input_len, start_pos) {
     var pos = start_pos;
     var done = 0;
     while (done == 0) {
+        # v0.8.0 — codepoint-stepped (mirrors re2). Decode UTF-8 cp +
+        # step at top so all consumers schedule successors at pos + step.
         var c = 0 - 1;
-        if (pos < input_len) { c = load8(input + pos); }
+        var cp = 0 - 1;
+        var step = 1;
+        if (pos < input_len) {
+            c = load8(input + pos);
+            if (c < 128) {
+                cp = c;
+            } else {
+                step = _uc_decode_utf8(input, pos, input_len, _vim_m_cp_slot);
+                cp = load64(_vim_m_cp_slot);
+            }
+        }
         _vim_m_gen = _vim_m_gen + 1;
         var n_cur = load64(cur);
         var ti = 0;
@@ -1389,7 +1326,19 @@ fn _vim_pike_run(nfa, input, input_len, start_pos) {
                         store64(saves_scratch + ks2 * 8, load64(cur + 8 + ti * 168 + 8 + ks2 * 8));
                         ks2 = ks2 + 1;
                     }
-                    _vim_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
+                }
+            }
+            elif (iop == VIM_OP_UCHAR) {
+                # v0.8.0 — codepoint literal match.
+                var u_want = (iw0 >> 32) & 0x1FFFFF;
+                if (cp >= 0 && cp == u_want) {
+                    var ks_uc = 0;
+                    while (ks_uc < VIM_MAX_SAVES) {
+                        store64(saves_scratch + ks_uc * 8, load64(cur + 8 + ti * 168 + 8 + ks_uc * 8));
+                        ks_uc = ks_uc + 1;
+                    }
+                    _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                 }
             }
             elif (iop == VIM_OP_ANY) {
@@ -1399,7 +1348,7 @@ fn _vim_pike_run(nfa, input, input_len, start_pos) {
                         store64(saves_scratch + ks3 * 8, load64(cur + 8 + ti * 168 + 8 + ks3 * 8));
                         ks3 = ks3 + 1;
                     }
-                    _vim_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                 }
             }
             elif (iop == VIM_OP_CLASS || iop == VIM_OP_NCLASS) {
@@ -1415,7 +1364,25 @@ fn _vim_pike_run(nfa, input, input_len, start_pos) {
                             store64(saves_scratch + ks4 * 8, load64(cur + 8 + ti * 168 + 8 + ks4 * 8));
                             ks4 = ks4 + 1;
                         }
-                        _vim_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                        _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
+                    }
+                }
+            }
+            elif (iop == VIM_OP_UPROP || iop == VIM_OP_NUPROP) {
+                # v0.8.0 — \p{NAME} / \P{NAME} via stdlib unicode_category.
+                if (cp >= 0) {
+                    var u_mask = (iw0 >> 32) & 0x3FFFFFFF;
+                    var u_hit = _uprops_test(cp, u_mask);
+                    if (iop == VIM_OP_NUPROP) {
+                        if (u_hit == 1) { u_hit = 0; } else { u_hit = 1; }
+                    }
+                    if (u_hit == 1) {
+                        var ks_u = 0;
+                        while (ks_u < VIM_MAX_SAVES) {
+                            store64(saves_scratch + ks_u * 8, load64(cur + 8 + ti * 168 + 8 + ks_u * 8));
+                            ks_u = ks_u + 1;
+                        }
+                        _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                     }
                 }
             }
@@ -1427,7 +1394,7 @@ fn _vim_pike_run(nfa, input, input_len, start_pos) {
         store64(nxt, 0);
         if (pos > input_len) { done = 1; }
         elif (load64(cur) == 0) { done = 1; }
-        else { pos = pos + 1; }
+        else { pos = pos + step; }
     }
     if (matched >= 0) {
         var ks5 = 0;

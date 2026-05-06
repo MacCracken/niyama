@@ -220,7 +220,7 @@ muscle-memory continuity.
 - Replacement-language helpers (`~`, `&`, `\u`/`\l`/`\U`/`\L`) —
   replacement is a consumer concern.
 
-### M4.5 — deferred-features catch-up (v0.7.0 → v0.9.0) — pre-freeze completeness pass
+### M4.5 — deferred-features catch-up (v0.7.0 → v0.8.0) — pre-freeze completeness pass
 
 **Why this milestone exists.** During M2/M3/M3.5, deferrals were
 recorded in each engine's ADR ("post-v1.0", "M3.5 candidate", etc.)
@@ -229,8 +229,31 @@ clears those deferrals before M5 freeze, so the surface that gets
 frozen is the surface the roadmap originally promised — not a
 silently-trimmed subset.
 
-11 deferred items consolidated here, carved into three sub-releases
-by infrastructure dependency:
+11 deferred items consolidated here. Carve evolved across the
+milestone:
+
+- Originally **three sub-releases** (v0.7.0 / v0.8.0 / v0.9.0) per
+  ADR 0007's infrastructure-cluster grouping.
+- Briefly grew to **four** when ADR 0008 pulled `\p{L}` forward and
+  added v0.8.1 for `(?i)` Unicode upgrade.
+- Re-collapsed to **two** at user direction: v0.7.0 (shipped) +
+  **v0.8.0 = M4.5 completion** carrying everything else. Don't
+  fragment a coherent milestone into a dust of patch-tagged
+  releases just because the carve was once useful at planning time.
+- v0.8.1 pinned but **only ships if** the bre/vim backref decision
+  comes back "yes"; otherwise the slot collapses to a CHANGELOG
+  note.
+
+**v0.8.x ladder rule.** Anything that gets deferred *out of v0.8.0
+during implementation* lands at a pinned v0.8.x slot — not
+"post-v1.0", not "vN.0 maybe", not silently dropped. Each deferral
+gets its own version number with a one-line scope note in this file.
+This makes deferrals visible at planning time and prevents the
+roadmap from quietly shrinking under pressure (the same failure
+mode CLAUDE.md's "do not unilaterally defer / descope" rule
+addresses). The ladder doesn't *force* releases — slots that have
+nothing to ship collapse cleanly. It just ensures every deferral
+has a name and a number.
 
 #### M4.5a — v0.7.0 (shipped 2026-05-03) — no-Unicode-dep slice
 
@@ -258,11 +281,12 @@ Per ADR 0007. Eight features land under one new shared module
   (PCRE/RE2 spec); `(?m)` and `(?s)` opt into the previous loose
   semantics.
 
-#### M4.5b — v0.8.0 (planned) — analysis-heavy slice
+#### M4.5b — v0.8.0 (planned) — M4.5 completion release
 
-Three features that each need real compile-time analysis or matcher
-work; deliberately separate from the v0.7.0 set so each gets focused
-review.
+Carries every remaining M4.5 deferral that isn't decision-gated. Big
+release, but each feature is independent of the others and the
+shared `lib/unicode/` plumbing keeps the Unicode-touching pieces
+cheap. Sized comparably to v0.7.0's eight-feature carve.
 
 - 🟦 `niyama_pcre` lookbehind `(?<=...)` and `(?<!...)` —
   fixed-width compile-time width analysis (PCRE2 10.43 model).
@@ -272,30 +296,52 @@ review.
 - 🟦 `niyama_fuzzy` exact start-position recovery in
   `niyama_fuzzy_search` — reverse-DP pass to recover the precise
   start offset of the best fuzzy substring match.
+- 🟦 **Unicode property classes `\p{L}` for `niyama_re2`,
+  `niyama_pcre`, `niyama_vim`** — wired onto stdlib
+  `unicode_category()`. New small shared helper
+  `src/unicode_props.cyr` for parsing `\p{Name}` / `\P{Name}` and
+  resolving leaf vs. aggregate categories.
+- 🟦 **`(?i)` Unicode case-fold upgrade** — `niyama_re2` and
+  `niyama_pcre` swap ASCII `cyr_to_lower` for stdlib
+  `unicode_fold(cp, ...)`. Handles ß↔SS, İ↔i̇, Greek σ↔ς, Cyrillic.
+  Same opcodes (`*_OP_CHAR_CI`), comparison logic swap only. vim
+  excluded (uses `\c`/`\C` toggles, not `(?i)`; ADR 0006 escape
+  menagerie territory).
+- 🟦 **`niyama_fuzzy` Unicode NFD normalization** —
+  `FUZZY_FLAG_UNICODE_NFD` calls stdlib `str_normalize(s, NFD)` on
+  both pattern and input before the Levenshtein DP runs. Composed
+  vs. decomposed forms (café NFC vs NFD) become equivalence-classed
+  at distance 0.
+- 🟦 **vim → posix_classes refactor** — fold `niyama_vim`'s
+  in-engine POSIX bracket-class code onto `src/posix_classes.cyr`
+  (deliberate duplication left in v0.7.0 to keep risk low; clears
+  the technical debt before M5 freeze).
 - ⏳ `niyama_bre` and `niyama_vim` backref `\1`-`\9` —
-  **user's explicit "potentially post-v1.0; document, don't skip"
-  call from M1 / M4.** v0.8.0 is the natural revisit point if the
-  user wants to reopen.
+  **deferred to v0.8.1** per the ladder rule (decision-gated; see
+  below).
 
-#### M4.5c — v0.9.0 (planned) — Unicode slice + cleanups
+#### M4.5b.1 — v0.8.1 (decision-gated) — bre / vim backref `\1`-`\9`
 
-The infrastructure-heavy slice. Adds one shared module and clears
-remaining Unicode deferrals.
+Pinned per the v0.8.x ladder rule. **Only ships as a release if the
+user decides "yes" on backref.** Otherwise this slot collapses to
+a single CHANGELOG note without a tag.
 
-- 🟦 New shared module `src/unicode.cyr` for the Unicode
-  decomposition + property table (~25 KB) — used by re2, pcre,
-  fuzzy, and vim.
-- 🟦 `niyama_re2` Unicode property classes `\p{L}` etc.
-- 🟦 `niyama_pcre` Unicode property classes `\p{L}` (shared table
-  from re2 work).
-- 🟦 `niyama_fuzzy` Unicode NFD normalization via
-  `FUZZY_FLAG_UNICODE_NFD`.
-- 🟦 Refactor — fold `niyama_vim`'s in-engine POSIX bracket-class
-  code onto `src/posix_classes.cyr` (deliberate duplication left in
-  v0.7.0 to keep risk low; this clears the technical debt before
-  M5 freeze).
+- **If user says "yes, implement":** v0.8.1 ships backref support
+  for `niyama_bre` (clearing the last ADR 0002 deferral) and
+  `niyama_vim` (clearing the M4 / ADR 0006 deferral). The Pike NFA
+  shared kernel grows a backref opcode and matcher extension; re2's
+  no-backref guarantee is preserved by per-engine policy, not
+  kernel.
+- **If user says "no, keep deferred":** v0.8.1 doesn't release.
+  CHANGELOG `[Unreleased]` records "bre/vim backref: permanently
+  out of scope for v1.0; revisit post-fold." Engines ship unchanged.
+- **If user wants more time:** the decision stays pinned at v0.8.1
+  rather than becoming a floating "potentially post-v1.0" note.
 
-**Cross-engine concerns (apply across the three sub-releases):**
+The slot exists so "what happened to bre/vim backref?" has an
+answer in the roadmap, not just in chat history.
+
+**Cross-engine concerns (apply to v0.8.0 + any future v0.8.x):**
 
 - All per-engine ABI extensions (named-capture lookup for re2, flag
   setters, NFD flag, etc.) preserve frozen numeric error code values
@@ -305,8 +351,15 @@ remaining Unicode deferrals.
   `PCRE_E_CONDITIONAL_UNSUPPORTED = 5` after v0.7.0 implements
   conditionals) are kept for ABI stability.
 - New tests/fuzz/bench harnesses ship alongside each feature.
+- **v0.8.x ladder.** Any feature that slips out of v0.8.0 during
+  implementation gets a v0.8.x pin here with a one-line scope note,
+  not a floating deferral. Currently pinned: v0.8.1 (bre/vim backref
+  decision). New slots appended in numeric order as needed.
+- **Don't fragment.** Pinning a deferral isn't a commitment to ship
+  a release for it — slots collapse cleanly when the work doesn't
+  warrant a tag.
 
-### M5 — P(-1) hardening + closeout (post-v0.9.0 → freeze)
+### M5 — P(-1) hardening + closeout (post-v0.8.x → freeze)
 
 **Why before fold.** Per first-party-standards § Security Hardening
 (required before every release) plus the cyim-style closeout pass

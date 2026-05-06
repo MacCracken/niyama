@@ -8,13 +8,41 @@
 **0.7.0** — first M4.5 catch-up release shipped 2026-05-03. Eight
 features land across bre / re2 / pcre under one shared
 `src/posix_classes.cyr` module per ADR 0007 (the no-Unicode-dep
-slice). All five engines still shipped. Next: v0.8.0 (lookbehind +
-pcre recursion + fuzzy exact-start), then v0.9.0 (Unicode work),
-then M5 hardening + freeze, then v1.0 fold-ready.
+slice). All five engines still shipped.
+
+**Unreleased (post-v0.7.0)** — toolchain bumped to Cyrius 5.8.65,
+which ships `lib/unicode/` (categories, casefold, normalize, UTF-8
+codec). ADR 0008 reshapes M4.5 around the new stdlib + a user
+direction to not fragment a coherent milestone: **v0.8.0 = M4.5
+completion release**. Custom `src/unicode.cyr` deleted from the
+plan. No engine code touched yet.
+
+Next:
+
+1. **v0.8.0 — M4.5 completion** — pcre lookbehind, pcre recursion,
+   fuzzy exact-start, `\p{L}` for re2/pcre/vim, `(?i)` Unicode
+   case-fold upgrade for re2/pcre, fuzzy NFD, vim →
+   `src/posix_classes.cyr` refactor.
+2. **v0.8.1 — bre/vim backref (decision-gated)** — pinned slot;
+   only releases if the user says "yes" on backref. Otherwise
+   collapses to a `[Unreleased]` CHANGELOG note.
+3. **M5** — hardening + closeout + surface freeze.
+4. **v1.0** — fold-ready release.
+
+**v0.8.x ladder rule.** Any feature deferred *out of v0.8.0 during
+implementation* gets a pinned v0.8.x slot in `roadmap.md`, not a
+floating "post-v1.0 / vN.0 maybe" note. Pins don't force releases —
+slots that don't warrant a tag collapse to a CHANGELOG note.
+Established post-v0.7.0; prevents silent roadmap shrinkage *and*
+release-tag dust.
 
 ## Toolchain
 
-- **Cyrius pin**: `5.8.42` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `5.8.65` (in `cyrius.cyml [package].cyrius`).
+  Bumped from `5.8.42` post-v0.7.0 to pull in the stdlib
+  `lib/unicode/` tree (categories at .49, casefold at .50, normalize
+  at .51, codec lift at .55, NFKC/NFKD at .60). Required floor for
+  v0.8.0 onward per ADR 0008.
 
 ## Source
 
@@ -86,7 +114,10 @@ Aggregate: `cyrius test` reports 6 files, 483 assertions all passing.
 
 Direct (declared in `cyrius.cyml`):
 
-- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert.
+- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, unicode.
+  (`unicode` added post-v0.7.0 alongside the toolchain bump per ADR
+  0008 — pulls in the `lib/unicode/{categories,casefold,normalize,
+  _decode}.cyr` tree.)
 
 ## Consumers
 
@@ -99,18 +130,22 @@ Direct (declared in `cyrius.cyml`):
 
 ## Next
 
-Sequencing through to v1.0:
+Sequencing through to v1.0 (per ADR 0008's post-stdlib-unicode reshape
++ the no-fragmentation collapse):
 
-1. **v0.8.0 — second M4.5 catch-up slice** — lookbehind `(?<=)`
-   `(?<!)` (fixed-width compile-time analysis), pcre recursion
-   `(?R)` `(?P>name)`, fuzzy exact-start recovery in `_search`,
-   bre/vim backref re-decision.
-2. **v0.9.0 — third M4.5 catch-up slice** — new shared
-   `src/unicode.cyr` (~25 KB decomposition + property table),
-   Unicode property classes `\p{L}` (re2 + pcre + vim), Unicode
-   NFD (`FUZZY_FLAG_UNICODE_NFD`), and the vim → posix_classes
-   refactor (cleanup of v0.7.0's deliberate duplication).
-3. **M5 (post-v0.9.0)** — P(-1) hardening + closeout + surface freeze.
+1. **v0.8.0 — M4.5 completion release** — pcre lookbehind
+   `(?<=)`/`(?<!)` (fixed-width), pcre recursion `(?R)`/`(?P>name)`,
+   fuzzy exact-start recovery, `\p{L}` Unicode property classes for
+   re2/pcre/vim (stdlib `unicode_category`), `(?i)` Unicode
+   case-fold upgrade for re2/pcre (stdlib `unicode_fold`), fuzzy
+   `FUZZY_FLAG_UNICODE_NFD` (stdlib `str_normalize`), vim →
+   `src/posix_classes.cyr` refactor. **Surface bre/vim backref
+   decision at ship time** — that question lands separately.
+2. **v0.8.1 — bre/vim backref (decision-gated)** — pinned slot.
+   Only releases if user decides "yes"; collapses to a CHANGELOG
+   note if "no". Either way, "what happened to backref?" has a
+   roadmap answer.
+3. **M5 (post-v0.8.x)** — P(-1) hardening + closeout + surface freeze.
 4. **v1.0** — fold-ready release.
 
 See [`roadmap.md`](roadmap.md) for the full plan.

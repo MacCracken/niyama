@@ -114,6 +114,13 @@ enum SysNr {
     SYS_INOTIFY_INIT1 = 26;
     SYS_INOTIFY_ADD_WATCH = 27;
     SYS_INOTIFY_RM_WATCH = 28;
+
+    # v5.7.35 (agnosys-surfaced — drm/luks/security)
+    SYS_GETDENTS64 = 61;
+    SYS_GETRANDOM = 278;
+    SYS_LANDLOCK_CREATE_RULESET = 444;
+    SYS_LANDLOCK_ADD_RULE = 445;
+    SYS_LANDLOCK_RESTRICT_SELF = 446;
 }
 
 # AT_FDCWD = special "current working directory" fd for at-family
@@ -619,3 +626,32 @@ fn sys_inotify_init() { return syscall(SYS_INOTIFY_INIT1, 0); }
 fn sys_inotify_add_watch(fd, path, mask) { return syscall(SYS_INOTIFY_ADD_WATCH, fd, path, mask); }
 # Remove an inotify watch
 fn sys_inotify_rm_watch(fd, wd) { return syscall(SYS_INOTIFY_RM_WATCH, fd, wd); }
+
+# v5.7.35 — agnosys-surfaced (drm/luks/security). Same wrapper
+# bodies as the x86_64 peer; the per-arch SYS_* constants in
+# this file's enum route to the right kernel entry points.
+
+# Read directory entries — see x86_64 peer for record layout.
+fn sys_getdents64(fd, buf, count) {
+    return syscall(SYS_GETDENTS64, fd, buf, count);
+}
+
+# Fill buf with kernel-CSPRNG bytes — see x86_64 peer.
+fn sys_getrandom(buf, len, flags) {
+    return syscall(SYS_GETRANDOM, buf, len, flags);
+}
+
+# Landlock — create a ruleset; see x86_64 peer + lib/security.cyr.
+fn sys_landlock_create_ruleset(attr_ptr, size, flags) {
+    return syscall(SYS_LANDLOCK_CREATE_RULESET, attr_ptr, size, flags);
+}
+
+# Landlock — add a rule to a ruleset; see x86_64 peer.
+fn sys_landlock_add_rule(ruleset_fd, rule_type, rule_attr, flags) {
+    return syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, rule_type, rule_attr, flags);
+}
+
+# Landlock — apply ruleset to calling thread; see x86_64 peer.
+fn sys_landlock_restrict_self(ruleset_fd, flags) {
+    return syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, flags);
+}

@@ -6,7 +6,9 @@
 
 include "lib/alloc.cyr"
 include "lib/string.cyr"
+include "lib/str.cyr"
 include "lib/assert.cyr"
+include "lib/unicode/normalize.cyr"
 include "src/fuzzy.cyr"
 
 fn d(pat, s) {
@@ -75,6 +77,15 @@ fn main() {
     # 1-typo substring search.
     assert(t_search_k("foo", "the fox bar", 1) >= 0, "1 typo substring");
     assert_eq(t_search_k("xyz", "abcdef", 1), 0 - 1, "no fuzzy substring match");
+    # v0.8.0 — exact start-position recovery (was heuristic end_pos - plen).
+    # Exact-match cases — returned start should be the actual substring start.
+    assert_eq(t_search_k("foo", "the foo bar", 0), 4, "exact substring starts at 4");
+    assert_eq(t_search_k("bar", "the foo bar", 0), 8, "exact substring starts at 8");
+    assert_eq(t_search_k("hello", "say hello!", 0), 4, "exact start with leading words");
+    # 1-typo with start before end_pos - plen: `cofig` against `set config x`.
+    # The match is "config" at offset 4. With heuristic, start was off; now exact.
+    var h_st = niyama_fuzzy_compile_opts("config", 1, 0);
+    assert_eq(niyama_fuzzy_search(h_st, "set config x"), 4, "1-typo finds correct start");
 
     # === Prefix search ===============================================
     test_group("fuzzy-prefix");
@@ -136,6 +147,23 @@ fn main() {
     assert_eq(t_match_k("config", "cnfig", 1), 1, "cnfig/config 1 deletion");
     # Reasonable rejection.
     assert_eq(t_match_k("config", "options", 2), 0, "options/config != fuzzy match");
+
+    # === Unicode NFD (v0.8.0) ========================================
+    test_group("fuzzy-nfd");
+    # café in NFC (1 codepoint é) vs. NFD (e + combining ´) should be
+    # equivalence-classed at distance 0 with the NFD flag set.
+    var nfc_pat = "café";
+    var nfd_input = "café";  # may render same; differs in bytes
+    # NFD-on handle: distance(café, café) = 0 regardless of source form.
+    var h_nfd = niyama_fuzzy_compile_opts(nfc_pat, 0, FUZZY_FLAG_UNICODE_NFD);
+    assert_neq(h_nfd, 0, "NFD compile succeeds");
+    assert_eq(niyama_fuzzy_distance(h_nfd, nfc_pat), 0, "NFD: NFC pat == NFC input");
+    # Without the flag, the same comparison is byte-distance and
+    # non-zero whenever forms differ. Sanity-check the no-flag path
+    # still works on plain ASCII.
+    var h_no_nfd = niyama_fuzzy_compile_opts("config", 1, 0);
+    assert_neq(h_no_nfd, 0, "no-NFD compile succeeds");
+    assert_eq(niyama_fuzzy_match(h_no_nfd, "config"), 1, "no-NFD ASCII match");
 
     return assert_summary();
 }

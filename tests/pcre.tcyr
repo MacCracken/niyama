@@ -8,7 +8,10 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "lib/unicode/categories.cyr"
+include "lib/unicode/casefold.cyr"
 include "src/posix_classes.cyr"
+include "src/unicode_props.cyr"
 include "src/pcre.cyr"
 
 fn t_match(pat, input) {
@@ -175,9 +178,11 @@ fn main() {
     assert_eq(t_err("(?<=foo)bar"), PCRE_E_LOOKBEHIND_UNSUPPORTED, "(?<=) deferred");
     assert_eq(t_err("(?<!foo)bar"), PCRE_E_LOOKBEHIND_UNSUPPORTED, "(?<!) deferred");
 
-    # Unicode property classes deferred to v0.9.0.
-    assert_eq(t_err("\\p{L}"), PCRE_E_UNICODE_PROP_UNSUPPORTED, "\\p{L} deferred");
-    assert_eq(t_err("[\\p{L}]"), PCRE_E_UNICODE_PROP_UNSUPPORTED, "[\\p{L}] deferred");
+    # Unicode property classes top-level: landed v0.8.0 (ADR 0008).
+    # Inside `[...]`: still deferred — char classes are byte bitmaps,
+    # folding cp-properties in is out of scope. UNICODE_PROP_UNSUPPORTED
+    # narrows to that case.
+    assert_eq(t_err("[\\p{L}]"), PCRE_E_UNICODE_PROP_UNSUPPORTED, "[\\p{L}] still deferred");
 
     # Recursion deferred to v0.8.0.
     assert_eq(t_err("(?R)"), PCRE_E_RECURSION_UNSUPPORTED, "(?R) deferred");
@@ -213,6 +218,12 @@ fn main() {
     assert_eq(t_match("(?ims)HELLO.WORLD", "hello\nworld"), 1, "(?ims) compiles + matches");
     # Unknown flag char rejected.
     assert_eq(t_err("(?x)foo"), PCRE_E_SYNTAX, "unknown flag rejected");
+    # v0.8.0 — (?i) Unicode case-fold (1:1 mappings via stdlib).
+    assert_eq(t_match("(?i)α", "Α"),       1, "(?i) Greek α matches Α");
+    assert_eq(t_match("(?i)Α", "α"),       1, "(?i) Greek Α matches α");
+    assert_eq(t_match("(?i)Д", "д"),       1, "(?i) Cyrillic Д matches д");
+    assert_eq(t_match("(?i)é", "É"),       1, "(?i) accented é matches É");
+    assert_eq(t_match("(?i)cAfÉ", "Café"), 1, "(?i) mixed café case-folds");
 
     # === Strict-anchor / strict-dot defaults (v0.7.0) ================
     test_group("pcre-strict-defaults");
@@ -316,6 +327,31 @@ fn main() {
 
     # And a friendly pattern still matches under the high limit.
     assert_eq(niyama_pcre_match(nfa_dos, "ab"), 1, "friendly match works");
+
+    # === Unicode property classes (v0.8.0) ===========================
+    test_group("pcre-unicode-props");
+
+    assert_eq(t_match("\\p{L}+",   "Hello"),  1, "\\p{L}+ ASCII letters");
+    assert_eq(t_match("\\p{L}+",   "12345"),  0, "\\p{L}+ rejects digits");
+    assert_eq(t_match("\\p{L}",    "α"),      1, "\\p{L} Greek α");
+    assert_eq(t_match("\\p{L}",    "д"),      1, "\\p{L} Cyrillic д");
+    assert_eq(t_match("\\p{L}+",   "café"),   1, "\\p{L}+ café (multi-byte)");
+    assert_eq(t_match("\\p{Lu}",   "A"),      1, "\\p{Lu} ASCII upper");
+    assert_eq(t_match("\\p{Lu}",   "a"),      0, "\\p{Lu} rejects lower");
+    assert_eq(t_match("\\p{Ll}",   "α"),      1, "\\p{Ll} Greek lower");
+    assert_eq(t_match("\\p{Lu}",   "Α"),      1, "\\p{Lu} Greek upper");
+    assert_eq(t_match("\\p{N}",    "5"),      1, "\\p{N} digit");
+    assert_eq(t_match("\\p{Nd}",   "7"),      1, "\\p{Nd} decimal");
+    assert_eq(t_match("\\p{P}",    "!"),      1, "\\p{P} punctuation");
+    assert_eq(t_match("\\p{Z}",    " "),      1, "\\p{Z} space");
+    assert_eq(t_match("\\P{L}",    "5"),      1, "\\P{L} matches non-letter");
+    assert_eq(t_match("\\P{L}",    "a"),      0, "\\P{L} rejects letter");
+    assert_eq(t_match("\\p{Lu}\\p{Ll}+", "Hello"), 1, "Lu Ll+ works under pcre too");
+    # Combine with PCRE-only features — atomic + backrefs.
+    assert_eq(t_match("(\\p{L}+)\\1", "abcabc"), 1, "\\p{L}+ with backref");
+    assert_eq(t_err("\\p{Foo}"),   PCRE_E_BAD_PROPERTY, "\\p{Foo} → BAD_PROPERTY");
+    assert_eq(t_err("\\p{Greek}"), PCRE_E_BAD_PROPERTY, "long names → BAD_PROPERTY");
+    assert_eq(t_err("\\p{}"),      PCRE_E_BAD_PROPERTY, "empty → BAD_PROPERTY");
 
     return assert_summary();
 }

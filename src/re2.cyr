@@ -28,7 +28,7 @@
 #
 # Out of scope for M2 (deferred per ADR 0003):
 #   - Named captures (?P<name>...) — landed in v0.7.0 (ADR 0007).
-#   - Unicode property classes \p{L} — deferred to v0.9.0.
+#   - Unicode property classes \p{L} — landed in v0.8.0 (ADR 0008).
 #   - Inline flags (?i) (?m) (?s) — landed in v0.7.0 (ADR 0007).
 #
 # v0.7.0 behavior change: niyama_re2's `^`, `$`, and `.` are now
@@ -63,6 +63,23 @@ var RE2_OP_CHAR_CI   = 12;      # case-insensitive char (ASCII fold)
 var RE2_OP_BOS       = 13;      # strict ^ — pos == 0 only
 var RE2_OP_EOS       = 14;      # strict $ — pos == len only
 var RE2_OP_ANY_NONL  = 15;      # . excluding \n
+# v0.8.0 — Unicode property class \p{L} / \P{L} via stdlib lib/unicode.
+# 30-bit GeneralCategory mask packed into upper 32 bits of word0.
+var RE2_OP_UPROP     = 16;      # \p{NAME} — cp_category(cp) ∈ mask
+var RE2_OP_NUPROP    = 17;      # \P{NAME} — cp_category(cp) ∉ mask
+# v0.8.0 — multi-byte literal char in pattern. Codepoint stored in
+# upper 32 bits of word0. Emitted instead of byte-wise CHAR when the
+# parser sees a non-ASCII literal, so that codepoint-stepped matching
+# treats the multi-byte pattern char as a single unit (else the
+# successor pos lands past the trailing UTF-8 continuation bytes and
+# they never match).
+var RE2_OP_UCHAR     = 18;      # codepoint literal — match cp == stored
+# v0.8.0 — (?i) Unicode case-fold upgrade. Stores unicode_to_lower(cp).
+# Matcher folds input cp via unicode_to_lower and compares. Handles
+# Greek/Cyrillic/accented Latin 1:1 case pairs. Full case folding
+# (e.g. ß↔SS — 1:many) is NOT in scope for v0.8.0; if a consumer
+# asks, it goes onto the v0.8.x ladder.
+var RE2_OP_UCHAR_CI  = 19;      # case-insensitive codepoint literal
 
 var RE2_NFA_HEADER_SIZE = 256;  # extended for name table (was 216)
 var RE2_OFF_INSTR_COUNT = 0;
@@ -93,6 +110,7 @@ var RE2_E_ATOMIC_UNSUPPORTED    = 4;  # (?>...) — backtracking-only
 var RE2_E_RECURSION_UNSUPPORTED = 5;  # (?R) (?P>name) — non-regular
 var RE2_E_TOO_LARGE             = 6;
 var RE2_E_DUPLICATE_NAME        = 7;  # v0.7.0: (?<x>...)(?<x>...)
+var RE2_E_BAD_PROPERTY          = 8;  # v0.8.0: \p{Xy} unrecognized name
 
 # === Compile-time globals ============================================
 
@@ -121,6 +139,8 @@ var _re2_m_next = 0;
 var _re2_m_lastgen = 0;
 var _re2_m_gen = 0;
 var _re2_q_splits = 0;
+# v0.8.0 — scratch slot for stdlib _uc_decode_utf8 codepoint output.
+var _re2_m_cp_slot = 0;
 
 fn _re2_lazy_init() {
     if (_re2_m_init == 1) { return 0; }
@@ -128,6 +148,7 @@ fn _re2_lazy_init() {
     _re2_m_next    = alloc(8 + RE2_MAX_INSTRS * 168);
     _re2_m_lastgen = alloc(RE2_MAX_INSTRS * 8);
     _re2_q_splits  = alloc(64 * 8);
+    _re2_m_cp_slot = alloc(8);
     var i = 0;
     while (i < RE2_MAX_INSTRS) {
         store64(_re2_m_lastgen + i * 8, 0);
@@ -172,6 +193,17 @@ fn _re2_emit_class(neg, ci) {
 fn _re2_emit_save(idx)     { return _re2_emit_raw(RE2_OP_SAVE | (idx << 8), 0); }
 fn _re2_emit_jmp(target)   { return _re2_emit_raw(RE2_OP_JMP | (target << 32), 0); }
 fn _re2_emit_split(a, b)   { return _re2_emit_raw(RE2_OP_SPLIT | (a << 32), b); }
+fn _re2_emit_uprop(neg, mask) {
+    var op = RE2_OP_UPROP;
+    if (neg == 1) { op = RE2_OP_NUPROP; }
+    return _re2_emit_raw(op | (mask << 32), 0);
+}
+fn _re2_emit_uchar(cp) {
+    return _re2_emit_raw(RE2_OP_UCHAR | (cp << 32), 0);
+}
+fn _re2_emit_uchar_ci(cp) {
+    return _re2_emit_raw(RE2_OP_UCHAR_CI | (cp << 32), 0);
+}
 
 fn _re2_patch_arg1(idx, arg1) {
     var off = _re2_instr_base + idx * 16;
@@ -716,6 +748,18 @@ fn _re2_parse_primary() {
             _re2_pos = _re2_pos + 2;
             _re2_emit_op(RE2_OP_NBOUNDARY);
         }
+        elif (e == 112 || e == 80) {
+            # \p{NAME} or \P{NAME} — Unicode property class (v0.8.0).
+            var neg_p = 0;
+            if (e == 80) { neg_p = 1; }
+            var mask = _uprops_parse_class(_re2_pat, _re2_pos + 2, _re2_pat_len);
+            if (mask == 0) {
+                _re2_err = RE2_E_BAD_PROPERTY;
+                return 0;
+            }
+            _re2_pos = _uprops_match_end_pos;
+            _re2_emit_uprop(neg_p, mask);
+        }
         else {
             var lc = _re2_lit_byte();
             if (_re2_err == RE2_E_OK) { _re2_emit_char(lc); }
@@ -725,8 +769,23 @@ fn _re2_parse_primary() {
         _re2_err = RE2_E_SYNTAX; return 0;
     }
     else {
-        _re2_pos = _re2_pos + 1;
-        _re2_emit_char(c);
+        if (c >= 128) {
+            # v0.8.0 — multi-byte literal: decode cp, emit single UCHAR
+            # so codepoint-stepped matcher treats it as one unit. Under
+            # (?i) emit UCHAR_CI with the folded codepoint so the
+            # matcher's input-cp fold lands on a comparable value.
+            var u_step = _uc_decode_utf8(_re2_pat, _re2_pos, _re2_pat_len, _re2_m_cp_slot);
+            var u_cp = load64(_re2_m_cp_slot);
+            _re2_pos = _re2_pos + u_step;
+            if (_re2_flag_i == 1) {
+                _re2_emit_uchar_ci(unicode_to_lower(u_cp));
+            } else {
+                _re2_emit_uchar(u_cp);
+            }
+        } else {
+            _re2_pos = _re2_pos + 1;
+            _re2_emit_char(c);
+        }
     }
     return 0;
 }
@@ -1153,8 +1212,23 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
     var pos = start_pos;
     var done = 0;
     while (done == 0) {
+        # v0.8.0 — codepoint-stepped: decode UTF-8 cp + step here so
+        # all consumers schedule successors at pos + step (not pos + 1).
+        # ASCII inputs give step = 1, behavior identical to byte-stepping.
+        # Multi-byte sequences advance by their full UTF-8 length so
+        # `.`/CHAR/CLASS treat a codepoint as a unit.
         var c = 0 - 1;
-        if (pos < input_len) { c = load8(input + pos); }
+        var cp = 0 - 1;
+        var step = 1;
+        if (pos < input_len) {
+            c = load8(input + pos);
+            if (c < 128) {
+                cp = c;
+            } else {
+                step = _uc_decode_utf8(input, pos, input_len, _re2_m_cp_slot);
+                cp = load64(_re2_m_cp_slot);
+            }
+        }
         _re2_m_gen = _re2_m_gen + 1;
         var n_cur = load64(cur);
         var ti = 0;
@@ -1179,7 +1253,35 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
                         store64(saves_scratch + ks2 * 8, load64(cur + 8 + ti * 168 + 8 + ks2 * 8));
                         ks2 = ks2 + 1;
                     }
-                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
+                }
+            }
+            elif (iop == RE2_OP_UCHAR) {
+                # v0.8.0 — codepoint literal match.
+                var u_want = (iw0 >> 32) & 0x1FFFFF;
+                if (cp >= 0 && cp == u_want) {
+                    var ks_uc = 0;
+                    while (ks_uc < RE2_MAX_SAVES) {
+                        store64(saves_scratch + ks_uc * 8, load64(cur + 8 + ti * 168 + 8 + ks_uc * 8));
+                        ks_uc = ks_uc + 1;
+                    }
+                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
+                }
+            }
+            elif (iop == RE2_OP_UCHAR_CI) {
+                # v0.8.0 — case-insensitive codepoint literal via stdlib
+                # unicode_to_lower. Stored cp is already folded.
+                var uci_want = (iw0 >> 32) & 0x1FFFFF;
+                if (cp >= 0) {
+                    var cp_fold = unicode_to_lower(cp);
+                    if (cp_fold == uci_want) {
+                        var ks_uci = 0;
+                        while (ks_uci < RE2_MAX_SAVES) {
+                            store64(saves_scratch + ks_uci * 8, load64(cur + 8 + ti * 168 + 8 + ks_uci * 8));
+                            ks_uci = ks_uci + 1;
+                        }
+                        _re2_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
+                    }
                 }
             }
             elif (iop == RE2_OP_CHAR_CI) {
@@ -1195,7 +1297,7 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
                             store64(saves_scratch + ks_ci * 8, load64(cur + 8 + ti * 168 + 8 + ks_ci * 8));
                             ks_ci = ks_ci + 1;
                         }
-                        _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                        _re2_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                     }
                 }
             }
@@ -1206,7 +1308,7 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
                         store64(saves_scratch + ks3 * 8, load64(cur + 8 + ti * 168 + 8 + ks3 * 8));
                         ks3 = ks3 + 1;
                     }
-                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                 }
             }
             elif (iop == RE2_OP_ANY_NONL) {
@@ -1217,7 +1319,7 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
                         store64(saves_scratch + ks_nn * 8, load64(cur + 8 + ti * 168 + 8 + ks_nn * 8));
                         ks_nn = ks_nn + 1;
                     }
-                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                    _re2_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                 }
             }
             elif (iop == RE2_OP_CLASS || iop == RE2_OP_NCLASS) {
@@ -1233,7 +1335,25 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
                             store64(saves_scratch + ks4 * 8, load64(cur + 8 + ti * 168 + 8 + ks4 * 8));
                             ks4 = ks4 + 1;
                         }
-                        _re2_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
+                        _re2_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
+                    }
+                }
+            }
+            elif (iop == RE2_OP_UPROP || iop == RE2_OP_NUPROP) {
+                # v0.8.0 — \p{NAME} / \P{NAME} via stdlib unicode_category.
+                if (cp >= 0) {
+                    var u_mask = (iw0 >> 32) & 0x3FFFFFFF;
+                    var u_hit = _uprops_test(cp, u_mask);
+                    if (iop == RE2_OP_NUPROP) {
+                        if (u_hit == 1) { u_hit = 0; } else { u_hit = 1; }
+                    }
+                    if (u_hit == 1) {
+                        var ks_u = 0;
+                        while (ks_u < RE2_MAX_SAVES) {
+                            store64(saves_scratch + ks_u * 8, load64(cur + 8 + ti * 168 + 8 + ks_u * 8));
+                            ks_u = ks_u + 1;
+                        }
+                        _re2_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                     }
                 }
             }
@@ -1245,7 +1365,7 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
         store64(nxt, 0);
         if (pos > input_len) { done = 1; }
         elif (load64(cur) == 0) { done = 1; }
-        else { pos = pos + 1; }
+        else { pos = pos + step; }
     }
     if (matched >= 0) {
         var ks5 = 0;

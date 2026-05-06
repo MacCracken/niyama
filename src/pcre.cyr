@@ -83,6 +83,19 @@ var PCRE_OP_EOS        = 20;  # strict $ — pos == len only
 var PCRE_OP_ANY_NONL   = 21;  # . excluding \n
 var PCRE_OP_COND       = 22;  # arg1: group_idx, arg2: no_pc
 var PCRE_OP_CALLOUT    = 23;  # arg1: callout number (zero-width no-op)
+# v0.8.0 — Unicode property class \p{L} / \P{L} via stdlib lib/unicode.
+# 30-bit GeneralCategory mask packed into upper 32 bits of word0. Mixed
+# with byte-stepping ops; multi-byte input flows through UPROP cleanly,
+# but combining `.` with UPROP across multi-byte boundaries can give
+# surprising results (`.` advances 1 byte regardless of utf8 length).
+var PCRE_OP_UPROP      = 24;  # \p{NAME} — cp_category(cp) ∈ mask
+var PCRE_OP_NUPROP     = 25;  # \P{NAME} — cp_category(cp) ∉ mask
+# v0.8.0 — (?i) Unicode case-fold upgrade for multi-byte literal chars.
+# Stores unicode_to_lower(cp) in upper 32 bits. Decodes input UTF-8
+# inline (no codepoint-stepping refactor — pcre is byte-stepped, each
+# opcode picks its own advance). 1:1 case mappings only; full case
+# folding (ß↔SS, etc.) deferred to v0.8.x ladder.
+var PCRE_OP_UCHAR_CI   = 26;
 
 # === NFA layout ======================================================
 
@@ -120,6 +133,12 @@ var PCRE_E_TOO_LARGE               = 6;
 var PCRE_E_DUPLICATE_NAME          = 7;
 # v0.7.0 — new error code (next-available; preserves M3 numbering).
 var PCRE_E_BAD_CONDITION           = 8;
+# v0.8.0 — \p{...} support landed at top-level (ADR 0008).
+# PCRE_E_UNICODE_PROP_UNSUPPORTED (= 3) narrows: still emitted when
+# \p{...} appears INSIDE a character class `[\p{L}]` — char classes
+# are byte-bitmaps, and folding a codepoint-property in is not in
+# scope for v0.8.0.
+var PCRE_E_BAD_PROPERTY            = 9;
 
 # === Compile-time globals ============================================
 
@@ -140,6 +159,8 @@ var _pcre_last_err = 0;
 # Process-lifetime scratch.
 var _pcre_init = 0;
 var _pcre_q_splits = 0;
+# v0.8.0 — UTF-8 codepoint scratch slot for UPROP / NUPROP.
+var _pcre_m_cp_slot = 0;
 var _pcre_step_limit = 1000000;
 var _pcre_step_count = 0;
 var _pcre_last_step_count = 0;
@@ -164,6 +185,7 @@ var _pcre_depth_limit = 256;
 fn _pcre_lazy_init() {
     if (_pcre_init == 1) { return 0; }
     _pcre_q_splits  = alloc(64 * 8);
+    _pcre_m_cp_slot = alloc(8);
     _pcre_init = 1;
     return 0;
 }
@@ -201,6 +223,14 @@ fn _pcre_emit_save(idx)     { return _pcre_emit_raw(PCRE_OP_SAVE | (idx << 8), 0
 fn _pcre_emit_jmp(target)   { return _pcre_emit_raw(PCRE_OP_JMP | (target << 32), 0); }
 fn _pcre_emit_split(a, b)   { return _pcre_emit_raw(PCRE_OP_SPLIT | (a << 32), b); }
 fn _pcre_emit_backref(n)    { return _pcre_emit_raw(PCRE_OP_BACKREF | (n << 8), 0); }
+fn _pcre_emit_uprop(neg, mask) {
+    var op = PCRE_OP_UPROP;
+    if (neg == 1) { op = PCRE_OP_NUPROP; }
+    return _pcre_emit_raw(op | (mask << 32), 0);
+}
+fn _pcre_emit_uchar_ci(cp) {
+    return _pcre_emit_raw(PCRE_OP_UCHAR_CI | (cp << 32), 0);
+}
 fn _pcre_emit_lookahead(neg) {
     var op = PCRE_OP_LOOKAHEAD;
     if (neg == 1) { op = PCRE_OP_NLOOKAHEAD; }
@@ -538,7 +568,10 @@ fn _pcre_parse_class() {
                 _pcre_pos = _pcre_pos + 2;
             }
             elif (nx == 112 || nx == 80) {
-                # \p{...} \P{...} unicode property — deferred.
+                # \p{...} \P{...} inside a char class. Top-level
+                # \p{NAME} works (v0.8.0); inside `[...]` requires
+                # folding Unicode props into a byte bitmap, out of
+                # scope for v0.8.0. Reserved error code (ADR 0008).
                 _pcre_err = PCRE_E_UNICODE_PROP_UNSUPPORTED;
                 return 0 - 1;
             }
@@ -941,9 +974,16 @@ fn _pcre_parse_primary() {
             _pcre_emit_save(0);
         }
         elif (e == 112 || e == 80) {
-            # \p{...} \P{...} — deferred.
-            _pcre_err = PCRE_E_UNICODE_PROP_UNSUPPORTED;
-            return 0;
+            # v0.8.0 — \p{NAME} / \P{NAME} via stdlib lib/unicode.
+            var neg_p = 0;
+            if (e == 80) { neg_p = 1; }
+            var u_mask = _uprops_parse_class(_pcre_pat, _pcre_pos + 2, _pcre_pat_len);
+            if (u_mask == 0) {
+                _pcre_err = PCRE_E_BAD_PROPERTY;
+                return 0;
+            }
+            _pcre_pos = _uprops_match_end_pos;
+            _pcre_emit_uprop(neg_p, u_mask);
         }
         else {
             var lc = _pcre_lit_byte();
@@ -954,8 +994,18 @@ fn _pcre_parse_primary() {
         _pcre_err = PCRE_E_SYNTAX; return 0;
     }
     else {
-        _pcre_pos = _pcre_pos + 1;
-        _pcre_emit_char(c);
+        if (c >= 128 && _pcre_flag_i == 1) {
+            # v0.8.0 — multi-byte literal under (?i): decode cp, fold via
+            # stdlib unicode_to_lower, emit UCHAR_CI. Single opcode that
+            # internally consumes the full multi-byte cp at match time.
+            var u_step = _uc_decode_utf8(_pcre_pat, _pcre_pos, _pcre_pat_len, _pcre_m_cp_slot);
+            var u_cp = load64(_pcre_m_cp_slot);
+            _pcre_pos = _pcre_pos + u_step;
+            _pcre_emit_uchar_ci(unicode_to_lower(u_cp));
+        } else {
+            _pcre_pos = _pcre_pos + 1;
+            _pcre_emit_char(c);
+        }
     }
     return 0;
 }
@@ -1434,6 +1484,45 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
             var c2 = load8(input + pos);
             if (_pcre_class_get_at(class_base, ci2, c2) == 1) { return 0 - 1; }
             pos = pos + 1;
+            pc = pc + 1;
+        }
+        elif (op == PCRE_OP_UCHAR_CI) {
+            # v0.8.0 — case-insensitive multi-byte literal. Stored cp
+            # is unicode_to_lower(pattern_cp); fold input cp the same
+            # way and compare. Internal multi-byte advance.
+            if (pos >= input_len) { return 0 - 1; }
+            var uci_b = load8(input + pos);
+            var uci_cp = uci_b;
+            var uci_step = 1;
+            if (uci_b >= 128) {
+                uci_step = _uc_decode_utf8(input, pos, input_len, _pcre_m_cp_slot);
+                uci_cp = load64(_pcre_m_cp_slot);
+            }
+            var uci_want = (w0 >> 32) & 0x1FFFFF;
+            if (unicode_to_lower(uci_cp) != uci_want) { return 0 - 1; }
+            pos = pos + uci_step;
+            pc = pc + 1;
+        }
+        elif (op == PCRE_OP_UPROP || op == PCRE_OP_NUPROP) {
+            # v0.8.0 — \p{NAME} / \P{NAME} via stdlib unicode_category.
+            # Decodes UTF-8 cp at pos and advances by full codepoint
+            # length (1..4). Mixed with byte-stepped CHAR/CLASS — see
+            # opcode-decl comment for caveats.
+            if (pos >= input_len) { return 0 - 1; }
+            var cu = load8(input + pos);
+            var cp = cu;
+            var step = 1;
+            if (cu >= 128) {
+                step = _uc_decode_utf8(input, pos, input_len, _pcre_m_cp_slot);
+                cp = load64(_pcre_m_cp_slot);
+            }
+            var u_mask = (w0 >> 32) & 0x3FFFFFFF;
+            var u_hit = _uprops_test(cp, u_mask);
+            if (op == PCRE_OP_NUPROP) {
+                if (u_hit == 1) { u_hit = 0; } else { u_hit = 1; }
+            }
+            if (u_hit == 0) { return 0 - 1; }
+            pos = pos + step;
             pc = pc + 1;
         }
         elif (op == PCRE_OP_BOL) {

@@ -249,6 +249,42 @@ fn pwd_getpwnam(name, pwrec, strbuf, strbufsz) {
     return _pwd_find(&_pwd_match_name, name, pwrec, strbuf, strbufsz);
 }
 
+# v5.8.31 — PwdError variants. Maps the int-return contract:
+#   1  → Ok(0) (found, pwrec populated)
+#   0  → Err(PwdNotFound)
+#   -1 → Err(PwdLoadFailed) (couldn't read /etc/passwd)
+#   -2 → Err(PwdBufTooSmall) (strbuf overflow)
+# Variant-name prefix `Pwd` keeps these out of the global enum-
+# variant namespace alongside Grp* / Shadow* / Pam* / Io* / Net*.
+include "lib/result.cyr"
+
+enum PwdError {
+    PwdNotFound;
+    PwdLoadFailed;
+    PwdBufTooSmall;
+    PwdOther;
+}
+
+# v5.8.31 — Result variant of pwd_getpwuid.
+fn pwd_getpwuid_r(uid, pwrec, strbuf, strbufsz) {
+    var rc = pwd_getpwuid(uid, pwrec, strbuf, strbufsz);
+    if (rc == 1)      { return Ok(0); }
+    if (rc == 0)      { return Err(PwdNotFound); }
+    if (rc == 0 - 1)  { return Err(PwdLoadFailed); }
+    if (rc == 0 - 2)  { return Err(PwdBufTooSmall); }
+    return Err(PwdOther);
+}
+
+# v5.8.31 — Result variant of pwd_getpwnam.
+fn pwd_getpwnam_r(name, pwrec, strbuf, strbufsz) {
+    var rc = pwd_getpwnam(name, pwrec, strbuf, strbufsz);
+    if (rc == 1)      { return Ok(0); }
+    if (rc == 0)      { return Err(PwdNotFound); }
+    if (rc == 0 - 1)  { return Err(PwdLoadFailed); }
+    if (rc == 0 - 2)  { return Err(PwdBufTooSmall); }
+    return Err(PwdOther);
+}
+
 # Convenience accessors — for callers that prefer reading fields
 # by name over raw load64 offsets. All return the value at the
 # fixed layout offset.

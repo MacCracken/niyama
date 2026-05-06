@@ -34,6 +34,10 @@ fn alloc_init() {
 
 # Allocate size bytes from the heap, 8-byte aligned
 fn alloc(size) {
+    # v5.8.37 — lazy-init the heap if alloc_init() was never called.
+    # Mirrors the Linux branch in lib/alloc.cyr; alloc_init() is now
+    # optional. See lib/alloc.cyr header for the full migration note.
+    if (_heap_base == 0) { alloc_init(); }
     if (size <= 0) { return 0; }
     if (size > ALLOC_MAX) { return 0; }
     # Align to 8 bytes

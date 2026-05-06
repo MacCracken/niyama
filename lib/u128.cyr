@@ -37,6 +37,7 @@ fn u128_lo(ptr) { return load64(ptr); }
 fn u128_hi(ptr) { return load64(ptr + 8); }
 
 # Equality — byte-identical both limbs.
+#pure
 fn u128_eq(a, b) {
     if (load64(a) != load64(b)) { return 0; }
     if (load64(a + 8) != load64(b + 8)) { return 0; }
@@ -44,6 +45,7 @@ fn u128_eq(a, b) {
 }
 
 # Zero-test.
+#pure
 fn u128_is_zero(ptr) {
     if (load64(ptr) != 0) { return 0; }
     if (load64(ptr + 8) != 0) { return 0; }

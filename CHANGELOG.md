@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Toolchain pin** bumped from `5.8.42` → `5.8.65` in `cyrius.cyml`.
+  Pulls in stdlib `lib/unicode/` (categories at .49, casefold at
+  .50, normalize at .51, codec lift at .55, NFKC/NFKD at .60).
+  Required floor for v0.8.0 onward per ADR 0008.
+- **`[deps].stdlib`** adds `unicode` — vendors
+  `lib/unicode/{categories,casefold,normalize,_decode,_*data}.cyr`
+  (~7 files) into the project tree via `cyrius update`.
+
+### Planning
+
+- **ADR 0008 — Unicode-stdlib pivot + M4.5 reshape.** Cyrius
+  5.8.65 stdlib provides exactly what the planned `src/unicode.cyr`
+  module was going to build (~25 KB UCD tables); custom module
+  deleted from the plan. After a brief four-release intermediate
+  carve, the M4.5 catch-up was **collapsed into one v0.8.0 = M4.5
+  completion release** at user direction (don't fragment a coherent
+  milestone into a dust of patch-tagged releases).
+- **v0.8.x ladder rule.** Anything deferred *out of v0.8.0 during
+  implementation* lands at a pinned v0.8.x slot in `roadmap.md`
+  with a one-line scope note — no floating "post-v1.0 unless asked"
+  deferrals. Pins don't force releases — slots that don't warrant
+  a tag collapse to a CHANGELOG note. First concrete consequence:
+  bre/vim backref re-decision pinned at v0.8.1 (decision-gated;
+  releases only if "yes").
+
+### Engines
+
+No engine code changed in this Unreleased batch — toolchain bump +
+docs reshape only. v0.8.0 ships the M4.5 completion bundle next:
+pcre lookbehind, pcre recursion, fuzzy exact-start, `\p{L}` for
+re2/pcre/vim, `(?i)` Unicode case-fold upgrade, fuzzy NFD, and
+vim → posix_classes refactor.
+
 ## [0.7.0] — 2026-05-03
 
 M4.5 first-of-three catch-up release: the no-Unicode-dep slice. Per

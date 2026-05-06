@@ -26,3 +26,4 @@ Decisions about niyama — what we chose, the context, and the consequences we a
 - [0005 — niyama_fuzzy engine ABI shape and scope](0005-fuzzy-engine-abi-and-scope.md)
 - [0006 — niyama_vim engine ABI shape and scope](0006-vim-engine-abi-and-scope.md)
 - [0007 — v0.7.0 catch-up: no-Unicode-dep slice of M4.5](0007-v070-catchup-no-unicode-dep.md)
+- [0008 — Unicode-stdlib pivot + M4.5b/c reshape](0008-unicode-stdlib-pivot-and-reshape.md)

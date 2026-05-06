@@ -1,0 +1,155 @@
+# unicode_props.cyr — shared `\p{NAME}` / `\P{NAME}` parser helper.
+#
+# Provides syntax recognition + GeneralCategory bitmask computation for
+# Unicode property classes. Used by niyama_re2, niyama_pcre, and
+# niyama_vim starting at v0.8.0 (per ADR 0008).
+#
+# Scope: short Unicode property names only — single-letter aggregates
+# (L, M, N, P, S, Z, C) and 2-letter leaves (Lu, Ll, Lt, Lm, Lo, Mn,
+# Mc, Me, Nd, Nl, No, Pc, Pd, Ps, Pe, Pi, Pf, Po, Sm, Sc, Sk, So, Zs,
+# Zl, Zp, Cc, Cf, Cs, Co, Cn). Long names (`\p{Letter}`,
+# `\p{Uppercase_Letter}`), Script properties (`\p{Greek}`), Block
+# properties — all out of scope. If the user wants any of these,
+# pinned at v0.8.x per the ladder rule.
+#
+# Design: parser returns a 30-bit positive bitmask over the 30
+# GeneralCategory leaves (Lu=bit 0 ... Cn=bit 29). Negation (`\P` vs
+# `\p`) is handled by the caller — the parser doesn't know which form
+# it was invoked from. Callers store the bitmask + a negate flag in
+# their engine-specific opcode encoding.
+#
+# Matching at runtime: caller decodes a UTF-8 codepoint at the input
+# position, calls `unicode_category(cp)` (from lib/unicode/categories.cyr)
+# to get the leaf index 0..29, then tests `(mask >> leaf) & 1`. If the
+# opcode was the negated form, invert the result.
+#
+# All globals and functions are `_uprops_*`-prefixed. Consumers of
+# this module must ALSO include `lib/unicode/categories.cyr` for
+# `unicode_category(cp)` (called from `_uprops_test`). The lib include
+# is left to the consumer rather than nested here so consumer .tcyr
+# files retain the explicit dep declaration.
+
+# Caller reads this after a successful _uprops_parse_class call to
+# know where to advance the parser cursor (just past the closing `}`).
+var _uprops_match_end_pos = 0;
+
+# Aggregate masks — pre-computed for the seven Unicode top-level
+# categories. Defined as `var` rather than `const` to match the
+# existing engine style; treat as read-only.
+var _UPROPS_MASK_L = 0x0000001F;     # Lu Ll Lt Lm Lo (cats 0..4)
+var _UPROPS_MASK_M = 0x000000E0;     # Mn Mc Me       (cats 5..7)
+var _UPROPS_MASK_N = 0x00000700;     # Nd Nl No       (cats 8..10)
+var _UPROPS_MASK_P = 0x0003F800;     # Pc Pd Ps Pe Pi Pf Po (cats 11..17)
+var _UPROPS_MASK_S = 0x003C0000;     # Sm Sc Sk So    (cats 18..21)
+var _UPROPS_MASK_Z = 0x01C00000;     # Zs Zl Zp       (cats 22..24)
+var _UPROPS_MASK_C = 0x3E000000;     # Cc Cf Cs Co Cn (cats 25..29)
+
+# Look up the GC bitmask for a 1- or 2-character property name.
+# Returns 0 if name is unrecognized.
+fn _uprops_lookup_name(pat, name_start, name_len) {
+    if (name_len == 1) {
+        var c = load8(pat + name_start);
+        if (c == 76) { return _UPROPS_MASK_L; }   # L
+        if (c == 77) { return _UPROPS_MASK_M; }   # M
+        if (c == 78) { return _UPROPS_MASK_N; }   # N
+        if (c == 80) { return _UPROPS_MASK_P; }   # P
+        if (c == 83) { return _UPROPS_MASK_S; }   # S
+        if (c == 90) { return _UPROPS_MASK_Z; }   # Z
+        if (c == 67) { return _UPROPS_MASK_C; }   # C
+        return 0;
+    }
+    if (name_len == 2) {
+        var c0 = load8(pat + name_start);
+        var c1 = load8(pat + name_start + 1);
+        if (c0 == 76) {                           # L_
+            if (c1 == 117) { return 1 << 0; }     # u
+            if (c1 == 108) { return 1 << 1; }     # l
+            if (c1 == 116) { return 1 << 2; }     # t
+            if (c1 == 109) { return 1 << 3; }     # m
+            if (c1 == 111) { return 1 << 4; }     # o
+            return 0;
+        }
+        if (c0 == 77) {                           # M_
+            if (c1 == 110) { return 1 << 5; }     # n
+            if (c1 == 99)  { return 1 << 6; }     # c
+            if (c1 == 101) { return 1 << 7; }     # e
+            return 0;
+        }
+        if (c0 == 78) {                           # N_
+            if (c1 == 100) { return 1 << 8; }     # d
+            if (c1 == 108) { return 1 << 9; }     # l
+            if (c1 == 111) { return 1 << 10; }    # o
+            return 0;
+        }
+        if (c0 == 80) {                           # P_
+            if (c1 == 99)  { return 1 << 11; }    # c
+            if (c1 == 100) { return 1 << 12; }    # d
+            if (c1 == 115) { return 1 << 13; }    # s
+            if (c1 == 101) { return 1 << 14; }    # e
+            if (c1 == 105) { return 1 << 15; }    # i
+            if (c1 == 102) { return 1 << 16; }    # f
+            if (c1 == 111) { return 1 << 17; }    # o
+            return 0;
+        }
+        if (c0 == 83) {                           # S_
+            if (c1 == 109) { return 1 << 18; }    # m
+            if (c1 == 99)  { return 1 << 19; }    # c
+            if (c1 == 107) { return 1 << 20; }    # k
+            if (c1 == 111) { return 1 << 21; }    # o
+            return 0;
+        }
+        if (c0 == 90) {                           # Z_
+            if (c1 == 115) { return 1 << 22; }    # s
+            if (c1 == 108) { return 1 << 23; }    # l
+            if (c1 == 112) { return 1 << 24; }    # p
+            return 0;
+        }
+        if (c0 == 67) {                           # C_
+            if (c1 == 99)  { return 1 << 25; }    # c
+            if (c1 == 102) { return 1 << 26; }    # f
+            if (c1 == 115) { return 1 << 27; }    # s
+            if (c1 == 111) { return 1 << 28; }    # o
+            if (c1 == 110) { return 1 << 29; }    # n
+            return 0;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+# Parse `{NAME}` starting at `pos` (caller has already consumed the
+# leading `\p` or `\P`). Returns a 30-bit GC bitmask on success, 0 on
+# any failure (missing `{`, unknown name, missing `}`). On success
+# sets `_uprops_match_end_pos` to the position immediately after `}`.
+fn _uprops_parse_class(pat, pos, pat_len) {
+    if (pos >= pat_len)             { return 0; }
+    if (load8(pat + pos) != 123)    { return 0; }   # require '{'
+    var name_start = pos + 1;
+    var p = name_start;
+    var close_pos = 0 - 1;
+    while (p < pat_len) {
+        if (load8(pat + p) == 125) {                 # '}'
+            close_pos = p;
+            p = pat_len;                              # break
+        } else {
+            p = p + 1;
+        }
+    }
+    if (close_pos < 0) { return 0; }
+    var name_len = close_pos - name_start;
+    if (name_len < 1) { return 0; }
+    if (name_len > 2) { return 0; }
+    var mask = _uprops_lookup_name(pat, name_start, name_len);
+    if (mask == 0) { return 0; }
+    _uprops_match_end_pos = close_pos + 1;
+    return mask;
+}
+
+# Test whether `cp` is a member of the property class encoded by
+# `mask`. Decodes via stdlib unicode_category(); returns 1 / 0.
+# Negation (`\P{...}`) is the caller's responsibility — invert as
+# needed when the matcher decoded the negated opcode form.
+fn _uprops_test(cp, mask) {
+    var cat = unicode_category(cp);
+    return (mask >> cat) & 1;
+}

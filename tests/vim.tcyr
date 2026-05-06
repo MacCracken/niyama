@@ -7,6 +7,9 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "lib/unicode/categories.cyr"
+include "src/posix_classes.cyr"
+include "src/unicode_props.cyr"
 include "src/vim.cyr"
 
 fn t_match(pat, s) {
@@ -197,6 +200,29 @@ fn main() {
     assert_neq(nfa_d, 0, "(a|a)* compiles");
     assert_eq(niyama_vim_match(nfa_d, "aaaaaaaaaaaaaaaaaaaa"), 0, "no-b terminates");
     assert_eq(niyama_vim_match(nfa_d, "aaaaaaaaaaaaaaaaaaab"), 1, "with-b matches");
+
+    # === Multi-byte literal pattern chars (v0.8.0) ===================
+    test_group("vim-multibyte-literals");
+    assert_eq(t_match("α",  "α"),       1, "literal α matches α");
+    assert_eq(t_match("α",  "αhello"),  1, "literal α prefix-matches αhello");
+    assert_eq(t_match("café", "café"),  1, "literal café matches itself");
+
+    # === Unicode property classes (v0.8.0) ===========================
+    test_group("vim-unicode-props");
+
+    assert_eq(t_match("\\p{L}\\+",  "Hello"),  1, "\\p{L}+ ASCII letters (vim \\+)");
+    assert_eq(t_match("\\p{L}\\+",  "12345"),  0, "\\p{L}+ rejects digits");
+    assert_eq(t_match("\\p{L}",    "α"),       1, "\\p{L} Greek α");
+    assert_eq(t_match("\\p{L}",    "д"),       1, "\\p{L} Cyrillic д");
+    assert_eq(t_match("\\p{L}\\+", "café"),    1, "\\p{L}+ café (multi-byte)");
+    assert_eq(t_match("\\p{Lu}",   "A"),       1, "\\p{Lu} ASCII upper");
+    assert_eq(t_match("\\p{Lu}",   "a"),       0, "\\p{Lu} rejects lower");
+    assert_eq(t_match("\\p{Ll}",   "α"),       1, "\\p{Ll} Greek lower");
+    assert_eq(t_match("\\p{N}",    "5"),       1, "\\p{N} digit");
+    assert_eq(t_match("\\P{L}",    "5"),       1, "\\P{L} negation");
+    assert_eq(t_match("\\P{L}",    "a"),       0, "\\P{L} rejects letter");
+    assert_eq(t_err("\\p{Foo}"),   VIM_E_BAD_PROPERTY, "\\p{Foo} → BAD_PROPERTY");
+    assert_eq(t_err("\\p{}"),      VIM_E_BAD_PROPERTY, "empty → BAD_PROPERTY");
 
     return assert_summary();
 }

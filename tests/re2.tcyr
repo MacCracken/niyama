@@ -8,6 +8,9 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "lib/unicode/categories.cyr"
+include "lib/unicode/casefold.cyr"
+include "src/unicode_props.cyr"
 include "src/re2.cyr"
 
 fn t_match(pat, input) {
@@ -173,6 +176,16 @@ fn main() {
     assert_eq(t_match("(?im)HELLO", "hello"), 1, "(?im) compiles + folds");
     # Bad flag char.
     assert_eq(t_err("(?x)foo"), RE2_E_SYNTAX, "unknown flag rejected");
+    # v0.8.0 — (?i) Unicode case-fold (1:1 mappings via stdlib unicode_fold).
+    # Greek capital alpha ↔ small alpha.
+    assert_eq(t_match("(?i)α", "Α"),       1, "(?i) Greek α matches Α");
+    assert_eq(t_match("(?i)Α", "α"),       1, "(?i) Greek Α matches α");
+    # Cyrillic capital de ↔ small de.
+    assert_eq(t_match("(?i)Д", "д"),       1, "(?i) Cyrillic Д matches д");
+    # Accented Latin: É ↔ é.
+    assert_eq(t_match("(?i)é", "É"),       1, "(?i) accented é matches É");
+    # Mixed pattern, mixed input.
+    assert_eq(t_match("(?i)cAfÉ", "Café"), 1, "(?i) mixed café case-folds");
 
     # === Strict-anchor / strict-dot defaults (v0.7.0) ================
     # Sanity-check the behavior change: pre-v0.7.0 semantics were
@@ -220,6 +233,81 @@ fn main() {
     assert_neq(nfa_d4, 0, "alt-repeat compiles");
     assert_eq(niyama_re2_match(nfa_d4, "abcdefgabcdefgabcdefgabcdefgz"), 1, "alt-repeat matches");
     assert_eq(niyama_re2_match(nfa_d4, "abcdefgabcdefgabcdefgabcdefgX"), 0, "alt-repeat no-match terminates");
+
+    # === Multi-byte literal pattern chars (v0.8.0 codepoint-step regression check) ===
+    test_group("re2-multibyte-literals");
+    assert_eq(t_match("α",  "α"),       1, "literal α matches α");
+    assert_eq(t_match("α",  "αhello"),  1, "literal α prefix-matches αhello");
+    assert_eq(t_match("αβ", "αβ"),      1, "literal αβ matches αβ");
+    assert_eq(t_match("café", "café"),  1, "literal café matches itself");
+
+    # === Unicode property classes (v0.8.0) ===========================
+    test_group("re2-unicode-props");
+
+    # ASCII letters via aggregate \p{L}.
+    assert_eq(t_match("\\p{L}+", "Hello"),       1, "\\p{L}+ ASCII letters");
+    assert_eq(t_match("\\p{L}+", "12345"),       0, "\\p{L}+ rejects digits");
+    assert_eq(t_match("\\p{L}",  "a"),           1, "\\p{L} matches ASCII lowercase");
+    assert_eq(t_match("\\p{L}",  "Z"),           1, "\\p{L} matches ASCII uppercase");
+    assert_eq(t_match("\\p{L}",  "5"),           0, "\\p{L} rejects digit");
+    assert_eq(t_match("\\p{L}",  " "),           0, "\\p{L} rejects space");
+
+    # Multi-byte letters — Greek, Cyrillic, German, Spanish.
+    # α = U+03B1 (Greek small letter alpha) → Ll = cat 1
+    assert_eq(t_match("\\p{L}",   "α"),          1, "\\p{L} matches Greek α");
+    # д = U+0434 (Cyrillic small letter de) → Ll
+    assert_eq(t_match("\\p{L}",   "д"),          1, "\\p{L} matches Cyrillic д");
+    # ñ = U+00F1 → Ll
+    assert_eq(t_match("\\p{L}+",  "café"),       1, "\\p{L}+ matches café (multi-byte)");
+    assert_eq(t_match("\\p{L}+",  "Ωmega"),      1, "\\p{L}+ matches Ωmega");
+
+    # Leaf categories — uppercase vs lowercase.
+    assert_eq(t_match("\\p{Lu}",  "A"),          1, "\\p{Lu} ASCII upper");
+    assert_eq(t_match("\\p{Lu}",  "a"),          0, "\\p{Lu} rejects lower");
+    assert_eq(t_match("\\p{Ll}",  "a"),          1, "\\p{Ll} ASCII lower");
+    assert_eq(t_match("\\p{Ll}",  "A"),          0, "\\p{Ll} rejects upper");
+    assert_eq(t_match("\\p{Lu}",  "Α"),          1, "\\p{Lu} Greek capital alpha");
+    assert_eq(t_match("\\p{Ll}",  "α"),          1, "\\p{Ll} Greek small alpha");
+
+    # Number categories.
+    assert_eq(t_match("\\p{N}",   "5"),          1, "\\p{N} ASCII digit");
+    assert_eq(t_match("\\p{Nd}",  "7"),          1, "\\p{Nd} decimal digit");
+    assert_eq(t_match("\\p{N}",   "a"),          0, "\\p{N} rejects letter");
+
+    # Punctuation, Separator.
+    # ! is Po (cat 17) → in P aggregate.
+    assert_eq(t_match("\\p{P}",   "!"),          1, "\\p{P} matches !");
+    assert_eq(t_match("\\p{Po}",  "."),          1, "\\p{Po} matches .");
+    # ASCII space is Zs (cat 22).
+    assert_eq(t_match("\\p{Z}",   " "),          1, "\\p{Z} matches space");
+    assert_eq(t_match("\\p{Zs}",  " "),          1, "\\p{Zs} matches space");
+
+    # Negation \P{...}.
+    assert_eq(t_match("\\P{L}",   "5"),          1, "\\P{L} matches digit");
+    assert_eq(t_match("\\P{L}",   "a"),          0, "\\P{L} rejects letter");
+    assert_eq(t_match("\\P{N}+",  "abc"),        1, "\\P{N}+ rejects-digits class");
+    # match is unanchored, so \P{N}+ on "ab1c" matches the leading "ab".
+    var pn_c = niyama_re2_compile("\\P{N}+");
+    assert_neq(niyama_re2_search(pn_c, "ab1c"),  0 - 1, "\\P{N}+ on ab1c finds ab");
+    assert_eq(niyama_re2_group_end(pn_c, 0),     2,     "\\P{N}+ stops at digit boundary");
+
+    # Quantifier interaction.
+    var pre_c = niyama_re2_compile("\\p{L}+");
+    assert_neq(pre_c, 0, "\\p{L}+ compiles");
+    assert_eq(niyama_re2_search(pre_c, "  Hello  "), 2, "\\p{L}+ search finds Hello");
+    assert_eq(niyama_re2_group_end(pre_c, 0), 7, "\\p{L}+ matches up to space");
+
+    # Mixed with other regex.
+    assert_eq(t_match("\\p{Lu}\\p{Ll}+", "Hello"), 1, "Lu Ll+ Hello");
+    assert_eq(t_match("\\p{Lu}\\p{Ll}+", "hello"), 0, "Lu Ll+ rejects all-lower");
+
+    # Bad property names → BAD_PROPERTY (= 8).
+    assert_eq(t_err("\\p{Foo}"),    8, "\\p{Foo} → BAD_PROPERTY");
+    assert_eq(t_err("\\p{Greek}"),  8, "\\p{Greek} (long name) → BAD_PROPERTY");
+    assert_eq(t_err("\\p{}"),       8, "\\p{} empty → BAD_PROPERTY");
+    assert_eq(t_err("\\p{L"),       8, "\\p{L unclosed → BAD_PROPERTY");
+    # \p without { is treated as escaped p — not currently rejected
+    # at compile, just a byte-literal. (Same as e.g. `\j`.) Skip.
 
     return assert_summary();
 }
