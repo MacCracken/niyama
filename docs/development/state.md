@@ -5,29 +5,14 @@
 
 ## Version
 
-**0.7.0** — first M4.5 catch-up release shipped 2026-05-03. Eight
-features land across bre / re2 / pcre under one shared
-`src/posix_classes.cyr` module per ADR 0007 (the no-Unicode-dep
-slice). All five engines still shipped.
-
-**Unreleased (post-v0.7.0)** — toolchain bumped to Cyrius 5.8.65,
-which ships `lib/unicode/` (categories, casefold, normalize, UTF-8
-codec). ADR 0008 reshapes M4.5 around the new stdlib + a user
-direction to not fragment a coherent milestone: **v0.8.0 = M4.5
-completion release**. Custom `src/unicode.cyr` deleted from the
-plan. No engine code touched yet.
-
-Next:
-
-1. **v0.8.0 — M4.5 completion** — pcre lookbehind, pcre recursion,
-   fuzzy exact-start, `\p{L}` for re2/pcre/vim, `(?i)` Unicode
-   case-fold upgrade for re2/pcre, fuzzy NFD, vim →
-   `src/posix_classes.cyr` refactor.
-2. **v0.8.1 — bre/vim backref (decision-gated)** — pinned slot;
-   only releases if the user says "yes" on backref. Otherwise
-   collapses to a `[Unreleased]` CHANGELOG note.
-3. **M5** — hardening + closeout + surface freeze.
-4. **v1.0** — fold-ready release.
+**0.8.0** — M4.5 completion release shipped 2026-05-05. Per ADR 0008
+(Unicode-stdlib pivot + sub-release collapse), every remaining M4.5
+deferral lands in one bundle: `\p{L}` for re2/pcre/vim, multi-byte
+literal pattern char support, `(?i)` Unicode case-fold upgrade,
+fuzzy NFD via stdlib `str_normalize`, fuzzy exact-start recovery,
+vim → posix_classes refactor, pcre lookbehind (fixed-width), pcre
+recursion `(?R)` / `(?P>NAME)`. All five engines still shipped.
+Decision-gated v0.8.1 slot pinned for bre/vim backref.
 
 **v0.8.x ladder rule.** Any feature deferred *out of v0.8.0 during
 implementation* gets a pinned v0.8.x slot in `roadmap.md`, not a
@@ -49,28 +34,36 @@ release-tag dust.
 - `src/main.cyr` — smoke entry (prints identity banner).
 - `src/test.cyr` — top-level test entry per `[build].test`.
 - **`src/posix_classes.cyr`** — shared POSIX bracket-class fillers
-  + name recognizer (v0.7.0). ~200 lines.
+  + name recognizer (v0.7.0). vim folded onto this module at v0.8.0.
+- **`src/unicode_props.cyr`** — shared `\p{NAME}` / `\P{NAME}`
+  parser + GeneralCategory bitmask lookup (v0.8.0). Used by
+  re2/pcre/vim. Backed by stdlib `lib/unicode/categories.cyr`.
+  ~140 lines.
 - **`src/bre.cyr`** — POSIX BRE engine (M1, +`\<\>` and POSIX
-  classes from v0.7.0). ~930 lines, Pike NFA.
+  classes from v0.7.0). Pike NFA.
 - **`src/re2.cyr`** — RE2-flavor linear-time engine (M2, +named
-  captures and inline flags from v0.7.0). ~1330 lines, Pike NFA.
+  captures + inline flags from v0.7.0; +`\p{L}` + multi-byte
+  literals + `(?i)` Unicode upgrade from v0.8.0). Pike NFA,
+  codepoint-stepped matcher loop.
 - **`src/pcre.cyr`** — PCRE-light backtracking engine (M3,
   +POSIX classes / inline flags / `\K` / branch-reset / conditional
-  / callouts from v0.7.0). ~1660 lines.
-- **`src/fuzzy.cyr`** — Levenshtein edit-distance engine (M3.5).
-  ~320 lines.
-- **`src/vim.cyr`** — vim/cyim flavor engine (M4). ~1480 lines,
-  Pike NFA.
+  / callouts from v0.7.0; +`\p{L}` / `(?i)` Unicode / fixed-width
+  lookbehind / recursion from v0.8.0).
+- **`src/fuzzy.cyr`** — Levenshtein edit-distance engine (M3.5,
+  +Unicode NFD + exact-start recovery from v0.8.0).
+- **`src/vim.cyr`** — vim/cyim flavor engine (M4, +`\p{L}` +
+  multi-byte literals + posix_classes refactor from v0.8.0). Pike
+  NFA, codepoint-stepped matcher loop.
 
 ## Engines shipped
 
 | Engine | Status | ABI prefix | Algorithm | Notes |
 |---|---|---|---|---|
-| **bre** | ✅ v0.7.0 (M1 + catch-up) | `niyama_bre_*` | Pike NFA | POSIX BRE minus backrefs (per ADR 0002). v0.7.0 adds GNU `\<\>` boundaries + POSIX bracket classes (ADR 0007). |
-| **re2** | ✅ v0.7.0 (M2 + catch-up) | `niyama_re2_*` | Pike NFA | ERE + linear-time guarantee at API (per ADR 0003). v0.7.0 adds named captures + inline flags + spec-strict `^/$/.` defaults (ADR 0007). |
-| **pcre** | ✅ v0.7.0 (M3 + catch-up) | `niyama_pcre_*` | Backtracking | Perl-compat (per ADR 0004). Step-limit + depth bound. v0.7.0 adds POSIX classes / inline flags / `\K` / branch-reset / conditional / callouts + spec-strict `^/$/.` defaults (ADR 0007). |
-| **fuzzy** | ✅ v0.5.0 (M3.5) | `niyama_fuzzy_*` | Levenshtein DP | Edit-distance, three match modes (per ADR 0005). |
-| **vim** | ✅ v0.6.0 (M4) | `niyama_vim_*` | Pike NFA | vim/cyim flavor, 4 magicness modes (per ADR 0006). |
+| **bre** | ✅ v0.7.0 (M1 + v0.7.0 catch-up) | `niyama_bre_*` | Pike NFA | POSIX BRE minus backrefs (per ADR 0002). v0.7.0 adds GNU `\<\>` boundaries + POSIX bracket classes (ADR 0007). |
+| **re2** | ✅ v0.8.0 (M2 + M4.5 complete) | `niyama_re2_*` | Pike NFA, codepoint-stepped | ERE + linear-time guarantee at API (per ADR 0003). v0.7.0: named captures, inline flags, strict `^/$/.` defaults. v0.8.0: `\p{L}` Unicode props, multi-byte literal patterns, `(?i)` Unicode case-fold (ADR 0008). |
+| **pcre** | ✅ v0.8.0 (M3 + M4.5 complete) | `niyama_pcre_*` | Backtracking | Perl-compat (per ADR 0004). Step-limit + depth bound. v0.7.0: POSIX classes, inline flags, `\K`, branch-reset, conditional, callouts. v0.8.0: `\p{L}`, `(?i)` Unicode, fixed-width lookbehind, recursion `(?R)` / `(?P>NAME)` (ADR 0008). |
+| **fuzzy** | ✅ v0.8.0 (M3.5 + M4.5 complete) | `niyama_fuzzy_*` | Levenshtein DP | Edit-distance, three match modes (per ADR 0005). v0.8.0: `FUZZY_FLAG_UNICODE_NFD`, exact start-position recovery via reverse-DP. |
+| **vim** | ✅ v0.8.0 (M4 + M4.5 complete) | `niyama_vim_*` | Pike NFA, codepoint-stepped | vim/cyim flavor, 4 magicness modes (per ADR 0006). v0.8.0: `\p{L}` Unicode props, multi-byte literal patterns, POSIX-class code folded onto `src/posix_classes.cyr`. |
 
 ## Engine-selection guidance for consumers
 
@@ -88,27 +81,30 @@ release-tag dust.
 
 ## Fold-ready artifact
 
-- `dist/niyama.cyr` — single-include bundle. v0.7.0 prepends
-  `src/posix_classes.cyr` ahead of the five engine modules. M5
-  surface freeze ADR will lock its public symbol set.
+- `dist/niyama.cyr` — single-include bundle. v0.8.0 prepends both
+  shared modules (`src/posix_classes.cyr` then `src/unicode_props.cyr`)
+  ahead of the five engine modules. Consumers also need stdlib
+  `lib/str.cyr` and `lib/unicode/{categories,casefold,normalize}.cyr`.
+  M5 surface freeze ADR will lock its public symbol set.
 
 ## Tests
 
 - `tests/niyama.tcyr` — scaffold smoke (2 assertions).
-- **`tests/bre.tcyr`** — 107 BRE assertions (was 68 pre-v0.7.0;
-  +9 word-boundary, +28 POSIX-class + 2 supporting).
-- **`tests/re2.tcyr`** — 101 RE2 assertions (was 76; +12 named,
-  +12 inline-flag, +3 strict-default + supporting).
-- **`tests/pcre.tcyr`** — 140 PCRE assertions (was 83; +8
-  POSIX-class, +12 inline-flag, +3 strict-default, +4 `\K`,
-  +8 branch-reset, +10 conditional, +8 callout + supporting).
-- **`tests/fuzzy.tcyr`** — 45 fuzzy assertions.
-- **`tests/vim.tcyr`** — 88 vim assertions across 13 groups.
+- **`tests/bre.tcyr`** — 107 BRE assertions.
+- **`tests/re2.tcyr`** — 147 RE2 assertions (was 101; +37 unicode-prop,
+  +5 `(?i)` Unicode, +4 multi-byte literals).
+- **`tests/pcre.tcyr`** — 185 PCRE assertions (was 140; +21 unicode-prop,
+  +5 `(?i)` Unicode, +12 lookbehind, +12 recursion; -2 deferred-rejection
+  tests removed since features now land).
+- **`tests/fuzzy.tcyr`** — 53 fuzzy assertions (was 45; +4 NFD,
+  +4 exact-start).
+- **`tests/vim.tcyr`** — 104 vim assertions (was 88; +13 unicode-prop,
+  +3 multi-byte).
 - **`tests/{bre,re2,pcre,fuzzy,vim}.bcyr`** — per-engine bench harnesses.
 - **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
 
-Aggregate: `cyrius test` reports 6 files, 483 assertions all passing.
-`cyrius fuzz` reports 5 files, 1658 assertions all passing.
+Aggregate: `cyrius test` reports **6 files, 598 assertions** all passing.
+`cyrius fuzz` reports **5 files, 1660 assertions** all passing.
 
 ## Dependencies
 

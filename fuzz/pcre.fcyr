@@ -14,7 +14,10 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "lib/unicode/categories.cyr"
+include "lib/unicode/casefold.cyr"
 include "src/posix_classes.cyr"
+include "src/unicode_props.cyr"
 include "src/pcre.cyr"
 
 var _rng_state = 0xDEADBEEF;
@@ -116,20 +119,25 @@ fn main() {
 
     # === Rejection invariants =========================================
 
-    # Lookbehind MUST yield LOOKBEHIND_UNSUPPORTED.
-    var l1 = niyama_pcre_compile("(?<=foo)bar");
-    assert_eq(l1, 0, "lookbehind rejects");
-    assert_eq(niyama_pcre_last_error(), PCRE_E_LOOKBEHIND_UNSUPPORTED, "lookbehind error");
+    # v0.8.0 — lookbehind landed; variable-width body still rejected.
+    var l1 = niyama_pcre_compile("(?<=fo+)bar");
+    assert_eq(l1, 0, "lookbehind varwidth rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_LOOKBEHIND_VARWIDTH, "lookbehind varwidth error");
 
-    # Unicode property MUST yield UNICODE_PROP_UNSUPPORTED.
-    var u1 = niyama_pcre_compile("\\p{L}");
-    assert_eq(u1, 0, "unicode-prop rejects");
-    assert_eq(niyama_pcre_last_error(), PCRE_E_UNICODE_PROP_UNSUPPORTED, "unicode error");
+    # v0.8.0 — \p{L} top-level landed; inside `[...]` still deferred.
+    var u1 = niyama_pcre_compile("[\\p{L}]");
+    assert_eq(u1, 0, "unicode-prop in char class rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_UNICODE_PROP_UNSUPPORTED, "unicode in [] error");
 
-    # Recursion.
-    var r1 = niyama_pcre_compile("(?R)");
-    assert_eq(r1, 0, "recursion rejects");
-    assert_eq(niyama_pcre_last_error(), PCRE_E_RECURSION_UNSUPPORTED, "recursion error");
+    # v0.8.0 — bad property name rejected.
+    var u2 = niyama_pcre_compile("\\p{Bogus}");
+    assert_eq(u2, 0, "bogus property rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_BAD_PROPERTY, "bad-property error");
+
+    # v0.8.0 — recursion landed; unresolved name still rejected.
+    var r1 = niyama_pcre_compile("(?P>missing)");
+    assert_eq(r1, 0, "unresolved recursion ref rejects");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_BAD_RECURSION_REF, "bad-recursion-ref error");
 
     # v0.7.0 — bad conditional reference rejected.
     var bc1 = niyama_pcre_compile("(?(<absent>)yes)");

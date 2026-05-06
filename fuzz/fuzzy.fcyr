@@ -14,7 +14,9 @@
 
 include "lib/alloc.cyr"
 include "lib/string.cyr"
+include "lib/str.cyr"
 include "lib/assert.cyr"
+include "lib/unicode/normalize.cyr"
 include "src/fuzzy.cyr"
 
 var _rng_state = 0xFEEDFACE;

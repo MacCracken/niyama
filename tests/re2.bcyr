@@ -12,6 +12,9 @@ include "lib/fmt.cyr"
 include "lib/vec.cyr"
 include "lib/fnptr.cyr"
 include "lib/bench.cyr"
+include "lib/unicode/categories.cyr"
+include "lib/unicode/casefold.cyr"
+include "src/unicode_props.cyr"
 include "src/re2.cyr"
 
 var _nfa_literal = 0;

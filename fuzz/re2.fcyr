@@ -13,6 +13,9 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "lib/unicode/categories.cyr"
+include "lib/unicode/casefold.cyr"
+include "src/unicode_props.cyr"
 include "src/re2.cyr"
 
 var _rng_state = 0xCAFEBABE;

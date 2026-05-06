@@ -4,40 +4,146 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-05
+
+M4.5 completion release. Per ADR 0008's Unicode-stdlib pivot, every
+remaining M4.5 deferral ships in one bundle (collapsed from a
+four-sub-release plan at user direction — don't fragment a coherent
+milestone). Cyrius 5.8.65's `lib/unicode/` carries the UCD tables
+niyama would have built; `src/unicode_props.cyr` is the small new
+parser module that wires `\p{NAME}` syntax onto the stdlib lookups.
+
 ### Changed
 
 - **Toolchain pin** bumped from `5.8.42` → `5.8.65` in `cyrius.cyml`.
-  Pulls in stdlib `lib/unicode/` (categories at .49, casefold at
-  .50, normalize at .51, codec lift at .55, NFKC/NFKD at .60).
-  Required floor for v0.8.0 onward per ADR 0008.
+  Required floor: stdlib `lib/unicode/` arrived at .49/.50/.51, codec
+  lift at .55, NFKC/NFKD at .60. ADR 0008 records the dependency.
 - **`[deps].stdlib`** adds `unicode` — vendors
   `lib/unicode/{categories,casefold,normalize,_decode,_*data}.cyr`
-  (~7 files) into the project tree via `cyrius update`.
+  into `lib/` via `cyrius update`.
+- **niyama_re2 / niyama_vim**: matcher loop is now codepoint-stepped
+  (was byte-stepped). For ASCII inputs this is a no-op; for multi-byte
+  UTF-8, `.`/`\d`/`\w`/`\s`/`[abc]` advance by full codepoint length
+  rather than splitting a multi-byte sequence. niyama_pcre stays
+  byte-stepped; UPROP and UCHAR_CI handle their own multi-byte
+  decode internally.
+- **niyama_re2 / niyama_vim**: literal multi-byte chars in patterns
+  now compile to a single UCHAR opcode (one cp per opcode) instead
+  of byte-by-byte CHAR sequences. Fixes a regression that
+  codepoint-stepping would have introduced — pattern `α` no longer
+  splits across two CHAR(0xCE)/CHAR(0xB1) opcodes.
 
-### Planning
+### Added
 
-- **ADR 0008 — Unicode-stdlib pivot + M4.5 reshape.** Cyrius
-  5.8.65 stdlib provides exactly what the planned `src/unicode.cyr`
-  module was going to build (~25 KB UCD tables); custom module
-  deleted from the plan. After a brief four-release intermediate
-  carve, the M4.5 catch-up was **collapsed into one v0.8.0 = M4.5
-  completion release** at user direction (don't fragment a coherent
-  milestone into a dust of patch-tagged releases).
-- **v0.8.x ladder rule.** Anything deferred *out of v0.8.0 during
-  implementation* lands at a pinned v0.8.x slot in `roadmap.md`
-  with a one-line scope note — no floating "post-v1.0 unless asked"
-  deferrals. Pins don't force releases — slots that don't warrant
-  a tag collapse to a CHANGELOG note. First concrete consequence:
-  bre/vim backref re-decision pinned at v0.8.1 (decision-gated;
-  releases only if "yes").
+- **`src/unicode_props.cyr`** — shared `\p{NAME}` / `\P{NAME}` parser
+  helper. Recognizes 7 single-letter aggregate categories
+  (`L M N P S Z C`) and 30 two-letter leaf categories
+  (`Lu Ll Lt Lm Lo Mn Mc Me Nd Nl No Pc Pd Ps Pe Pi Pf Po Sm Sc Sk
+  So Zs Zl Zp Cc Cf Cs Co Cn`). Returns a 30-bit GeneralCategory
+  bitmask; matchers test via stdlib `unicode_category(cp)`. Long
+  property names (`\p{Letter}`, `\p{Greek}`, etc.) and Script /
+  Block properties are out of scope; pinned v0.8.x if a consumer
+  asks.
+- **niyama_re2** (clears 1 of 1 ADR 0003 deferral):
+  - Unicode property classes `\p{L}` / `\P{L}` etc. via two new
+    opcodes `RE2_OP_UPROP` (= 16), `RE2_OP_NUPROP` (= 17). Mask
+    packed into upper 32 bits of word0.
+  - Multi-byte literal pattern char support — `RE2_OP_UCHAR` (= 18)
+    stores a codepoint; emitted whenever the parser sees a non-ASCII
+    literal. Codepoint-stepped matcher advances by UTF-8 length.
+  - `(?i)` Unicode case-fold upgrade — under `(?i)`, multi-byte
+    literals emit `RE2_OP_UCHAR_CI` (= 19) which stores
+    `unicode_to_lower(cp)`; matcher folds input cp the same way and
+    compares. ASCII path unchanged (still uses `RE2_OP_CHAR_CI`).
+    1:1 case mappings only; full case folding (`ß`↔`SS` etc.) is
+    not in scope for v0.8.0.
+  - New error code `RE2_E_BAD_PROPERTY = 8` for unrecognized
+    `\p{NAME}`. Frozen-at-M2 codes 0..7 unchanged.
+- **niyama_pcre** (clears 2 of 3 ADR 0004 deferrals):
+  - Unicode property classes — `PCRE_OP_UPROP` (= 24),
+    `PCRE_OP_NUPROP` (= 25). Top-level `\p{L}` works; inside a
+    char class (`[\p{L}]`) still rejected — char classes are byte
+    bitmaps, folding cp-properties in is out of scope.
+  - `(?i)` Unicode case-fold upgrade — `PCRE_OP_UCHAR_CI` (= 26)
+    for multi-byte literals under `(?i)`, mirroring re2.
+  - Lookbehind `(?<=...)` `(?<!...)` — `PCRE_OP_LOOKBEHIND` (= 28),
+    `PCRE_OP_NLOOKBEHIND` (= 29). Fixed-width compile-time analysis
+    via new `_pcre_compute_width` helper. Variable-width bodies
+    (alternation with mismatched arm widths, quantifiers, `\p{L}`,
+    backref) reject with new error `PCRE_E_LOOKBEHIND_VARWIDTH`
+    (= 10). PCRE2 10.43 model.
+  - Recursion `(?R)` (whole pattern) and `(?P>NAME)` (named group)
+    — `PCRE_OP_RECURSE` (= 30) plus a `_pcre_recurse_stop_pc`
+    matcher global for stop-at-close-save semantics. Numeric
+    `(?N)` syntax not in v0.8.0; pin v0.8.x if a consumer asks.
+    Saves snapshot/restored across the recursive call so inner
+    captures don't leak (PCRE2-compatible).
+  - New error codes:
+    - `PCRE_E_BAD_PROPERTY = 9` (unrecognized `\p{NAME}`)
+    - `PCRE_E_LOOKBEHIND_VARWIDTH = 10` (variable-width body in
+      `(?<=...)` / `(?<!...)`)
+    - `PCRE_E_BAD_RECURSION_REF = 11` (`(?P>NAME)` referencing
+      undefined group)
+  - Frozen-but-narrowed slots: `PCRE_E_LOOKBEHIND_UNSUPPORTED` (= 2)
+    no longer emitted at top level; `PCRE_E_UNICODE_PROP_UNSUPPORTED`
+    (= 3) now narrows to "inside `[...]` only";
+    `PCRE_E_RECURSION_UNSUPPORTED` (= 4) reserved-but-unused. ABI
+    stability per ADR 0007's reserved-slot precedent.
+- **niyama_fuzzy**:
+  - `FUZZY_FLAG_UNICODE_NFD` (= 2) — pattern + input both pass
+    through stdlib `str_normalize(s, NFD)` before the Levenshtein
+    DP. `café` (NFC) and `café` (NFD) become equivalence-classed
+    at distance 0.
+  - Exact start-position recovery in `niyama_fuzzy_search` — new
+    `_fuzzy_recover_start` reverse-DP pass replaces the
+    `end_pos - plen` heuristic. Same O(plen × end_pos) complexity
+    as the forward pass.
+  - New error code `FUZZY_E_NFD_OVERFLOW = 3` for patterns whose
+    NFD form exceeds `FUZZY_MAX_PAT_LEN`.
+- **niyama_vim**:
+  - Unicode property classes `\p{L}` etc. — `VIM_OP_UPROP` (= 12),
+    `VIM_OP_NUPROP` (= 13). Codepoint-stepped matcher matches re2.
+  - Multi-byte literal pattern char support — `VIM_OP_UCHAR` (= 14).
+  - New error code `VIM_E_BAD_PROPERTY = 5`.
+- **vim → src/posix_classes.cyr refactor** — `_vim_match_posix_class`
+  and `_vim_class_apply_posix` now delegate to the shared module,
+  deleting ~85 lines of duplicate POSIX-class fillers + name
+  recognizer. Pre-v0.8.0 vim carried its own copy as deliberate
+  duplication (per ADR 0007's risk-bounded v0.7.0 carve); the fold
+  was the v0.9.0-was cleanup, pulled forward into v0.8.0 since
+  ADR 0008 collapsed the M4.5 sub-releases.
 
-### Engines
+### Deferred (pinned per v0.8.x ladder)
 
-No engine code changed in this Unreleased batch — toolchain bump +
-docs reshape only. v0.8.0 ships the M4.5 completion bundle next:
-pcre lookbehind, pcre recursion, fuzzy exact-start, `\p{L}` for
-re2/pcre/vim, `(?i)` Unicode case-fold upgrade, fuzzy NFD, and
-vim → posix_classes refactor.
+- **bre / vim backref `\1`-`\9`** — decision-gated v0.8.1 slot,
+  surfaced at v0.8.0 ship per the M1 / M4 "potentially post-v1.0;
+  document, don't skip" call. v0.8.1 only releases if the user
+  decides "yes"; otherwise collapses to a CHANGELOG note.
+
+### Tests / fuzz
+
+- `tests/bre.tcyr` — 107 (unchanged).
+- `tests/re2.tcyr` — **147** (was 101): +37 unicode-prop, +5 (?i)
+  Unicode, +4 multi-byte literals.
+- `tests/pcre.tcyr` — **185** (was 140): +21 unicode-prop, +5 (?i)
+  Unicode, +12 lookbehind, +12 recursion (with the 4 deferred-rejection
+  tests removed since features now land).
+- `tests/fuzzy.tcyr` — **53** (was 45): +4 NFD, +4 exact-start.
+- `tests/vim.tcyr` — **104** (was 88): +13 unicode-prop, +3 multi-byte.
+- Aggregate: **6 files, 598 assertions, all passing** (was 483, +115).
+- Fuzz: **1660 assertions** (was 1658, +2 from refined pcre rejection
+  invariants).
+
+### ABI summary (frozen-at-M3 numbers preserved per ADR rules)
+
+- New opcodes by engine: re2 +4 (UPROP, NUPROP, UCHAR, UCHAR_CI),
+  pcre +6 (UPROP, NUPROP, UCHAR_CI, LOOKBEHIND, NLOOKBEHIND, RECURSE),
+  vim +3 (UPROP, NUPROP, UCHAR).
+- New error codes: re2 +1 (BAD_PROPERTY = 8), pcre +3 (BAD_PROPERTY
+  = 9, LOOKBEHIND_VARWIDTH = 10, BAD_RECURSION_REF = 11), fuzzy +1
+  (NFD_OVERFLOW = 3), vim +1 (BAD_PROPERTY = 5).
+- Reserved (not emitted but slot kept): pcre slot 2
+  (LOOKBEHIND_UNSUPPORTED), pcre slot 4 (RECURSION_UNSUPPORTED).
 
 ## [0.7.0] — 2026-05-03
 

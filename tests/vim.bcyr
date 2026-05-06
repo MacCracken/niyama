@@ -11,6 +11,9 @@ include "lib/fmt.cyr"
 include "lib/vec.cyr"
 include "lib/fnptr.cyr"
 include "lib/bench.cyr"
+include "lib/unicode/categories.cyr"
+include "src/posix_classes.cyr"
+include "src/unicode_props.cyr"
 include "src/vim.cyr"
 
 var _h_magic = 0;

@@ -11,6 +11,8 @@ include "lib/fmt.cyr"
 include "lib/vec.cyr"
 include "lib/fnptr.cyr"
 include "lib/bench.cyr"
+include "lib/str.cyr"
+include "lib/unicode/normalize.cyr"
 include "src/fuzzy.cyr"
 
 var _h_short = 0;        # 6-byte pattern

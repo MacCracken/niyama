@@ -174,9 +174,9 @@ fn main() {
     # === Deferred-feature rejection (still deferred post-v0.7.0) =====
     test_group("pcre-deferrals");
 
-    # Lookbehind deferred to v0.8.0.
-    assert_eq(t_err("(?<=foo)bar"), PCRE_E_LOOKBEHIND_UNSUPPORTED, "(?<=) deferred");
-    assert_eq(t_err("(?<!foo)bar"), PCRE_E_LOOKBEHIND_UNSUPPORTED, "(?<!) deferred");
+    # Lookbehind landed v0.8.0 (ADR 0008) — see pcre-lookbehind below.
+    # PCRE_E_LOOKBEHIND_UNSUPPORTED (= 2) reserved-but-unused at top level;
+    # variable-width bodies now error with PCRE_E_LOOKBEHIND_VARWIDTH.
 
     # Unicode property classes top-level: landed v0.8.0 (ADR 0008).
     # Inside `[...]`: still deferred — char classes are byte bitmaps,
@@ -184,9 +184,9 @@ fn main() {
     # narrows to that case.
     assert_eq(t_err("[\\p{L}]"), PCRE_E_UNICODE_PROP_UNSUPPORTED, "[\\p{L}] still deferred");
 
-    # Recursion deferred to v0.8.0.
-    assert_eq(t_err("(?R)"), PCRE_E_RECURSION_UNSUPPORTED, "(?R) deferred");
-    assert_eq(t_err("(?P>name)"), PCRE_E_RECURSION_UNSUPPORTED, "(?P>name) deferred");
+    # Recursion landed v0.8.0 (ADR 0008) — see pcre-recursion below.
+    # PCRE_E_RECURSION_UNSUPPORTED (= 4) reserved-but-unused at top level;
+    # unresolved name refs now error with PCRE_E_BAD_RECURSION_REF.
 
     # === POSIX bracket classes (v0.7.0) ==============================
     test_group("pcre-posix-classes");
@@ -327,6 +327,53 @@ fn main() {
 
     # And a friendly pattern still matches under the high limit.
     assert_eq(niyama_pcre_match(nfa_dos, "ab"), 1, "friendly match works");
+
+    # === Lookbehind (v0.8.0, fixed-width) ============================
+    test_group("pcre-lookbehind");
+    # Positive lookbehind: match `bar` only when preceded by `foo`.
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<=foo)bar"), "foobar"), 3, "(?<=foo) before bar");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<=foo)bar"), "xxbar"), 0 - 1, "no foo → no match");
+    # Negative lookbehind.
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<!foo)bar"), "xxbar"), 2, "(?<!foo) absent → match");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<!foo)bar"), "foobar"), 0 - 1, "(?<!foo) present → no match");
+    # Word-boundary-ish use: word starting with capital after digit.
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<=\\d)X"), "1Xfoo"), 1, "(?<=\\d) digit then X");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<=\\d)X"), "aXfoo"), 0 - 1, "(?<=\\d) letter no");
+    # Boundary: at start-of-string, negative lookbehind succeeds.
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<!a)b"), "b"),    0, "no preceding a at SOS");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<!a)b"), "ab"),  0 - 1, "preceding a → no");
+    # Variable-width body rejected at compile.
+    assert_eq(t_err("(?<=foo|bar)baz"),     PCRE_E_LOOKBEHIND_VARWIDTH, "alternation in lookbehind → VARWIDTH");
+    assert_eq(t_err("(?<=fo+)bar"),         PCRE_E_LOOKBEHIND_VARWIDTH, "quantifier in lookbehind → VARWIDTH");
+    assert_eq(t_err("(?<=\\p{L})x"),        PCRE_E_LOOKBEHIND_VARWIDTH, "\\p{L} in lookbehind (variable utf8) → VARWIDTH");
+
+    # === Recursion (v0.8.0) ==========================================
+    test_group("pcre-recursion");
+    # (?R) — recurse into the whole pattern. niyama_pcre_match is
+    # search-from-0, so the test premise is "find SOME match" — fine
+    # for the positive cases.
+    var r_balanced = niyama_pcre_compile("a(?R)?b");
+    assert_neq(r_balanced, 0, "(?R) compiles");
+    assert_eq(niyama_pcre_match(r_balanced, "ab"),     1, "(?R) base case ab");
+    assert_eq(niyama_pcre_match(r_balanced, "aabb"),   1, "(?R) one level aabb");
+    assert_eq(niyama_pcre_match(r_balanced, "aaabbb"), 1, "(?R) two levels aaabbb");
+    # (?P>name) — recurse into named group. With anchors, "is this
+    # exactly a balanced a^n b^n pattern?" is a clean yes/no.
+    var r_named = niyama_pcre_compile("^(?<g>a(?P>g)?b)$");
+    assert_neq(r_named, 0, "(?P>g) compiles");
+    assert_eq(niyama_pcre_match(r_named, "ab"),     1, "named recursion base");
+    assert_eq(niyama_pcre_match(r_named, "aabb"),   1, "named recursion one level");
+    assert_eq(niyama_pcre_match(r_named, "aaabbb"), 1, "named recursion two levels");
+    assert_eq(niyama_pcre_match(r_named, "aabbb"),  0, "named unbalanced (extra b) rejected");
+    assert_eq(niyama_pcre_match(r_named, "aaabb"),  0, "named unbalanced (extra a) rejected");
+    assert_eq(niyama_pcre_match(r_named, "abc"),    0, "named non-matching trailing rejected");
+    # Unresolved name → error.
+    assert_eq(t_err("(?P>nope)"),  PCRE_E_BAD_RECURSION_REF, "unresolved (?P>name) → BAD_RECURSION_REF");
+    # Self-reference inside the same group works (forward ref within
+    # compile — (?P>g) appears before g closes).
+    var r_self = niyama_pcre_compile("^(?<g>x(?P>g)?y)$");
+    assert_neq(r_self, 0, "self-recursion compiles");
+    assert_eq(niyama_pcre_match(r_self, "xxxyyy"), 1, "self-recursion 3-deep");
 
     # === Unicode property classes (v0.8.0) ===========================
     test_group("pcre-unicode-props");

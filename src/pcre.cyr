@@ -96,6 +96,23 @@ var PCRE_OP_NUPROP     = 25;  # \P{NAME} — cp_category(cp) ∉ mask
 # opcode picks its own advance). 1:1 case mappings only; full case
 # folding (ß↔SS, etc.) deferred to v0.8.x ladder.
 var PCRE_OP_UCHAR_CI   = 26;
+# v0.8.0 — lookbehind (?<=...) (?<!...). Fixed-width compile-time
+# analysis (PCRE2 10.43 model). Variable-width lookbehind is rejected
+# at compile with PCRE_E_LOOKBEHIND_VARWIDTH (out of scope unless asked
+# — pinned at v0.8.x ladder if a consumer wants it). Width packed
+# into upper 32 bits of word0; end_pc reuses LOOKAHEAD_END (matcher
+# treats LOOKAHEAD_END identically: return pos at success). Body must
+# consume exactly `width` bytes ending at the current pos.
+var PCRE_OP_LOOKBEHIND  = 28;  # arg1 (32:48): width, arg1 (48:): end_pc
+var PCRE_OP_NLOOKBEHIND = 29;
+# v0.8.0 — recursion `(?R)` (whole pattern), `(?P>NAME)` (named group).
+# Stores target group_idx in low 16 bits of arg1. Matcher walks the
+# compiled program to find SAVE 2*idx (open) and SAVE 2*idx+1 (close),
+# runs sub-match from open+1, terminates at close+1. Saves are
+# snapshot/restored around the recursive call so inner captures don't
+# leak into the outer match. Numeric `(?N)` syntax NOT supported in
+# v0.8.0; (?R) and (?P>name) only.
+var PCRE_OP_RECURSE     = 30;  # arg1 (low 16): target group_idx (0..9)
 
 # === NFA layout ======================================================
 
@@ -139,6 +156,16 @@ var PCRE_E_BAD_CONDITION           = 8;
 # are byte-bitmaps, and folding a codepoint-property in is not in
 # scope for v0.8.0.
 var PCRE_E_BAD_PROPERTY            = 9;
+# v0.8.0 — lookbehind landed (ADR 0008), but body must be fixed-width.
+# Variable-width bodies (alternation with mismatched arm widths,
+# quantifiers, backref, codepoint-property classes) get this code.
+# PCRE_E_LOOKBEHIND_UNSUPPORTED (= 2) is reserved (frozen ABI) but
+# no longer emitted at top level — ABI-stability slot.
+var PCRE_E_LOOKBEHIND_VARWIDTH     = 10;
+# v0.8.0 — recursion landed (ADR 0008). Slot 4 PCRE_E_RECURSION_UNSUPPORTED
+# is reserved (frozen ABI) but no longer emitted. New error for an
+# (?P>name) ref that doesn't resolve to any defined group.
+var PCRE_E_BAD_RECURSION_REF       = 11;
 
 # === Compile-time globals ============================================
 
@@ -163,6 +190,18 @@ var _pcre_q_splits = 0;
 var _pcre_m_cp_slot = 0;
 var _pcre_step_limit = 1000000;
 var _pcre_step_count = 0;
+# v0.8.0 — recursion: when (?R) / (?P>NAME) makes a recursive call,
+# this global is set to the pc immediately AFTER the target group's
+# close SAVE. The matcher checks at the top of each iteration; if pc
+# == _pcre_recurse_stop_pc, it returns pos (recursion body completed).
+# Reset to -1 on entry to LOOKAHEAD/LOOKBEHIND/ATOMIC recursive calls
+# so those sub-matches don't get prematurely truncated. Saved/restored
+# around RECURSE itself so nested recursions stack properly.
+var _pcre_recurse_stop_pc = 0 - 1;
+# Scratch globals for _pcre_find_group_pcs return values (Cyrius lacks
+# tuple returns).
+var _pcre_grp_open_pc  = 0 - 1;
+var _pcre_grp_close_pc = 0 - 1;
 var _pcre_last_step_count = 0;
 
 # v0.7.0 — inline-flag compile-time state. (?i)/(?m)/(?s).
@@ -237,6 +276,52 @@ fn _pcre_emit_lookahead(neg) {
     return _pcre_emit_raw(op, 0);
 }
 
+fn _pcre_emit_lookbehind(neg) {
+    var op = PCRE_OP_LOOKBEHIND;
+    if (neg == 1) { op = PCRE_OP_NLOOKBEHIND; }
+    # arg1 (upper 32 of word0): end_pc, patched after body. arg2 (word1):
+    # fixed-width, patched after compile-time width analysis.
+    return _pcre_emit_raw(op, 0);
+}
+
+fn _pcre_emit_recurse(group_idx) {
+    return _pcre_emit_raw(PCRE_OP_RECURSE | (group_idx << 8), 0);
+}
+
+# v0.8.0 — fixed-width compile-time analysis for lookbehind body.
+# Walks compiled instructions in [body_start, body_end) and returns
+# the total bytes consumed if every path is fixed-width, else -1.
+# Conservative: rejects alternation (SPLIT/JMP), backrefs, codepoint-
+# property classes (UPROP/UCHAR_CI — variable UTF-8 length), and any
+# nested zero-width assertion (lookahead inside lookbehind body, etc.).
+# Same fixed-byte-width model as PCRE2 10.43; no codepoint-aware
+# width yet.
+fn _pcre_compute_width(body_start, body_end) {
+    var width = 0;
+    var pc = body_start;
+    while (pc < body_end) {
+        var w0 = load64(_pcre_instr_base + pc * 16);
+        var op = w0 & 0xFF;
+        if (op == PCRE_OP_CHAR)         { width = width + 1; }
+        elif (op == PCRE_OP_CHAR_CI)    { width = width + 1; }
+        elif (op == PCRE_OP_ANY)        { width = width + 1; }
+        elif (op == PCRE_OP_ANY_NONL)   { width = width + 1; }
+        elif (op == PCRE_OP_CLASS)      { width = width + 1; }
+        elif (op == PCRE_OP_NCLASS)     { width = width + 1; }
+        elif (op == PCRE_OP_SAVE)       { width = width + 0; }
+        elif (op == PCRE_OP_BOL)        { width = width + 0; }
+        elif (op == PCRE_OP_EOL)        { width = width + 0; }
+        elif (op == PCRE_OP_BOS)        { width = width + 0; }
+        elif (op == PCRE_OP_EOS)        { width = width + 0; }
+        elif (op == PCRE_OP_BOUNDARY)   { width = width + 0; }
+        elif (op == PCRE_OP_NBOUNDARY)  { width = width + 0; }
+        elif (op == PCRE_OP_CALLOUT)    { width = width + 0; }
+        else { return 0 - 1; }
+        pc = pc + 1;
+    }
+    return width;
+}
+
 fn _pcre_patch_arg1(idx, arg1) {
     var off = _pcre_instr_base + idx * 16;
     var w0 = load64(off);
@@ -272,6 +357,8 @@ fn _pcre_shift_targets_one(lo, hi) {
         if (op == PCRE_OP_LOOKAHEAD)  { is_branch = 1; }
         if (op == PCRE_OP_NLOOKAHEAD) { is_branch = 1; }
         if (op == PCRE_OP_ATOMIC)     { is_branch = 1; }
+        if (op == PCRE_OP_LOOKBEHIND)  { is_branch = 1; }
+        if (op == PCRE_OP_NLOOKBEHIND) { is_branch = 1; }
         if (is_branch == 1) {
             var arg1 = (w0 >> 32) & 0xFFFFFFFF;
             if (arg1 >= lo && arg1 <= hi) {
@@ -480,6 +567,35 @@ fn _pcre_add_name(group_idx, terminator) {
     return 0;
 }
 
+# v0.8.0 — compile-time lookup for (?P>NAME) recursion. Walks the
+# name table and returns the group_idx for `name_buf[0..name_len]`,
+# or -1 if not found.
+fn _pcre_lookup_name(name_buf, name_len) {
+    var i = 0;
+    while (i < _pcre_name_n) {
+        var slot = _pcre_name_base + i * PCRE_NAME_SLOT_SIZE;
+        var slot_len = 0;
+        while (slot_len < PCRE_NAME_MAX_LEN && load8(slot + slot_len) != 0) {
+            slot_len = slot_len + 1;
+        }
+        if (slot_len == name_len) {
+            var k = 0;
+            var same = 1;
+            while (k < name_len) {
+                if (load8(slot + k) != load8(name_buf + k)) {
+                    same = 0;
+                    k = name_len;
+                } else {
+                    k = k + 1;
+                }
+            }
+            if (same == 1) { return load64(slot + 32); }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 # === Pattern decoder =================================================
 
 fn _pcre_lit_byte() {
@@ -655,9 +771,15 @@ fn _pcre_parse_group_intro() {
         # (?<=...) (?<!...) lookbehind, OR (?<NAME>...) named capture.
         if (_pcre_pos + 1 >= _pcre_pat_len) { _pcre_err = PCRE_E_SYNTAX; return 0; }
         var n2 = load8(_pcre_pat + _pcre_pos + 1);
-        if (n2 == 61 || n2 == 33) {
-            _pcre_err = PCRE_E_LOOKBEHIND_UNSUPPORTED;
-            return 0;
+        if (n2 == 61) {
+            # v0.8.0 — (?<=...) positive lookbehind. Skip `<=`.
+            _pcre_pos = _pcre_pos + 2;
+            return 0 - 8;
+        }
+        if (n2 == 33) {
+            # v0.8.0 — (?<!...) negative lookbehind. Skip `<!`.
+            _pcre_pos = _pcre_pos + 2;
+            return 0 - 9;
         }
         # Named capture (?<NAME>...).
         _pcre_pos = _pcre_pos + 1;  # skip `<`
@@ -686,16 +808,48 @@ fn _pcre_parse_group_intro() {
             return _pcre_capture_n;
         }
         if (p2 == 62) {
-            _pcre_err = PCRE_E_RECURSION_UNSUPPORTED;
-            return 0;
+            # v0.8.0 — (?P>NAME) recursion. Look up name, emit RECURSE,
+            # consume `)`, return -7 (fully consumed).
+            _pcre_pos = _pcre_pos + 2;  # skip `P>`
+            var rname_start = _pcre_pos;
+            var rname_p = _pcre_pos;
+            while (rname_p < _pcre_pat_len) {
+                var rc = load8(_pcre_pat + rname_p);
+                if (rc == 41) { rname_p = _pcre_pat_len; }       # break on `)`
+                else          { rname_p = rname_p + 1; }
+            }
+            # Re-find the close paren.
+            var rclose = rname_start;
+            while (rclose < _pcre_pat_len && load8(_pcre_pat + rclose) != 41) {
+                rclose = rclose + 1;
+            }
+            if (rclose >= _pcre_pat_len) { _pcre_err = PCRE_E_SYNTAX; return 0; }
+            var rname_len = rclose - rname_start;
+            if (rname_len < 1) { _pcre_err = PCRE_E_SYNTAX; return 0; }
+            # Look up name in name table.
+            var rgroup = _pcre_lookup_name(_pcre_pat + rname_start, rname_len);
+            if (rgroup < 0) {
+                _pcre_err = PCRE_E_BAD_RECURSION_REF;
+                return 0;
+            }
+            _pcre_pos = rclose + 1;  # consume `)`
+            _pcre_emit_recurse(rgroup);
+            return 0 - 7;
         }
         _pcre_err = PCRE_E_SYNTAX;
         return 0;
     }
     if (n1 == 82) {
-        # (?R) recursion
-        _pcre_err = PCRE_E_RECURSION_UNSUPPORTED;
-        return 0;
+        # v0.8.0 — (?R) recursion. Target = group 0 (whole pattern).
+        # Consume `R`, expect `)`, emit RECURSE, return -7.
+        _pcre_pos = _pcre_pos + 1;  # skip `R`
+        if (_pcre_pos >= _pcre_pat_len || load8(_pcre_pat + _pcre_pos) != 41) {
+            _pcre_err = PCRE_E_SYNTAX;
+            return 0;
+        }
+        _pcre_pos = _pcre_pos + 1;  # consume `)`
+        _pcre_emit_recurse(0);
+        return 0 - 7;
     }
     if (n1 == 124) {
         # v0.7.0 — (?|...) branch-reset group.
@@ -847,6 +1001,7 @@ fn _pcre_parse_primary() {
         var lookahead_kind = 0;     # 1 = positive, 2 = negative
         var atomic_flag = 0;
         var branch_reset_flag = 0;  # v0.7.0 — (?|...)
+        var lookbehind_kind = 0;    # v0.8.0: 1 = positive, 2 = negative
         if (_pcre_pos < _pcre_pat_len && load8(_pcre_pat + _pcre_pos) == 63) {
             var introducer = _pcre_parse_group_intro();
             if (_pcre_err != PCRE_E_OK) { return 0; }
@@ -855,6 +1010,8 @@ fn _pcre_parse_primary() {
             elif (introducer == 0 - 3) { lookahead_kind = 2; }
             elif (introducer == 0 - 4) { atomic_flag = 1; }
             elif (introducer == 0 - 5) { branch_reset_flag = 1; }
+            elif (introducer == 0 - 8) { lookbehind_kind = 1; }
+            elif (introducer == 0 - 9) { lookbehind_kind = 2; }
             elif (introducer >= 1) { capture_idx = introducer; }
             # introducer == 0 means non-capturing — fall through
         }
@@ -869,10 +1026,16 @@ fn _pcre_parse_primary() {
         }
         var lookahead_pc = 0 - 1;
         var atomic_pc = 0 - 1;
+        var lookbehind_pc = 0 - 1;
         if (lookahead_kind > 0) {
             var neg = 0;
             if (lookahead_kind == 2) { neg = 1; }
             lookahead_pc = _pcre_emit_lookahead(neg);
+        }
+        if (lookbehind_kind > 0) {
+            var lb_neg = 0;
+            if (lookbehind_kind == 2) { lb_neg = 1; }
+            lookbehind_pc = _pcre_emit_lookbehind(lb_neg);
         }
         if (atomic_flag == 1) {
             atomic_pc = _pcre_emit_raw(PCRE_OP_ATOMIC, 0);
@@ -895,6 +1058,19 @@ fn _pcre_parse_primary() {
         if (lookahead_pc >= 0) {
             var end_pc = _pcre_emit_op(PCRE_OP_LOOKAHEAD_END);
             _pcre_patch_arg1(lookahead_pc, end_pc);
+        }
+        if (lookbehind_pc >= 0) {
+            # Width analysis on the body that just got compiled.
+            var lb_body_start = lookbehind_pc + 1;
+            var lb_body_end = _pcre_instr_n;
+            var lb_width = _pcre_compute_width(lb_body_start, lb_body_end);
+            if (lb_width < 0) {
+                _pcre_err = PCRE_E_LOOKBEHIND_VARWIDTH;
+                return 0;
+            }
+            var lb_end_pc = _pcre_emit_op(PCRE_OP_LOOKAHEAD_END);
+            _pcre_patch_arg1(lookbehind_pc, lb_end_pc);
+            _pcre_patch_arg2(lookbehind_pc, lb_width);
         }
         if (atomic_pc >= 0) {
             var end_pc2 = _pcre_emit_op(PCRE_OP_ATOMIC_END);
@@ -1378,6 +1554,38 @@ fn niyama_pcre_last_callout() {
 # match" answer this produces is intentional per ADR 0004 — the
 # observable behavior matches an honest mismatch.
 
+# v0.8.0 — locate a group's open/close SAVE pcs by scanning compiled
+# instructions. Used at match time by RECURSE. Group 0 (whole pattern)
+# uses the FIRST SAVE 0 (pc 0) and the LAST SAVE 1 (right before
+# MATCH) because `\K` may emit additional SAVE 0 mid-pattern. Groups
+# 1-9 each have a unique open/close pair. Returns 0 on success and
+# stores results in _pcre_grp_open_pc / _pcre_grp_close_pc, -1 on
+# missing-group.
+fn _pcre_find_group_pcs(instrs, instr_count, group_idx) {
+    var open_save_idx = group_idx * 2;
+    var close_save_idx = group_idx * 2 + 1;
+    _pcre_grp_open_pc  = 0 - 1;
+    _pcre_grp_close_pc = 0 - 1;
+    var i = 0;
+    while (i < instr_count) {
+        var w0 = load64(instrs + i * 16);
+        var op = w0 & 0xFF;
+        if (op == PCRE_OP_SAVE) {
+            var save_idx = (w0 >> 8) & 0xFF;
+            if (save_idx == open_save_idx) {
+                if (_pcre_grp_open_pc < 0) { _pcre_grp_open_pc = i; }
+            }
+            if (save_idx == close_save_idx) {
+                _pcre_grp_close_pc = i;
+            }
+        }
+        i = i + 1;
+    }
+    if (_pcre_grp_open_pc < 0)  { return 0 - 1; }
+    if (_pcre_grp_close_pc < 0) { return 0 - 1; }
+    return 0;
+}
+
 fn _pcre_at_word_char(input, input_len, pos) {
     if (pos < 0)         { return 0; }
     if (pos >= input_len){ return 0; }
@@ -1429,6 +1637,12 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
     var pc = start_pc;
     var pos = start_pos;
     while (pc >= 0) {
+        # v0.8.0 — recursion stop check. If the active recursion frame
+        # set a stop_pc and we've reached it, the body completed
+        # successfully — return pos to the recursive caller.
+        if (_pcre_recurse_stop_pc >= 0 && pc == _pcre_recurse_stop_pc) {
+            return pos;
+        }
         _pcre_step_count = _pcre_step_count + 1;
         if (_pcre_step_count > _pcre_step_limit) { return 0 - 1; }
         if (pc >= instr_count) { return 0 - 1; }
@@ -1597,7 +1811,13 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
             var end_pc3 = (w0 >> 32) & 0xFFFFFFFF;
             var snap2 = alloc(PCRE_MAX_SAVES * 8);
             _pcre_saves_snapshot(saves, snap2);
+            # v0.8.0 — clear recursion stop for the sub-match (lookahead
+            # is its own scope; outer recursion's stop_pc shouldn't fire
+            # mid-lookahead).
+            var prev_stop_la = _pcre_recurse_stop_pc;
+            _pcre_recurse_stop_pc = 0 - 1;
             var r3 = _pcre_match_run(instrs, instr_count, class_base, input, input_len, pc + 1, pos, saves, depth + 1);
+            _pcre_recurse_stop_pc = prev_stop_la;
             if (r3 < 0) {
                 _pcre_saves_restore(saves, snap2);
                 return 0 - 1;
@@ -1610,18 +1830,86 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
             var end_pc4 = (w0 >> 32) & 0xFFFFFFFF;
             var snap3 = alloc(PCRE_MAX_SAVES * 8);
             _pcre_saves_snapshot(saves, snap3);
+            var prev_stop_nla = _pcre_recurse_stop_pc;
+            _pcre_recurse_stop_pc = 0 - 1;
             var r4 = _pcre_match_run(instrs, instr_count, class_base, input, input_len, pc + 1, pos, saves, depth + 1);
+            _pcre_recurse_stop_pc = prev_stop_nla;
             # Negative lookahead — sub captures discarded regardless.
             _pcre_saves_restore(saves, snap3);
             if (r4 >= 0) { return 0 - 1; }
             pc = end_pc4 + 1;
         }
+        elif (op == PCRE_OP_LOOKBEHIND || op == PCRE_OP_NLOOKBEHIND) {
+            # v0.8.0 — fixed-width lookbehind. Body consumes exactly
+            # `lb_width` bytes; succeed if running it from pos-lb_width
+            # ends at pos. Sub captures stay (positive) or discarded
+            # (negative), mirroring lookahead semantics.
+            var lb_end_pc = (w0 >> 32) & 0xFFFFFFFF;
+            var lb_width  = load64(instrs + pc * 16 + 8);
+            var lb_neg = 0;
+            if (op == PCRE_OP_NLOOKBEHIND) { lb_neg = 1; }
+            if (pos < lb_width) {
+                # Not enough preceding input. Positive: fail. Negative:
+                # vacuously succeed (no `lb_width` chars to match against).
+                if (lb_neg == 1) { pc = lb_end_pc + 1; }
+                else             { return 0 - 1; }
+            }
+            else {
+                var snap_lb = alloc(PCRE_MAX_SAVES * 8);
+                _pcre_saves_snapshot(saves, snap_lb);
+                var prev_stop_lb = _pcre_recurse_stop_pc;
+                _pcre_recurse_stop_pc = 0 - 1;
+                var rb = _pcre_match_run(instrs, instr_count, class_base, input, input_len, pc + 1, pos - lb_width, saves, depth + 1);
+                _pcre_recurse_stop_pc = prev_stop_lb;
+                # Body succeeded only if it landed exactly at pos
+                # (consumed lb_width bytes). rb == pos means success.
+                if (rb == pos) {
+                    if (lb_neg == 1) {
+                        _pcre_saves_restore(saves, snap_lb);
+                        return 0 - 1;
+                    }
+                    pc = lb_end_pc + 1;
+                }
+                else {
+                    _pcre_saves_restore(saves, snap_lb);
+                    if (lb_neg == 1) { pc = lb_end_pc + 1; }
+                    else             { return 0 - 1; }
+                }
+            }
+        }
         elif (op == PCRE_OP_ATOMIC) {
             var end_pc5 = (w0 >> 32) & 0xFFFFFFFF;
+            var prev_stop_at = _pcre_recurse_stop_pc;
+            _pcre_recurse_stop_pc = 0 - 1;
             var r5 = _pcre_match_run(instrs, instr_count, class_base, input, input_len, pc + 1, pos, saves, depth + 1);
+            _pcre_recurse_stop_pc = prev_stop_at;
             if (r5 < 0) { return 0 - 1; }
             pos = r5;
             pc = end_pc5 + 1;
+        }
+        elif (op == PCRE_OP_RECURSE) {
+            # v0.8.0 — (?R) / (?P>NAME) recursion. Walk instructions to
+            # find target group's open SAVE pc and close SAVE pc; run
+            # sub-match from open_pc with stop_pc = close_pc + 1.
+            # Saves snapshot/restored so recursion's captures don't
+            # propagate; this matches PCRE2's recursion semantics
+            # (recursion is for matching only, not capture).
+            var rec_target = (w0 >> 8) & 0xFFFF;
+            if (_pcre_find_group_pcs(instrs, instr_count, rec_target) < 0) {
+                return 0 - 1;
+            }
+            var rec_open  = _pcre_grp_open_pc;
+            var rec_close = _pcre_grp_close_pc;
+            var rec_snap = alloc(PCRE_MAX_SAVES * 8);
+            _pcre_saves_snapshot(saves, rec_snap);
+            var prev_stop_rec = _pcre_recurse_stop_pc;
+            _pcre_recurse_stop_pc = rec_close + 1;
+            var rec_r = _pcre_match_run(instrs, instr_count, class_base, input, input_len, rec_open, pos, saves, depth + 1);
+            _pcre_recurse_stop_pc = prev_stop_rec;
+            _pcre_saves_restore(saves, rec_snap);
+            if (rec_r < 0) { return 0 - 1; }
+            pos = rec_r;
+            pc = pc + 1;
         }
         elif (op == PCRE_OP_COND) {
             # v0.7.0 — conditional. arg1 = group_idx, arg2 = no_pc.

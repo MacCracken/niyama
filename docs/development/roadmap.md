@@ -281,41 +281,43 @@ Per ADR 0007. Eight features land under one new shared module
   (PCRE/RE2 spec); `(?m)` and `(?s)` opt into the previous loose
   semantics.
 
-#### M4.5b — v0.8.0 (planned) — M4.5 completion release
+#### M4.5b — v0.8.0 (shipped 2026-05-05) — M4.5 completion release
 
-Carries every remaining M4.5 deferral that isn't decision-gated. Big
-release, but each feature is independent of the others and the
-shared `lib/unicode/` plumbing keeps the Unicode-touching pieces
-cheap. Sized comparably to v0.7.0's eight-feature carve.
+Carried every remaining M4.5 deferral that wasn't decision-gated.
+Sized comparably to v0.7.0's eight-feature carve.
 
-- 🟦 `niyama_pcre` lookbehind `(?<=...)` and `(?<!...)` —
-  fixed-width compile-time width analysis (PCRE2 10.43 model).
-  Variable-width lookbehind stays out of scope unless asked.
-- 🟦 `niyama_pcre` recursion `(?R)`, `(?P>name)`, `(?N)` —
-  subroutine call into the same compiled NFA.
-- 🟦 `niyama_fuzzy` exact start-position recovery in
-  `niyama_fuzzy_search` — reverse-DP pass to recover the precise
-  start offset of the best fuzzy substring match.
-- 🟦 **Unicode property classes `\p{L}` for `niyama_re2`,
-  `niyama_pcre`, `niyama_vim`** — wired onto stdlib
-  `unicode_category()`. New small shared helper
-  `src/unicode_props.cyr` for parsing `\p{Name}` / `\P{Name}` and
-  resolving leaf vs. aggregate categories.
-- 🟦 **`(?i)` Unicode case-fold upgrade** — `niyama_re2` and
-  `niyama_pcre` swap ASCII `cyr_to_lower` for stdlib
-  `unicode_fold(cp, ...)`. Handles ß↔SS, İ↔i̇, Greek σ↔ς, Cyrillic.
-  Same opcodes (`*_OP_CHAR_CI`), comparison logic swap only. vim
-  excluded (uses `\c`/`\C` toggles, not `(?i)`; ADR 0006 escape
-  menagerie territory).
-- 🟦 **`niyama_fuzzy` Unicode NFD normalization** —
-  `FUZZY_FLAG_UNICODE_NFD` calls stdlib `str_normalize(s, NFD)` on
-  both pattern and input before the Levenshtein DP runs. Composed
-  vs. decomposed forms (café NFC vs NFD) become equivalence-classed
-  at distance 0.
-- 🟦 **vim → posix_classes refactor** — fold `niyama_vim`'s
-  in-engine POSIX bracket-class code onto `src/posix_classes.cyr`
-  (deliberate duplication left in v0.7.0 to keep risk low; clears
-  the technical debt before M5 freeze).
+- ✅ `niyama_pcre` lookbehind `(?<=...)` and `(?<!...)` —
+  fixed-width compile-time width analysis via new
+  `_pcre_compute_width`. Variable-width bodies error
+  `PCRE_E_LOOKBEHIND_VARWIDTH = 10`.
+- ✅ `niyama_pcre` recursion `(?R)` and `(?P>NAME)` — subroutine
+  call into the same compiled NFA via `PCRE_OP_RECURSE = 30` plus
+  a `_pcre_recurse_stop_pc` matcher global. Saves snapshot/restored
+  so inner captures don't propagate. Numeric `(?N)` syntax NOT in
+  scope (pinned v0.8.x if a consumer asks).
+- ✅ `niyama_fuzzy` exact start-position recovery in
+  `niyama_fuzzy_search` — reverse-DP pass replaces the
+  `end_pos - plen` heuristic.
+- ✅ **Unicode property classes `\p{L}` for `niyama_re2`,
+  `niyama_pcre`, `niyama_vim`** — new shared helper
+  `src/unicode_props.cyr` (~140 lines), backed by stdlib
+  `unicode_category()`. 7 aggregate categories + 30 leaves.
+- ✅ **Multi-byte literal pattern char support** for re2 + vim
+  (UCHAR opcode) — fixes a regression that codepoint-stepping
+  introduced. pcre stays byte-stepped so its CHAR sequences keep
+  working on multi-byte literals.
+- ✅ **`(?i)` Unicode case-fold upgrade** — re2 + pcre add
+  UCHAR_CI opcode for multi-byte literals under `(?i)`, storing
+  `unicode_to_lower(pat_cp)` and folding input cp the same way.
+  ASCII path unchanged. 1:1 mappings only; full case folding
+  (ß↔SS, etc.) deferred to v0.8.x ladder if requested.
+- ✅ **`niyama_fuzzy` Unicode NFD normalization** —
+  `FUZZY_FLAG_UNICODE_NFD` calls stdlib `str_normalize(s, NFD)`.
+  New error `FUZZY_E_NFD_OVERFLOW = 3` for patterns whose NFD form
+  exceeds the pattern-buffer cap.
+- ✅ **vim → posix_classes refactor** — folded vim's in-engine
+  POSIX-class code onto `src/posix_classes.cyr`. Zero behavior
+  change; 88 vim tests + 219 fuzz assertions verified no regression.
 - ⏳ `niyama_bre` and `niyama_vim` backref `\1`-`\9` —
   **deferred to v0.8.1** per the ladder rule (decision-gated; see
   below).
