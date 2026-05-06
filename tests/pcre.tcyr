@@ -224,6 +224,11 @@ fn main() {
     assert_eq(t_match("(?i)Д", "д"),       1, "(?i) Cyrillic Д matches д");
     assert_eq(t_match("(?i)é", "É"),       1, "(?i) accented é matches É");
     assert_eq(t_match("(?i)cAfÉ", "Café"), 1, "(?i) mixed café case-folds");
+    # v1.0 — semantics-lock: (?i) is 1:1 fold only. Full case folding
+    # (ß↔SS) is NOT in scope through v1.0; locking the behavior.
+    assert_eq(t_match("(?i)ß", "ß"),  1, "(?i) ß matches itself (1:1 fold)");
+    assert_eq(t_match("(?i)ß", "SS"), 0, "(?i) ß does NOT match SS (full-fold not in v1.0)");
+    assert_eq(t_match("(?i)SS", "ß"), 0, "(?i) SS does NOT match ß (full-fold not in v1.0)");
 
     # === Strict-anchor / strict-dot defaults (v0.7.0) ================
     test_group("pcre-strict-defaults");
@@ -374,6 +379,32 @@ fn main() {
     var r_self = niyama_pcre_compile("^(?<g>x(?P>g)?y)$");
     assert_neq(r_self, 0, "self-recursion compiles");
     assert_eq(niyama_pcre_match(r_self, "xxxyyy"), 1, "self-recursion 3-deep");
+    # v1.0 — recursion + lookaround nesting tests. Exercises the
+    # _pcre_recurse_stop_pc save/restore behavior at LOOKAHEAD /
+    # NLOOKAHEAD / LOOKBEHIND / NLOOKBEHIND / ATOMIC entry — the
+    # sub-match must not see the outer recursion's stop_pc.
+    # Lookahead followed by recursive group. Lookahead is `(?=a)` so
+    # it just gates "next char is 'a'"; the recursion handles the rest.
+    var r_la = niyama_pcre_compile("(?=a)(?<g>a(?P>g)?b)");
+    assert_neq(r_la, 0, "lookahead + recursion compiles");
+    assert_eq(niyama_pcre_match(r_la, "ab"),     1, "lookahead+recursion base");
+    assert_eq(niyama_pcre_match(r_la, "aabb"),   1, "lookahead+recursion deep");
+    # Recursive group with lookahead inside the body.
+    var r_la2 = niyama_pcre_compile("^(?<g>a(?=.)(?P>g)?b)$");
+    assert_neq(r_la2, 0, "recursion-with-inner-lookahead compiles");
+    assert_eq(niyama_pcre_match(r_la2, "ab"),    1, "inner-lookahead base");
+    assert_eq(niyama_pcre_match(r_la2, "aabb"),  1, "inner-lookahead one-deep");
+    # Lookbehind followed by recursive group.
+    var r_lb = niyama_pcre_compile("(?<=x)(?<g>a(?P>g)?b)");
+    assert_neq(r_lb, 0, "lookbehind + recursion compiles");
+    assert_eq(niyama_pcre_search(r_lb, "xab"),   1, "lookbehind+recursion base");
+    assert_eq(niyama_pcre_search(r_lb, "xaabb"), 1, "lookbehind+recursion deep");
+    assert_eq(niyama_pcre_search(r_lb, "ab"),    0 - 1, "no preceding x → no match");
+    # Atomic group containing a recursive call — atomic should clear
+    # the stop_pc when entering its sub-match.
+    var r_at = niyama_pcre_compile("^(?<g>a(?>(?P>g)?)b)$");
+    assert_neq(r_at, 0, "atomic-wrapped recursion compiles");
+    assert_eq(niyama_pcre_match(r_at, "ab"),     1, "atomic+recursion base");
 
     # === Unicode property classes (v0.8.0) ===========================
     test_group("pcre-unicode-props");
@@ -399,6 +430,13 @@ fn main() {
     assert_eq(t_err("\\p{Foo}"),   PCRE_E_BAD_PROPERTY, "\\p{Foo} → BAD_PROPERTY");
     assert_eq(t_err("\\p{Greek}"), PCRE_E_BAD_PROPERTY, "long names → BAD_PROPERTY");
     assert_eq(t_err("\\p{}"),      PCRE_E_BAD_PROPERTY, "empty → BAD_PROPERTY");
+
+    # === Empty pattern (v1.0 — semantics-lock) =======================
+    test_group("pcre-empty-pattern");
+    var nfa_empty_p = niyama_pcre_compile("");
+    assert_neq(nfa_empty_p, 0, "empty pattern compiles");
+    assert_eq(niyama_pcre_match(nfa_empty_p, ""),  1, "empty matches empty input");
+    assert_eq(niyama_pcre_match(nfa_empty_p, "x"), 1, "empty matches at start of any string");
 
     # === Boundary tests (v0.9.0 — locks frozen MAX_* limits) =========
     test_group("pcre-boundary");

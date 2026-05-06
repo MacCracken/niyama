@@ -1,12 +1,27 @@
+# Build
 /build/
+
+# Release / toolchain artifacts
+cyrius-*.tar.gz
+*.tar.gz
+SHA256SUMS
+
+# Crash dumps
 *.core
+
+# IDE / editors
 .claude/
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Secrets (defense-in-depth — niyama doesn't deal with secrets)
 .env
 .env.*
 *.pem

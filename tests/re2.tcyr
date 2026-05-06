@@ -210,6 +210,14 @@ fn main() {
     assert_eq(t_match("(?i)é", "É"),       1, "(?i) accented é matches É");
     # Mixed pattern, mixed input.
     assert_eq(t_match("(?i)cAfÉ", "Café"), 1, "(?i) mixed café case-folds");
+    # v1.0 — semantics-lock: (?i) is 1:1 fold only (unicode_to_lower).
+    # Full case folding (ß↔SS, İ↔i̇) is NOT in scope through v1.0;
+    # post-fold cyrius stdlib could swap to unicode_fold (full-fold)
+    # but that would be a behavior change requiring a new ADR. This
+    # test prevents silent regression / silent upgrade.
+    assert_eq(t_match("(?i)ß", "ß"),  1, "(?i) ß matches itself (1:1 fold)");
+    assert_eq(t_match("(?i)ß", "SS"), 0, "(?i) ß does NOT match SS (full-fold not in v1.0)");
+    assert_eq(t_match("(?i)SS", "ß"), 0, "(?i) SS does NOT match ß (full-fold not in v1.0)");
 
     # === Strict-anchor / strict-dot defaults (v0.7.0) ================
     # Sanity-check the behavior change: pre-v0.7.0 semantics were
@@ -257,6 +265,13 @@ fn main() {
     assert_neq(nfa_d4, 0, "alt-repeat compiles");
     assert_eq(niyama_re2_match(nfa_d4, "abcdefgabcdefgabcdefgabcdefgz"), 1, "alt-repeat matches");
     assert_eq(niyama_re2_match(nfa_d4, "abcdefgabcdefgabcdefgabcdefgX"), 0, "alt-repeat no-match terminates");
+
+    # === Empty pattern (v1.0 — semantics-lock) =======================
+    test_group("re2-empty-pattern");
+    var nfa_empty = niyama_re2_compile("");
+    assert_neq(nfa_empty, 0, "empty pattern compiles");
+    assert_eq(niyama_re2_match(nfa_empty, ""),  1, "empty matches empty input");
+    assert_eq(niyama_re2_match(nfa_empty, "x"), 1, "empty matches at start of any string");
 
     # === Boundary tests (v0.9.0 — locks frozen MAX_* limits) =========
     test_group("re2-boundary");

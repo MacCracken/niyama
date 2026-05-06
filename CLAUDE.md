@@ -236,3 +236,183 @@ current minor (e.g. 0.8.5 before 0.9.0). For niyama right now,
 - 3 failed attempts = defer and document — don't burn time in
   a rabbit hole.
 
+## Cyrius Conventions
+
+Lifted from
+[agnosticos example_claude.md § Cyrius Conventions](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/example_claude.md#cyrius-conventions).
+These are toolchain-level invariants — true for every Cyrius
+project, not niyama-specific.
+
+- All struct fields are 8 bytes (`i64`), accessed via `load64` /
+  `store64` with offset.
+- Heap allocation via `fl_alloc()` / `fl_free()` (freelist) for
+  data with individual lifetimes.
+- Bump allocation via `alloc()` for long-lived data (vec, str
+  internals, niyama's NFA structures, class tables, name tables).
+- Enum values for constants — don't consume `gvar_toks` slots
+  (256 initialized globals limit).
+- Heap-allocate large buffers — `var buf[256000]` bloats the
+  binary by 256 KB.
+- `break` in while loops with `var` declarations is unreliable —
+  use flag + `continue`. (See niyama's `_<engine>_parse_class`
+  loops for the canonical pattern.)
+- No negative literals — write `(0 - N)` not `-N`. niyama uses
+  `0 - 1` for "no match" / "not found" returns throughout.
+- No mixed `&&` / `||` in one expression — nest `if` blocks
+  instead.
+- `match` is reserved — don't use as a variable name.
+- `return;` without value is invalid — always `return 0;`.
+- All `var` declarations are function-scoped — no block scoping.
+- Max limits per compilation unit: 4 096 variables, 1 024
+  functions, 256 initialized globals. niyama's largest engine
+  (pcre at ~2 000 lines) is well under all three; the dist
+  artifact stays comfortably under after bundling.
+
+## CI / Release
+
+- **Toolchain pin**: `cyrius = "X.Y.Z"` field in `cyrius.cyml
+  [package]`. **No separate `.cyrius-toolchain` file.** CI and
+  release both read from `cyrius.cyml`. Currently pinned to
+  `5.8.65` (per ADR 0008 — required floor for stdlib `lib/unicode/`).
+- **Dead code elimination**: every `cyrius build` in CI and
+  release runs with `CYRIUS_DCE=1`. Binary size is a release
+  metric — track in CHANGELOG.
+- **Tag filter**: release workflow triggers on
+  `tags: ['[0-9]*']` — semver-only. Non-numeric tags do not ship
+  a release.
+- **Version-verify gate**: release asserts `VERSION ==
+  cyrius.cyml version == git tag` before building. Mismatch fails
+  the run.
+- **Lint step**: CI runs `cyrius lint` per source file across
+  `src/*.cyr`. Advisory; v0.9.0 audit notes 11 long-line cosmetic
+  warnings remain (cosmetic only).
+- **Workflow layout** (`.github/workflows/`):
+  - `ci.yml` — build, lint, test, fuzz; reusable via
+    `workflow_call`.
+  - `release.yml` — version gate → CI gate → DCE build →
+    artifacts (source tarball, bundled `dist/niyama.cyr`, DCE
+    binary, SHA256SUMS).
+- **Concurrency**: CI uses `cancel-in-progress: true` keyed on
+  workflow + ref — only the latest push is tested.
+- **State sync**: release post-hook bumps
+  `docs/development/state.md`. If the hook doesn't, fix the hook
+  — don't hand-maintain state.
+- **`cyrius audit`**: known-broken in 5.8.65 (missing
+  `~/.cyrius/bin/check.sh`). Run constituents individually
+  (`cyrius lint` + `cyrius test` + `cyrius fuzz` + clean DCE
+  build) until the toolchain bug is fixed in 5.9.x.
+
+## Documentation Structure
+
+```
+Root files (required):
+  README.md, CHANGELOG.md, CLAUDE.md, LICENSE,
+  VERSION, cyrius.cyml
+
+Root files (recommended for first-party):
+  CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md
+
+docs/ (minimum):
+  adr/       — Architecture Decision Records (README + template.md
+               + NNNN-*.md). Numbered, never renumber. niyama has
+               0001-0010 as of v0.9.0.
+  architecture/ — Non-obvious invariants (README + NNN-*.md).
+                  Numbered, never renumber. niyama has 001-004 as
+                  of v0.9.0.
+  guides/    — Task-oriented how-tos (currently empty; reserved).
+  examples/  — Runnable examples (currently empty; reserved).
+  development/
+    roadmap.md — completed, backlog, future, v1.0 criteria.
+    state.md   — live state snapshot (volatile; release-hook-bumped).
+
+docs/ (when earned — niyama has all of these post-v0.9.0):
+  audit/     — Security audit reports (YYYY-MM-DD-audit.md).
+               niyama has `2026-05-05-audit.md` (v0.9.0 P(-1)).
+  api/       — Curated public-surface reference. niyama has
+               `README.md` mirroring ADR 0010's freeze contract.
+  benchmarks.md — Per-release bench history. niyama has v0.8.0
+                  baseline + v0.9.0 step-7 diff.
+  development/v0.9.0-review-findings.md — working doc for the
+                  v0.9.0 P(-1) review pass; deleted at v1.0.
+
+docs/ (when earned — niyama doesn't have yet):
+  sources.md          — academic/domain citations (mostly N/A;
+                        regex theory is well-known).
+  proposals/          — pre-ADR design drafts.
+  standards/, compliance/, faq.md — as applicable.
+```
+
+## .gitignore (Required)
+
+niyama-specific .gitignore — note divergence from the example
+template: niyama **keeps `dist/niyama.cyr` and `lib/*.cyr`
+checked in** (vendored stdlib + fold-ready artifact, both
+load-bearing).
+
+```gitignore
+# Build
+/build/
+
+# Release / toolchain artifacts (post-v0.9.0 added)
+cyrius-*.tar.gz
+*.tar.gz
+SHA256SUMS
+
+# Crash dumps
+*.core
+
+# IDE / editors
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (defense-in-depth — niyama doesn't deal with secrets,
+# but the gitignore guards anyway)
+.env
+.env.*
+*.pem
+*.key
+```
+
+**Note**: unlike the agnosticos template, niyama does NOT ignore:
+- `/dist/` — `dist/niyama.cyr` is the fold-ready bundled artifact,
+  byte-identical to what cyrius stdlib will vendor as
+  `lib/niyama.cyr` post-fold. Checked in.
+- `lib/*.cyr` — niyama vendors the cyrius stdlib subset it needs
+  (alloc, string, fmt, vec, str, syscalls, assert, unicode/*).
+  `cyrius update` re-vendors from the toolchain. Checked in to
+  freeze the stdlib version with the niyama version.
+
+## CHANGELOG Format
+
+Follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+niyama-specific guidance:
+
+- **Performance claims must include benchmark numbers** with the
+  bench harness name. Reference `docs/benchmarks.md` rows where
+  applicable. Don't hand-wave "faster than"; cite the data.
+- **Breaking changes** get a `### Breaking` section with a
+  migration guide. **niyama has no breaking changes through v1.0**
+  — the v0.7.0 strict-default `^/$/.` shift was pre-v1.0; ADR 0010
+  freeze locks the surface so post-v1.0 patches cannot break.
+- **Security fixes** get a `### Security` section with CVE
+  references where applicable. niyama has had no security fixes
+  yet; the v0.9.0 audit found no CRITICAL/HIGH issues.
+- **Per-release section structure** — niyama uses:
+  - `### Changed` — modifications to existing surface.
+  - `### Added` — new public symbols / features.
+  - `### Deferred` — items pinned for later (with target slot).
+  - `### Tests / fuzz` — assertion count diffs vs. prior release.
+  - `### Bench` — regression check, ±% from prior baseline.
+  - `### ABI summary` (at major / freeze releases) — opcode and
+    error-code numeric counts.
+- **Frozen surface notes**: post-v1.0 entries call out
+  reserved-but-unused error codes / opcode slots so a future
+  reader sees what's locked vs. live.

@@ -148,6 +148,15 @@ fn main() {
     # Reasonable rejection.
     assert_eq(t_match_k("config", "options", 2), 0, "options/config != fuzzy match");
 
+    # === Empty pattern (v1.0 — semantics-lock) =======================
+    test_group("fuzzy-empty-pattern");
+    var h_empty = niyama_fuzzy_compile("");
+    assert_neq(h_empty, 0, "empty pattern compiles");
+    # Fuzzy distance("", "") = 0; distance("", "x") = 1 (one insertion).
+    assert_eq(niyama_fuzzy_distance(h_empty, ""),    0, "empty pattern, empty input → 0");
+    assert_eq(niyama_fuzzy_distance(h_empty, "x"),   1, "empty pattern, 1-char input → 1");
+    assert_eq(niyama_fuzzy_distance(h_empty, "abc"), 3, "empty pattern, 3-char input → 3");
+
     # === Unicode NFD (v0.8.0) ========================================
     test_group("fuzzy-nfd");
     # café in NFC (1 codepoint é) vs. NFD (e + combining ´) should be

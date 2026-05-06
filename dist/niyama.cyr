@@ -1,17 +1,16 @@
 # niyama.cyr -- bundled distribution
-# Version: 0.9.0
-# Status:  v0.9.0 — M5 P(-1) hardening + surface freeze release. Per
-#                ADR 0010 the public API surface is locked through
-#                v1.0; post-fold extensions (per ADR 0009 + v0.9.0
-#                review remainders) land via cyrius stdlib once
-#                niyama folds. M4.5 complete (v0.8.0); this release
-#                adds: re2 POSIX bracket classes (G2 — fixed ADR 0007
-#                oversight), invalid-UTF-8 input fuzz coverage,
-#                MAX_* boundary tests across engines, 4 architecture
-#                notes (codepoint-stepping, save-table layout, class
-#                bitmap scope, no-shared-kernel), security audit
-#                report (no CRITICAL/HIGH findings), comprehensive
-#                bench history. v1.0 fold-ready next.
+# Version: 1.0.0
+# Status:  v1.0.0 — fold-ready release. Public API surface locked
+#                per ADR 0010 (Surface freeze). Per ADR 0011 (Fold
+#                readiness and post-v1.0 fold trigger), v1.0 ships
+#                fold-READY but does not actually fold at this
+#                release: cyrius stdlib will vendor this file as
+#                `lib/niyama.cyr` byte-identical once a second
+#                long-horizon AGNOS-lineage consumer materializes
+#                (cyim is consumer #1; gate per ADR 0001).
+#                niyama-the-repo enters maintenance mode at v1.0;
+#                v1.x patches are bug-fix only. Post-fold extensions
+#                land in the stdlib-vendored copy.
 #
 # Fold-ready single-include artifact. Following the sandhi precedent
 # (cyrius v5.7.0 vendored `dist/sandhi.cyr` byte-identical as
@@ -85,7 +84,7 @@
 #
 # Do not edit -- rebuild with: scripts/build-dist.sh (post-M1)
 
-var NIYAMA_VERSION = "0.9.0";
+var NIYAMA_VERSION = "1.0.0";
 
 # === posix bracket classes (shared) ==================================
 include "src/posix_classes.cyr"

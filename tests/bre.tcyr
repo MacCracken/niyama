@@ -211,6 +211,13 @@ fn main() {
     assert_eq(niyama_bre_match(nfa_d, "aaaaaaaaaaaaaaaax"), 1, "linear match");
     assert_eq(niyama_bre_match(nfa_d, "aaaaaaaaaaaaaaaay"), 0, "linear no-match");
 
+    # === Empty pattern (v1.0 — semantics-lock) =======================
+    test_group("bre-empty-pattern");
+    var nfa_empty_b = niyama_bre_compile("");
+    assert_neq(nfa_empty_b, 0, "empty pattern compiles");
+    assert_eq(niyama_bre_match(nfa_empty_b, ""),  1, "empty matches empty input");
+    assert_eq(niyama_bre_match(nfa_empty_b, "x"), 1, "empty matches at start of any string");
+
     # === Boundary tests (v0.9.0 — locks frozen MAX_* limits) =========
     test_group("bre-boundary");
     # 10 capture groups → capture_idx == 10 > 9 cap → SYNTAX.

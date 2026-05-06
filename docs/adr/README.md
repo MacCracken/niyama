@@ -29,3 +29,4 @@ Decisions about niyama — what we chose, the context, and the consequences we a
 - [0008 — Unicode-stdlib pivot + M4.5b/c reshape](0008-unicode-stdlib-pivot-and-reshape.md)
 - [0009 — bre / vim backref `\1`-`\9`: review + exposure surface](0009-backref-review-and-exposure.md)
 - [0010 — Surface freeze for v1.0](0010-surface-freeze.md)
+- [0011 — Fold readiness and post-v1.0 fold trigger](0011-fold-readiness-and-trigger.md)

@@ -5,13 +5,24 @@
 
 ## Version
 
+**1.0.0** — fold-ready release shipped 2026-05-05. Public surface
+locked per ADR 0010 + ADR 0011. niyama-the-repo enters maintenance
+mode; v1.x patches are bug-fix only. Post-fold extensions land in
+cyrius stdlib's vendored `lib/niyama.cyr` once the fold trigger
+fires (consumer #2 materializes; cyim is #1).
+
+v1.0 sweeps the v0.9.0 review remainders: `(?i)ß` semantics-lock
+test, recursion+lookaround nesting tests, empty-pattern tests
+across all 5 engines, fold ADR 0011, public API reference at
+`docs/api/`, the 5 deferred CLAUDE.md sections, working-doc
+cleanup. No engine code changes vs v0.9.0.
+
 **0.9.0** — M5 P(-1) hardening + surface freeze release shipped
-2026-05-05. **Last release before v1.0 fold-ready.** Per ADR 0010,
-the public `niyama_<engine>_*` API surface is locked through v1.0;
-post-fold extensions (per ADR 0009 + the v0.9.0 review remainders)
-land via cyrius stdlib once the fold gate is met. The 9-step P(-1)
-pass ran clean: no CRITICAL/HIGH security findings, no bench
-regressions (all 47 measurements within ±2.5% of v0.8.0 baseline).
+2026-05-05. Last release before v1.0 fold-ready. Per ADR 0010,
+the public `niyama_<engine>_*` API surface locked. The 9-step
+P(-1) pass ran clean: no CRITICAL/HIGH security findings, no
+bench regressions (all 47 measurements within ±2.5% of v0.8.0
+baseline).
 
 **v0.8.0** — M4.5 completion release shipped 2026-05-05. Per ADR 0008
 (Unicode-stdlib pivot + sub-release collapse), every remaining M4.5
@@ -91,6 +102,40 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 | Linear-time *family* (DoS-safe by construction) | `re2`, `bre`, `vim` — backref structurally rejected |
 | Backtracking *family* (full PCRE feature set, step-limit guarded) | `pcre` |
 
+### Known asymmetries / scope notes (v1.0)
+
+Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
+
+- **`niyama_fuzzy_search_at` does not exist** (A1). bre/re2/pcre/vim
+  all expose `_search_at(nfa, s, len, from)` for substring search
+  from offset; fuzzy doesn't. Workaround: slice the input externally
+  (`s + from` with appropriate `len - from`) and call
+  `niyama_fuzzy_search`. Pinned for post-fold cyrius-stdlib
+  extension.
+- **Long Unicode property names not supported** (G3). niyama
+  implements `\p{NAME}` with short names only — the 7 single-letter
+  aggregates (`L M N P S Z C`) and 30 two-letter leaves (`Lu Ll Lt
+  Lm Lo Mn ... Cn`). Long forms `\p{Letter}`, `\p{Uppercase_Letter}`
+  not supported. Script properties `\p{Greek}`, `\p{Cyrillic}` not
+  supported (different table, post-fold candidate). Block properties
+  `\p{InGreek}` not supported.
+- **Absolute anchors `\A` / `\z` / `\Z` not implemented** (G4).
+  niyama's `^` and `$` are strict-by-default in re2/pcre (per
+  v0.7.0): `^` matches only at pos 0, `$` only at pos len, both
+  unaffected by `\n` unless `(?m)` is set. This makes `^/$` (default)
+  semantically equivalent to PCRE2's `\A`/`\z` for niyama purposes.
+  Consumers porting PCRE2 patterns can substitute `\A` → `^` and
+  `\z` → `$`. `\Z` (string-end-or-trailing-newline) has no exact
+  equivalent; in practice `$\n?$` or `(?m)$` covers most uses.
+- **`(?i)` is 1:1 fold only**, not full Unicode case folding. ß
+  matches ß but not SS; İ matches İ but not i̇. Per ADR 0008 +
+  v1.0 semantics-lock test (`tests/re2.tcyr` + `tests/pcre.tcyr`).
+  Post-fold candidate.
+- **`compile_opts` asymmetry**: only fuzzy and vim expose a
+  `_compile_opts` entry point. bre/re2/pcre have only `_compile`.
+  Consumers needing flag-on-compile for the linear-time engines
+  would need a post-fold ABI extension.
+
 ## Fold-ready artifact
 
 - `dist/niyama.cyr` — single-include bundle. v0.8.0 prepends both
@@ -102,20 +147,20 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 ## Tests
 
 - `tests/niyama.tcyr` — scaffold smoke (2 assertions).
-- **`tests/bre.tcyr`** — 109 BRE assertions (v0.9.0: +2 boundary).
-- **`tests/re2.tcyr`** — 169 RE2 assertions (v0.9.0: +18 POSIX
-  classes per G2 fix, +4 boundary).
-- **`tests/pcre.tcyr`** — 188 PCRE assertions (v0.9.0: +3 boundary).
-- **`tests/fuzzy.tcyr`** — 53 fuzzy assertions.
-- **`tests/vim.tcyr`** — 106 vim assertions (v0.9.0: +2 boundary).
+- **`tests/bre.tcyr`** — 112 BRE assertions (v1.0: +3 empty-pattern).
+- **`tests/re2.tcyr`** — 175 RE2 assertions (v1.0: +3 ß
+  semantics-lock, +3 empty-pattern).
+- **`tests/pcre.tcyr`** — 206 PCRE assertions (v1.0: +3 ß, +12
+  recursion-nesting, +3 empty-pattern).
+- **`tests/fuzzy.tcyr`** — 57 fuzzy assertions (v1.0: +4 empty).
+- **`tests/vim.tcyr`** — 109 vim assertions (v1.0: +3 empty).
 - **`tests/{bre,re2,pcre,fuzzy,vim}.bcyr`** — per-engine bench harnesses.
-- **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses
-  (v0.9.0: invalid-UTF-8 input seeds added to re2/pcre/vim).
+- **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
 
-Aggregate: `cyrius test` reports **6 files, 627 assertions** all passing
-(was 598; +29 v0.9.0).
+Aggregate: `cyrius test` reports **6 files, 661 assertions** all passing
+(was 627 at v0.9.0; +34 v1.0 sweep).
 `cyrius fuzz` reports **5 files, 1689 assertions** all passing
-(was 1660; +29 v0.9.0).
+(unchanged from v0.9.0; no engine code changes).
 
 Bench history captured in [`../benchmarks.md`](../benchmarks.md).
 Security audit history in [`../audit/`](../audit/).
@@ -141,26 +186,26 @@ Direct (declared in `cyrius.cyml`):
 
 ## Next
 
-1. **v1.0 — fold-ready release.** `dist/niyama.cyr` is the
-   byte-identical fold candidate; the public surface is frozen
-   per ADR 0010. Remaining v1.0 work is the **remainders sweep**:
-   - LOW review findings (A1 fuzzy `_search_at` doc, C2 (?i)ß
-     semantics-lock test, C4 recursion+lookaround nesting tests,
-     C5 empty-pattern tests, F2 `docs/api/`).
-   - CLAUDE.md completeness — Cyrius Conventions, CI/Release,
-     Documentation Structure, `.gitignore`, CHANGELOG Format
-     sections from agnosticos `example_claude.md`.
-   - Fold ADR (template: sandhi ADR 0002).
-   - Final closeout (test/fuzz re-run, bench diff vs v0.9.0,
-     downstream check against cyim).
-2. **Post-fold (post-v1.0)** — Cyrius stdlib vendors
-   `lib/niyama.cyr` per the sandhi v5.7.0 lifecycle, conditional
-   on fold gate met (≥2 long-horizon consumers; cyim is #1).
-   Stdlib-side extensions per ADR 0010's post-freeze evolution
-   model: vim backref (per ADR 0009), `_search_at` for fuzzy,
-   long property names + Unicode scripts, etc. — additive only.
-3. niyama-the-repo enters maintenance mode at v1.0; future
-   v1.x patches are bug-fix only.
+niyama-the-repo enters maintenance mode at v1.0. Going forward:
+
+1. **Bug-fix patches (v1.0.x)** — only fixes; no surface changes.
+   Reported issues land here.
+2. **Fold trigger** — when consumer #2 materializes (per ADR 0011's
+   gate), cyrius stdlib vendors `dist/niyama.cyr` as
+   `lib/niyama.cyr` byte-identical. ADR 0011 status updates to
+   "Triggered" at that point.
+3. **Post-fold extensions** — additive-only changes (per ADR 0010)
+   land in cyrius stdlib's vendored copy, not in niyama-the-repo.
+   Pinned candidates: vim backref (ADR 0009), fuzzy `_search_at`,
+   Unicode long property names, `(?i)` full case folding.
+4. **niyama v2.0** — speculative; only if a future ecosystem need
+   exceeds the additive-only post-fold model. Would be a new
+   namespace; v1.x consumers unaffected.
+
+See [`roadmap.md`](roadmap.md) for the complete milestone history;
+[ADR 0010](../adr/0010-surface-freeze.md) for the freeze contract;
+[ADR 0011](../adr/0011-fold-readiness-and-trigger.md) for the
+fold trigger checklist.
 3. **M5 (post-v0.9.0)** — P(-1) hardening + closeout + surface freeze.
 4. **v1.0** — fold-ready release.
 

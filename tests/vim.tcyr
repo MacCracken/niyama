@@ -224,6 +224,13 @@ fn main() {
     assert_eq(t_err("\\p{Foo}"),   VIM_E_BAD_PROPERTY, "\\p{Foo} → BAD_PROPERTY");
     assert_eq(t_err("\\p{}"),      VIM_E_BAD_PROPERTY, "empty → BAD_PROPERTY");
 
+    # === Empty pattern (v1.0 — semantics-lock) =======================
+    test_group("vim-empty-pattern");
+    var nfa_empty_v = niyama_vim_compile("");
+    assert_neq(nfa_empty_v, 0, "empty pattern compiles");
+    assert_eq(niyama_vim_match(nfa_empty_v, ""),  1, "empty matches empty input");
+    assert_eq(niyama_vim_match(nfa_empty_v, "x"), 1, "empty matches at start of any string");
+
     # === Boundary tests (v0.9.0 — locks frozen MAX_* limits) =========
     test_group("vim-boundary");
     # 10 capture groups (vim uses \( in magic mode) → capture_idx cap → SYNTAX.
