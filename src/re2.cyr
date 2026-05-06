@@ -474,6 +474,19 @@ fn _re2_parse_class() {
             _re2_pos = _re2_pos + 1;
             done = 1;
         }
+        elif (pc == 91 && _re2_pos + 1 < _re2_pat_len && load8(_re2_pat + _re2_pos + 1) == 58) {
+            # v0.9.0 — POSIX bracket class [:name:] inside char class.
+            # Fixes ADR 0007 oversight: bre/pcre/vim got POSIX classes,
+            # re2 was missed. Hook into shared posix_classes.cyr.
+            var category = _posix_match_class_name(_re2_pat, _re2_pos + 2, _re2_pat_len);
+            if (category == 0) {
+                _re2_err = RE2_E_SYNTAX;
+                return 0 - 1;
+            }
+            _posix_apply_filler(_re2_class_base, ci, category);
+            _re2_pos = _posix_match_end_pos;
+            first = 0;
+        }
         elif (pc == 92 && _re2_pos + 1 < _re2_pat_len) {
             var nx = load8(_re2_pat + _re2_pos + 1);
             if (nx == 100)      { _re2_class_fill_digit(ci); _re2_pos = _re2_pos + 2; }

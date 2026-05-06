@@ -15,6 +15,7 @@ include "lib/string.cyr"
 include "lib/assert.cyr"
 include "lib/unicode/categories.cyr"
 include "lib/unicode/casefold.cyr"
+include "src/posix_classes.cyr"
 include "src/unicode_props.cyr"
 include "src/re2.cyr"
 
@@ -112,6 +113,56 @@ fn main() {
     fuzz_one("(?im)^foo",                       "Foo\nbar");
     fuzz_one("(?s).+",                          "line1\nline2");
     fuzz_one("(?<scheme>https?)://(?<host>\\w+)", "https://example");
+
+    # === Invalid UTF-8 input (v0.9.0) ================================
+    # Validates the codepoint-stepping outer loop's _uc_decode_utf8
+    # fallback path (returns 0xFFFD step=1 on invalid sequences). Goal:
+    # no crash, no infinite loop. Match result is irrelevant — the
+    # assertion in fuzz_one is just "search returns an int >= -1."
+    var bad = alloc(32);
+
+    # Lone continuation byte 0x80 followed by ASCII.
+    store8(bad,     128);
+    store8(bad + 1, 65);
+    store8(bad + 2, 0);
+    fuzz_one("\\p{L}", bad);
+    fuzz_one(".",      bad);
+    fuzz_one("[A-Z]",  bad);
+
+    # Truncated 2-byte sequence (0xC2 with no continuation).
+    store8(bad,     194);
+    store8(bad + 1, 0);
+    fuzz_one("\\p{L}", bad);
+    fuzz_one(".",      bad);
+
+    # Truncated 3-byte at NUL-end (0xE0 0xA0 then NUL).
+    store8(bad,     224);
+    store8(bad + 1, 160);
+    store8(bad + 2, 0);
+    fuzz_one("\\p{L}", bad);
+
+    # Invalid leading byte 0xFF + ASCII.
+    store8(bad,     255);
+    store8(bad + 1, 65);
+    store8(bad + 2, 0);
+    fuzz_one(".",     bad);
+    fuzz_one("\\p{L}", bad);
+
+    # Lone surrogate encoded as overlong 3-byte (0xED 0xA0 0x80 = U+D800).
+    store8(bad,     237);
+    store8(bad + 1, 160);
+    store8(bad + 2, 128);
+    store8(bad + 3, 0);
+    fuzz_one("\\p{L}", bad);
+
+    # Mixed valid + invalid: α (valid 2-byte) then 0xFF then 'a'.
+    store8(bad,     206);
+    store8(bad + 1, 177);
+    store8(bad + 2, 255);
+    store8(bad + 3, 97);
+    store8(bad + 4, 0);
+    fuzz_one("\\p{L}+", bad);
+    fuzz_one(".+",      bad);
 
     # === Rejection invariants =========================================
     # Every \1-\9 MUST yield BACKREF_UNSUPPORTED.

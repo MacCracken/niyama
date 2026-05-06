@@ -91,6 +91,40 @@ fn main() {
     fuzz_one(test_pat, "abc", VIM_MODE_NOMAGIC);
     fuzz_one(test_pat, "abc", VIM_MODE_VERY_NOMAGIC);
 
+    # === Invalid UTF-8 input (v0.9.0) ================================
+    # vim's matcher is codepoint-stepped (mirrors re2). Same fallback:
+    # _uc_decode_utf8 returns 0xFFFD step=1 on invalid bytes.
+    var bad = alloc(32);
+
+    store8(bad,     128);
+    store8(bad + 1, 65);
+    store8(bad + 2, 0);
+    fuzz_one("\\p{L}", bad, VIM_MODE_MAGIC);
+    fuzz_one(".",      bad, VIM_MODE_MAGIC);
+
+    store8(bad,     194);
+    store8(bad + 1, 0);
+    fuzz_one("\\p{L}", bad, VIM_MODE_MAGIC);
+
+    store8(bad,     255);
+    store8(bad + 1, 65);
+    store8(bad + 2, 0);
+    fuzz_one(".",     bad, VIM_MODE_MAGIC);
+    fuzz_one("\\p{L}", bad, VIM_MODE_MAGIC);
+
+    store8(bad,     237);
+    store8(bad + 1, 160);
+    store8(bad + 2, 128);
+    store8(bad + 3, 0);
+    fuzz_one("\\p{L}", bad, VIM_MODE_MAGIC);
+
+    store8(bad,     206);
+    store8(bad + 1, 177);
+    store8(bad + 2, 255);
+    store8(bad + 3, 97);
+    store8(bad + 4, 0);
+    fuzz_one("\\p{L}\\+", bad, VIM_MODE_MAGIC);
+
     # === Rejection invariants =========================================
     # \1-\9 always rejects.
     var bn = niyama_vim_compile("\\(a\\)\\1");

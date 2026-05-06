@@ -27,4 +27,5 @@ Decisions about niyama — what we chose, the context, and the consequences we a
 - [0006 — niyama_vim engine ABI shape and scope](0006-vim-engine-abi-and-scope.md)
 - [0007 — v0.7.0 catch-up: no-Unicode-dep slice of M4.5](0007-v070-catchup-no-unicode-dep.md)
 - [0008 — Unicode-stdlib pivot + M4.5b/c reshape](0008-unicode-stdlib-pivot-and-reshape.md)
-- [0009 — bre / vim backref `\1`-`\9`: review + exposure surface (Proposed)](0009-backref-review-and-exposure.md)
+- [0009 — bre / vim backref `\1`-`\9`: review + exposure surface](0009-backref-review-and-exposure.md)
+- [0010 — Surface freeze for v1.0](0010-surface-freeze.md)

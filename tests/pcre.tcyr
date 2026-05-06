@@ -400,6 +400,18 @@ fn main() {
     assert_eq(t_err("\\p{Greek}"), PCRE_E_BAD_PROPERTY, "long names → BAD_PROPERTY");
     assert_eq(t_err("\\p{}"),      PCRE_E_BAD_PROPERTY, "empty → BAD_PROPERTY");
 
+    # === Boundary tests (v0.9.0 — locks frozen MAX_* limits) =========
+    test_group("pcre-boundary");
+    # 10 capture groups → capture_idx > 9 cap → SYNTAX.
+    assert_eq(t_err("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)"), PCRE_E_SYNTAX,
+              "10 groups exceeds capture_idx cap");
+    # 9 capture groups → fits.
+    assert_neq(niyama_pcre_compile("(a)(b)(c)(d)(e)(f)(g)(h)(i)"), 0,
+               "9 groups compile (max valid)");
+    # 10 named groups → MAX_NAMES=9 path; capture cap fires first → SYNTAX.
+    assert_eq(t_err("(?<a>x)(?<b>x)(?<c>x)(?<d>x)(?<e>x)(?<f>x)(?<g>x)(?<h>x)(?<i>x)(?<j>x)"),
+              PCRE_E_SYNTAX, "10 named groups exceeds capture_idx cap");
+
     return assert_summary();
 }
 

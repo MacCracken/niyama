@@ -117,6 +117,46 @@ fn main() {
     fuzz_one("foo(?C)bar",           "foobar");
     fuzz_one("foo(?C42)bar",         "foobar");
 
+    # === Invalid UTF-8 input (v0.9.0) ================================
+    # pcre is byte-stepped at the matcher core (CHAR/CLASS) but the
+    # v0.8.0 additions UPROP/NUPROP/UCHAR_CI do their own UTF-8 decode
+    # per-call. Validates the inline _uc_decode_utf8 fallback path.
+    var bad = alloc(32);
+
+    store8(bad,     128);
+    store8(bad + 1, 65);
+    store8(bad + 2, 0);
+    fuzz_one("\\p{L}", bad);
+    fuzz_one("\\P{L}", bad);
+    fuzz_one("(?i)Α",  bad);
+
+    store8(bad,     194);
+    store8(bad + 1, 0);
+    fuzz_one("\\p{L}", bad);
+    fuzz_one("(?i)α",  bad);
+
+    store8(bad,     255);
+    store8(bad + 1, 65);
+    store8(bad + 2, 0);
+    fuzz_one("\\p{L}", bad);
+    fuzz_one(".",      bad);
+
+    store8(bad,     237);
+    store8(bad + 1, 160);
+    store8(bad + 2, 128);
+    store8(bad + 3, 0);
+    fuzz_one("\\p{L}", bad);
+    fuzz_one("\\P{N}", bad);
+
+    # Mixed valid + invalid: α then 0xFF then 'a'.
+    store8(bad,     206);
+    store8(bad + 1, 177);
+    store8(bad + 2, 255);
+    store8(bad + 3, 97);
+    store8(bad + 4, 0);
+    fuzz_one("\\p{L}+", bad);
+    fuzz_one("(?i)\\p{Lu}+", bad);
+
     # === Rejection invariants =========================================
 
     # v0.8.0 — lookbehind landed; variable-width body still rejected.

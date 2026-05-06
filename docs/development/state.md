@@ -5,21 +5,29 @@
 
 ## Version
 
-**0.8.0** — M4.5 completion release shipped 2026-05-05. Per ADR 0008
+**0.9.0** — M5 P(-1) hardening + surface freeze release shipped
+2026-05-05. **Last release before v1.0 fold-ready.** Per ADR 0010,
+the public `niyama_<engine>_*` API surface is locked through v1.0;
+post-fold extensions (per ADR 0009 + the v0.9.0 review remainders)
+land via cyrius stdlib once the fold gate is met. The 9-step P(-1)
+pass ran clean: no CRITICAL/HIGH security findings, no bench
+regressions (all 47 measurements within ±2.5% of v0.8.0 baseline).
+
+**v0.8.0** — M4.5 completion release shipped 2026-05-05. Per ADR 0008
 (Unicode-stdlib pivot + sub-release collapse), every remaining M4.5
-deferral lands in one bundle: `\p{L}` for re2/pcre/vim, multi-byte
-literal pattern char support, `(?i)` Unicode case-fold upgrade,
-fuzzy NFD via stdlib `str_normalize`, fuzzy exact-start recovery,
-vim → posix_classes refactor, pcre lookbehind (fixed-width), pcre
-recursion `(?R)` / `(?P>NAME)`. All five engines still shipped.
-Decision-gated v0.8.1 slot pinned for bre/vim backref.
+deferral landed: `\p{L}` for re2/pcre/vim, multi-byte literal
+pattern chars, `(?i)` Unicode case-fold upgrade, fuzzy NFD via
+stdlib `str_normalize`, fuzzy exact-start recovery, vim →
+posix_classes refactor, pcre lookbehind (fixed-width), pcre
+recursion `(?R)` / `(?P>NAME)`. v0.8.1 collapsed (no release);
+backref question moved to v0.9.0 review (resolved as ADR 0009).
 
 **v0.8.x ladder rule.** Any feature deferred *out of v0.8.0 during
 implementation* gets a pinned v0.8.x slot in `roadmap.md`, not a
 floating "post-v1.0 / vN.0 maybe" note. Pins don't force releases —
 slots that don't warrant a tag collapse to a CHANGELOG note.
-Established post-v0.7.0; prevents silent roadmap shrinkage *and*
-release-tag dust.
+Established post-v0.7.0; prevented silent roadmap shrinkage and
+release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 
 ## Toolchain
 
@@ -94,21 +102,24 @@ release-tag dust.
 ## Tests
 
 - `tests/niyama.tcyr` — scaffold smoke (2 assertions).
-- **`tests/bre.tcyr`** — 107 BRE assertions.
-- **`tests/re2.tcyr`** — 147 RE2 assertions (was 101; +37 unicode-prop,
-  +5 `(?i)` Unicode, +4 multi-byte literals).
-- **`tests/pcre.tcyr`** — 185 PCRE assertions (was 140; +21 unicode-prop,
-  +5 `(?i)` Unicode, +12 lookbehind, +12 recursion; -2 deferred-rejection
-  tests removed since features now land).
-- **`tests/fuzzy.tcyr`** — 53 fuzzy assertions (was 45; +4 NFD,
-  +4 exact-start).
-- **`tests/vim.tcyr`** — 104 vim assertions (was 88; +13 unicode-prop,
-  +3 multi-byte).
+- **`tests/bre.tcyr`** — 109 BRE assertions (v0.9.0: +2 boundary).
+- **`tests/re2.tcyr`** — 169 RE2 assertions (v0.9.0: +18 POSIX
+  classes per G2 fix, +4 boundary).
+- **`tests/pcre.tcyr`** — 188 PCRE assertions (v0.9.0: +3 boundary).
+- **`tests/fuzzy.tcyr`** — 53 fuzzy assertions.
+- **`tests/vim.tcyr`** — 106 vim assertions (v0.9.0: +2 boundary).
 - **`tests/{bre,re2,pcre,fuzzy,vim}.bcyr`** — per-engine bench harnesses.
-- **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
+- **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses
+  (v0.9.0: invalid-UTF-8 input seeds added to re2/pcre/vim).
 
-Aggregate: `cyrius test` reports **6 files, 598 assertions** all passing.
-`cyrius fuzz` reports **5 files, 1660 assertions** all passing.
+Aggregate: `cyrius test` reports **6 files, 627 assertions** all passing
+(was 598; +29 v0.9.0).
+`cyrius fuzz` reports **5 files, 1689 assertions** all passing
+(was 1660; +29 v0.9.0).
+
+Bench history captured in [`../benchmarks.md`](../benchmarks.md).
+Security audit history in [`../audit/`](../audit/).
+Architecture invariants in [`../architecture/`](../architecture/).
 
 ## Dependencies
 
@@ -130,28 +141,26 @@ Direct (declared in `cyrius.cyml`):
 
 ## Next
 
-1. **v0.8.1 — collapsed (does not release).** Backref decision
-   moved to a doc-only review (ADR 0009).
-2. **ADR 0009 — Accepted.** Asymmetric split: bre permanently
-   out (v1.0 + post-fold), vim out for v1.0 with explicit
-   post-fold-via-cyrius-stdlib revisit. re2 structurally
-   backref-free permanent. Containment design captured for the
-   post-fold vim extension if it ever lands. Was the last open
-   decision gate before M5 freeze.
-3. **v0.9.0 = M5 P(-1) hardening + closeout + surface freeze.**
-   ADR 0009 collapsed into docs (no separate review release);
-   v0.9.0 absorbs M5 directly. P(-1) shape per agnosticos
-   [example_claude.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/example_claude.md):
-   cleanliness baseline → bench baseline → internal deep
-   review → external research → security audit
-   (`docs/audit/2026-MM-DD-audit.md`) → additional tests/fuzz/
-   bench from findings → post-review benchmarks → docs audit
-   (incl. surface freeze ADR) → closeout pass (dead-code,
-   refactor, downstream check). See [`roadmap.md`](roadmap.md).
-4. **v1.0 — fold-ready release.** `dist/niyama.cyr`
-   byte-identical fold candidate. Cyrius stdlib vendors as
-   `lib/niyama.cyr` per sandhi v5.7.0 lifecycle once fold gate
-   met (≥2 long-horizon consumers).
+1. **v1.0 — fold-ready release.** `dist/niyama.cyr` is the
+   byte-identical fold candidate; the public surface is frozen
+   per ADR 0010. Remaining v1.0 work is the **remainders sweep**:
+   - LOW review findings (A1 fuzzy `_search_at` doc, C2 (?i)ß
+     semantics-lock test, C4 recursion+lookaround nesting tests,
+     C5 empty-pattern tests, F2 `docs/api/`).
+   - CLAUDE.md completeness — Cyrius Conventions, CI/Release,
+     Documentation Structure, `.gitignore`, CHANGELOG Format
+     sections from agnosticos `example_claude.md`.
+   - Fold ADR (template: sandhi ADR 0002).
+   - Final closeout (test/fuzz re-run, bench diff vs v0.9.0,
+     downstream check against cyim).
+2. **Post-fold (post-v1.0)** — Cyrius stdlib vendors
+   `lib/niyama.cyr` per the sandhi v5.7.0 lifecycle, conditional
+   on fold gate met (≥2 long-horizon consumers; cyim is #1).
+   Stdlib-side extensions per ADR 0010's post-freeze evolution
+   model: vim backref (per ADR 0009), `_search_at` for fuzzy,
+   long property names + Unicode scripts, etc. — additive only.
+3. niyama-the-repo enters maintenance mode at v1.0; future
+   v1.x patches are bug-fix only.
 3. **M5 (post-v0.9.0)** — P(-1) hardening + closeout + surface freeze.
 4. **v1.0** — fold-ready release.
 

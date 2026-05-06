@@ -1,15 +1,17 @@
 # niyama.cyr -- bundled distribution
-# Version: 0.8.0
-# Status:  v0.8.0 — M4.5 completion release. Per ADR 0008
-#                (Unicode-stdlib pivot + reshape) and ADR 0007's
-#                no-Unicode-dep slice already in v0.7.0, this release
-#                clears the rest of M4.5: \p{L} for re2/pcre/vim,
-#                multi-byte literal pattern char support, (?i) Unicode
-#                case-fold upgrade, fuzzy NFD via stdlib str_normalize,
-#                fuzzy exact-start recovery, vim → posix_classes
-#                refactor, pcre lookbehind (fixed-width), pcre
-#                recursion (?R) / (?P>NAME). All five engines still
-#                shipped; bre/vim backref decision pinned at v0.8.x.
+# Version: 0.9.0
+# Status:  v0.9.0 — M5 P(-1) hardening + surface freeze release. Per
+#                ADR 0010 the public API surface is locked through
+#                v1.0; post-fold extensions (per ADR 0009 + v0.9.0
+#                review remainders) land via cyrius stdlib once
+#                niyama folds. M4.5 complete (v0.8.0); this release
+#                adds: re2 POSIX bracket classes (G2 — fixed ADR 0007
+#                oversight), invalid-UTF-8 input fuzz coverage,
+#                MAX_* boundary tests across engines, 4 architecture
+#                notes (codepoint-stepping, save-table layout, class
+#                bitmap scope, no-shared-kernel), security audit
+#                report (no CRITICAL/HIGH findings), comprehensive
+#                bench history. v1.0 fold-ready next.
 #
 # Fold-ready single-include artifact. Following the sandhi precedent
 # (cyrius v5.7.0 vendored `dist/sandhi.cyr` byte-identical as
@@ -83,7 +85,7 @@
 #
 # Do not edit -- rebuild with: scripts/build-dist.sh (post-M1)
 
-var NIYAMA_VERSION = "0.8.0";
+var NIYAMA_VERSION = "0.9.0";
 
 # === posix bracket classes (shared) ==================================
 include "src/posix_classes.cyr"

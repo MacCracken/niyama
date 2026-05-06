@@ -224,6 +224,15 @@ fn main() {
     assert_eq(t_err("\\p{Foo}"),   VIM_E_BAD_PROPERTY, "\\p{Foo} → BAD_PROPERTY");
     assert_eq(t_err("\\p{}"),      VIM_E_BAD_PROPERTY, "empty → BAD_PROPERTY");
 
+    # === Boundary tests (v0.9.0 — locks frozen MAX_* limits) =========
+    test_group("vim-boundary");
+    # 10 capture groups (vim uses \( in magic mode) → capture_idx cap → SYNTAX.
+    assert_eq(t_err("\\(a\\)\\(b\\)\\(c\\)\\(d\\)\\(e\\)\\(f\\)\\(g\\)\\(h\\)\\(i\\)\\(j\\)"),
+              VIM_E_SYNTAX, "10 groups exceeds capture_idx cap");
+    # 9 groups → fits.
+    assert_neq(niyama_vim_compile("\\(a\\)\\(b\\)\\(c\\)\\(d\\)\\(e\\)\\(f\\)\\(g\\)\\(h\\)\\(i\\)"),
+               0, "9 groups compile (max valid)");
+
     return assert_summary();
 }
 

@@ -10,6 +10,7 @@ include "lib/string.cyr"
 include "lib/assert.cyr"
 include "lib/unicode/categories.cyr"
 include "lib/unicode/casefold.cyr"
+include "src/posix_classes.cyr"
 include "src/unicode_props.cyr"
 include "src/re2.cyr"
 
@@ -82,6 +83,29 @@ fn main() {
     assert_eq(t_match("\\D", "a"), 1, "\\D accepts letter");
     assert_eq(t_match("[a-zA-Z]+", "Hello"), 1, "ascii letter range");
     assert_eq(t_match("[^0-9]", "x"), 1, "negated digit-class");
+
+    # === POSIX bracket classes (v0.9.0 — fixes ADR 0007 oversight) ===
+    test_group("re2-posix-classes");
+    assert_eq(t_match("[[:alpha:]]+",  "Hello"),  1, "[:alpha:]+");
+    assert_eq(t_match("[[:digit:]]+",  "12345"),  1, "[:digit:]+");
+    assert_eq(t_match("[[:alnum:]]+",  "abc123"), 1, "[:alnum:]+");
+    assert_eq(t_match("[[:space:]]",   " "),      1, "[:space:] space");
+    assert_eq(t_match("[[:space:]]",   "\t"),     1, "[:space:] tab");
+    assert_eq(t_match("[[:upper:]]+",  "HELLO"),  1, "[:upper:]+");
+    assert_eq(t_match("[[:lower:]]+",  "hello"),  1, "[:lower:]+");
+    assert_eq(t_match("[[:xdigit:]]+", "deadBEEF"), 1, "[:xdigit:]+ mixed-case hex");
+    assert_eq(t_match("[[:punct:]]",   "!"),      1, "[:punct:] !");
+    assert_eq(t_match("[[:print:]]",   " "),      1, "[:print:] space");
+    assert_eq(t_match("[[:graph:]]",   "x"),      1, "[:graph:] non-space");
+    assert_eq(t_match("[[:graph:]]",   " "),      0, "[:graph:] rejects space");
+    assert_eq(t_match("[[:cntrl:]]",   "\t"),     1, "[:cntrl:] tab");
+    assert_eq(t_match("[[:blank:]]",   "\t"),     1, "[:blank:] tab");
+    assert_eq(t_match("[[:blank:]]",   " "),      1, "[:blank:] space");
+    # Negation + composition with literals.
+    assert_eq(t_match("[^[:digit:]]+", "abc"),    1, "[^[:digit:]]+");
+    assert_eq(t_match("[[:alpha:][:digit:]_]+", "var_5"), 1, "combined classes + literal");
+    # Unknown class name → SYNTAX (mirrors bre/pcre behavior).
+    assert_eq(t_err("[[:bogus:]]"), RE2_E_SYNTAX, "unknown class -> SYNTAX");
 
     # === Word boundaries =============================================
     test_group("re2-boundaries");
@@ -233,6 +257,21 @@ fn main() {
     assert_neq(nfa_d4, 0, "alt-repeat compiles");
     assert_eq(niyama_re2_match(nfa_d4, "abcdefgabcdefgabcdefgabcdefgz"), 1, "alt-repeat matches");
     assert_eq(niyama_re2_match(nfa_d4, "abcdefgabcdefgabcdefgabcdefgX"), 0, "alt-repeat no-match terminates");
+
+    # === Boundary tests (v0.9.0 — locks frozen MAX_* limits) =========
+    test_group("re2-boundary");
+    # 10 capture groups → capture_idx == 10 > 9 cap → SYNTAX.
+    assert_eq(t_err("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)"), RE2_E_SYNTAX,
+              "10 groups exceeds capture_idx cap");
+    # 9 capture groups → fits exactly (groups 1..9 valid).
+    assert_neq(niyama_re2_compile("(a)(b)(c)(d)(e)(f)(g)(h)(i)"), 0,
+               "9 groups compile (max valid)");
+    # 10 named groups → MAX_NAMES=9 → TOO_LARGE.
+    assert_eq(t_err("(?<a>x)(?<b>x)(?<c>x)(?<d>x)(?<e>x)(?<f>x)(?<g>x)(?<h>x)(?<i>x)(?<j>x)"),
+              RE2_E_SYNTAX, "10 named groups exceeds capture_idx cap before MAX_NAMES");
+    # 9 named groups → fits.
+    assert_neq(niyama_re2_compile("(?<a>x)(?<b>x)(?<c>x)(?<d>x)(?<e>x)(?<f>x)(?<g>x)(?<h>x)(?<i>x)"),
+               0, "9 named groups compile");
 
     # === Multi-byte literal pattern chars (v0.8.0 codepoint-step regression check) ===
     test_group("re2-multibyte-literals");

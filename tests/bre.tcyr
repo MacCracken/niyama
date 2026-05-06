@@ -211,6 +211,15 @@ fn main() {
     assert_eq(niyama_bre_match(nfa_d, "aaaaaaaaaaaaaaaax"), 1, "linear match");
     assert_eq(niyama_bre_match(nfa_d, "aaaaaaaaaaaaaaaay"), 0, "linear no-match");
 
+    # === Boundary tests (v0.9.0 — locks frozen MAX_* limits) =========
+    test_group("bre-boundary");
+    # 10 capture groups → capture_idx == 10 > 9 cap → SYNTAX.
+    assert_eq(t_err("\\(a\\)\\(b\\)\\(c\\)\\(d\\)\\(e\\)\\(f\\)\\(g\\)\\(h\\)\\(i\\)\\(j\\)"),
+              BRE_E_SYNTAX, "10 groups exceeds capture_idx cap");
+    # 9 groups → fits.
+    assert_neq(niyama_bre_compile("\\(a\\)\\(b\\)\\(c\\)\\(d\\)\\(e\\)\\(f\\)\\(g\\)\\(h\\)\\(i\\)"),
+               0, "9 groups compile (max valid)");
+
     return assert_summary();
 }
 

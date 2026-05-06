@@ -4,35 +4,122 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Planning (no code changes)
+## [0.9.0] — 2026-05-05
+
+M5 P(-1) hardening + surface freeze release. Last release before
+v1.0 fold-ready. Per ADR 0010, the public `niyama_<engine>_*` API
+surface is locked through v1.0; post-fold extensions land via
+cyrius stdlib once the fold gate is met.
+
+The 9-step P(-1) pass per
+[CLAUDE.md § Process](CLAUDE.md#p1-scaffold--project-hardening-before-any-new-features)
+ran clean: cleanliness baseline → bench baseline → deep review →
+PCRE2 CVE cross-check → security audit → fixes → post-review
+benchmarks → freeze ADR → closeout. **No CRITICAL/HIGH findings.**
+
+### Planning
 
 - **ADR 0009 — Accepted.** bre/vim backref review concluded as
-  **asymmetric split**:
-  - `bre` permanently out of scope for v1.0 *and* post-fold;
-    direct bre consumers wanting backref → `niyama_pcre`. ADR
-    0002 footnote updated.
-  - `vim` out of scope for v1.0; explicit post-fold revisit via
-    cyrius stdlib `lib/niyama.cyr` if the fold gate is met
-    (cyim is the load-bearing consumer that motivates leaving
-    the door open). ADR 0006 footnote updated.
-  - `re2` structurally backref-free, permanent — already enforced
-    via per-engine policy.
-  - Containment design captured in ADR 0009 for the post-fold vim
-    extension if it ever lands (vim-only, either-or matcher
-    dispatch, no shared kernel, step-limit ABI mirrors pcre).
-  - `*_E_BACKREF_UNSUPPORTED = 2` slots keep their current names
-    and meanings through v1.0.
-- **v0.9.0 collapsed into M5 P(-1) hardening.** ADR 0009 was the
-  last open decision gate before freeze; with it resolved as docs
-  only, v0.9.0 absorbs M5 directly. v0.9.0 release shape: P(-1)
-  hardening + closeout + surface freeze (per agnosticos
-  example_claude.md's P(-1) shape — cleanliness baseline → bench
-  baseline → deep review → external research → security audit →
-  additional tests → post-bench → docs audit incl. surface freeze
-  ADR → closeout pass).
-- **Engine-selection rubric** in `state.md` updated: backref now
-  explicitly routes to pcre with the ADR 0009 reference.
-  Linear-time-family vs. backtracking-family rows added.
+  asymmetric split: bre permanently out (v1.0 + post-fold), vim
+  out for v1.0 with explicit post-fold revisit via cyrius stdlib
+  `lib/niyama.cyr` if the fold gate is met. re2 structurally
+  backref-free, permanent. Containment design captured for the
+  post-fold vim extension. ADR 0002 + ADR 0006 footnotes updated.
+- **ADR 0010 — Accepted.** Surface freeze. Locks public API,
+  error-code numbering, opcode IDs, capacity limits, and semantic
+  invariants for v1.0. Post-freeze evolution model documented:
+  v1.x patch-only, post-fold via cyrius stdlib for additive
+  extensions, v2.0 hypothetical for non-additive changes.
+- **`docs/audit/2026-05-05-audit.md`** — first formal niyama
+  security audit. 8-item checklist walked per first-party-standards;
+  no CRITICAL/HIGH findings. Two MEDIUM items (boundary test
+  coverage C1, invalid-UTF-8 input fuzz coverage C3) addressed
+  in this release.
+- **`docs/development/v0.9.0-review-findings.md`** — internal
+  deep-review working doc. Findings split into v0.9.0 primaries
+  vs v1.0 remainders per user direction. Deleted at v1.0.
+- **`docs/benchmarks.md`** — first comprehensive bench history.
+  v0.8.0 baseline + v0.9.0 step-7 diff (no regressions, all
+  rows within ±2.5% noise).
+- **`docs/architecture/`** — first 4 architecture notes:
+  position-stepping asymmetry, save-table layout, class-bitmap
+  scope, no-shared-matcher-kernel.
+
+### Added
+
+- **`niyama_re2`** — POSIX bracket classes `[[:alpha:]]`,
+  `[[:digit:]]`, `[[:alnum:]]`, `[[:space:]]`, `[[:upper:]]`,
+  `[[:lower:]]`, `[[:xdigit:]]`, `[[:punct:]]`, `[[:print:]]`,
+  `[[:graph:]]`, `[[:cntrl:]]`, `[[:blank:]]`. **Fixes ADR 0007
+  oversight** — bre/pcre/vim got POSIX classes in v0.7.0 / v0.8.0;
+  re2 was missed. v0.9.0 closes the gap by hooking
+  `_re2_parse_class` into the shared `src/posix_classes.cyr`
+  module. ~10 lines of new parser code; no new opcode
+  (re-uses existing `RE2_OP_CLASS`).
+- **Boundary tests per regex engine** — bre / re2 / pcre / vim
+  test groups verifying `MAX_*` limits error cleanly. Locks the
+  freeze contract.
+- **Invalid-UTF-8 input fuzz seeds** — re2 / pcre / vim fuzz
+  harnesses gain explicit malformed-UTF-8 input cases (lone
+  continuation byte, truncated 2/3/4-byte sequences, invalid
+  leading byte, lone surrogate, mixed valid+invalid). Validates
+  the codepoint-stepping outer loop's `_uc_decode_utf8` fallback
+  handles invalid bytes without crashing or looping.
+
+### Tests / fuzz
+
+- `tests/bre.tcyr` — **109** (was 107; +2 boundary).
+- `tests/re2.tcyr` — **169** (was 147; +18 POSIX classes,
+  +4 boundary).
+- `tests/pcre.tcyr` — **188** (was 185; +3 boundary).
+- `tests/fuzzy.tcyr` — **53** (unchanged).
+- `tests/vim.tcyr` — **106** (was 104; +2 boundary).
+- `tests/niyama.tcyr` — **2** (unchanged).
+- Aggregate: **6 files, 627 assertions, all passing** (was 598,
+  +29).
+- Fuzz: `bre 215` / `fuzzy 757` / `re2 241` (+11) / `pcre 250`
+  (+11) / `vim 226` (+7). Aggregate: **5 files, 1689 assertions,
+  all passing** (was 1660, +29).
+
+### Bench (regression check)
+
+All 47 measurements within **±2.5%** of v0.8.0 baseline. No
+regressions. Detail in `docs/benchmarks.md`.
+
+The B4 review finding (pcre in-loop saves alloc) showed no
+measurable impact at the v0.8.0 bench corpus; deferred to
+post-fold per the gating decision.
+
+### Frozen at v1.0 surface (per ADR 0010)
+
+- All `niyama_<engine>_*` public APIs.
+- All `<ENGINE>_E_*` error code numeric values (incl.
+  reserved-but-unused slots: `PCRE_E_LOOKBEHIND_UNSUPPORTED`,
+  `PCRE_E_RECURSION_UNSUPPORTED`, `PCRE_E_CONDITIONAL_UNSUPPORTED`).
+- All capacity limits (`MAX_INSTRS = 4096`, `MAX_CLASSES = 64`,
+  `MAX_SAVES = 20`, `MAX_NAMES = 9`, `FUZZY_MAX_PAT_LEN = 256`,
+  etc.).
+- Semantic invariants: re2/bre/vim no-backref, pcre as the only
+  backtracking engine, Pike NFA linear-time guarantees, fuzzy
+  byte-Levenshtein.
+- Opcode IDs per engine (internal but encoded in `dist/niyama.cyr`
+  artifact).
+
+### Deferred to v1.0
+
+Per the v0.9.0 review's primaries-vs-remainders split:
+
+- **A1** — fuzzy `_search_at` ABI gap (post-fold candidate per
+  ADR 0010).
+- **C2** — `(?i)ß` ASCII-only-fold semantics-lock test.
+- **C4** — recursion + lookaround nesting tests (correctness
+  verified by inspection in audit; tests come at v1.0).
+- **C5** — empty-pattern tests across engines.
+- **F2** — public API listing → `docs/api/`.
+- **CLAUDE.md** completeness — Cyrius Conventions, CI/Release,
+  Documentation Structure, `.gitignore`, CHANGELOG Format
+  sections from agnosticos `example_claude.md` template.
+- **Fold ADR** itself (template: sandhi ADR 0002).
 
 ## [0.8.0] — 2026-05-05
 
