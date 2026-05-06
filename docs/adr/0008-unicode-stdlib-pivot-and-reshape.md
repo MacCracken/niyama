@@ -101,18 +101,37 @@ A small `src/unicode_props.cyr` (parser helper for `\p{...}` syntax,
 not a data table) lands in v0.8.0 instead — orders of magnitude
 smaller than the planned 25 KB.
 
-### v0.8.1 (M4.5b.1) — bre / vim backref (decision-gated)
+### v0.8.1 (M4.5b.1) — collapsed at v0.8.0 ship time
 
-Pinned per the v0.8.x ladder rule. **Only ships as a tagged release
-if the user decides "yes" on the bre/vim backref question** (the
-M1 / M4 "potentially post-v1.0; document, don't skip" call).
-Otherwise the slot collapses to a `[Unreleased]` CHANGELOG note —
-"bre/vim backref: permanently out of scope for v1.0; revisit
-post-fold" — with no version tag.
+Originally pinned as the decision-gated slot for bre/vim backref.
+At v0.8.0 ship the user direction landed: **slot collapses (no
+release); review pin moves to v0.9.0 with broader scope.** The
+ladder rule's "pinning ≠ shipping" branch fired exactly as intended;
+no v0.8.1 tag exists.
 
-The slot exists so "what happened to bre/vim backref?" has an
-answer in the roadmap, not just an answer in chat history. The pin
-is about *visibility*, not commitment to ship a release.
+### v0.9.0 — bre / vim backref review (decision + exposure)
+
+Pinned for a fuller review pass than v0.8.1 contemplated. Question
+isn't just "implement yes/no" — it's the **exposure surface**: ABI
+shape (kernel vs. per-engine), error-code reuse vs. new slots
+(BRE_E_BACKREF_UNSUPPORTED = 2 and VIM_E_BACKREF_UNSUPPORTED = 2
+already burn the obvious slots), re2's no-backref linear-time
+guarantee preservation strategy, and consumer-side impact (cyim,
+owl, agnoshi, daimon).
+
+Three outcome paths:
+
+- **Implement at v0.9.0** with documented exposure (new ADR records
+  the kernel/policy split + the consumer-facing API).
+- **Document permanently out-of-scope for v1.0** with a fold-time
+  ADR explaining why.
+- **Further-defer** with refined scope (slot moves to v0.9.x or
+  post-fold).
+
+The review itself is the v0.9.0 deliverable; whether code lands
+depends on what the review concludes. Pin exists so "what happened
+to bre/vim backref?" has a roadmap answer — visibility, not
+commitment to ship.
 
 ### v0.8.x ladder rule (companion policy)
 

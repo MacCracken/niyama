@@ -113,12 +113,16 @@ parser module that wires `\p{NAME}` syntax onto the stdlib lookups.
   was the v0.9.0-was cleanup, pulled forward into v0.8.0 since
   ADR 0008 collapsed the M4.5 sub-releases.
 
-### Deferred (pinned per v0.8.x ladder)
+### Deferred
 
-- **bre / vim backref `\1`-`\9`** — decision-gated v0.8.1 slot,
-  surfaced at v0.8.0 ship per the M1 / M4 "potentially post-v1.0;
-  document, don't skip" call. v0.8.1 only releases if the user
-  decides "yes"; otherwise collapses to a CHANGELOG note.
+- **bre / vim backref `\1`-`\9`** — surfaced at v0.8.0 ship per the
+  M1 / M4 "potentially post-v1.0; document, don't skip" call. User
+  direction: **v0.8.1 slot collapses (no release); review pin moves
+  to v0.9.0 with broader scope** — not just "implement yes/no" but
+  the exposure surface (ABI shape, kernel vs. per-engine policy,
+  error-code reuse, re2 guarantee preservation, consumer impact).
+  v0.9.0 deliverable is the review itself; whether code lands
+  depends on what it concludes.
 
 ### Tests / fuzz
 

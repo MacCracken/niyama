@@ -322,28 +322,48 @@ Sized comparably to v0.7.0's eight-feature carve.
   **deferred to v0.8.1** per the ladder rule (decision-gated; see
   below).
 
-#### M4.5b.1 — v0.8.1 (decision-gated) — bre / vim backref `\1`-`\9`
+#### M4.5b.1 — v0.8.1 (collapsed, not shipping)
 
-Pinned per the v0.8.x ladder rule. **Only ships as a release if the
-user decides "yes" on backref.** Otherwise this slot collapses to
-a single CHANGELOG note without a tag.
+Originally pinned as the decision-gated slot for bre/vim backref.
+Decision taken post-v0.8.0: **slot collapses; review pin moves to
+v0.9.0 with broader scope.** No v0.8.1 tag, no release. The ladder
+rule's "pinning ≠ shipping" branch fired exactly as intended.
 
-- **If user says "yes, implement":** v0.8.1 ships backref support
-  for `niyama_bre` (clearing the last ADR 0002 deferral) and
-  `niyama_vim` (clearing the M4 / ADR 0006 deferral). The Pike NFA
-  shared kernel grows a backref opcode and matcher extension; re2's
-  no-backref guarantee is preserved by per-engine policy, not
-  kernel.
-- **If user says "no, keep deferred":** v0.8.1 doesn't release.
-  CHANGELOG `[Unreleased]` records "bre/vim backref: permanently
-  out of scope for v1.0; revisit post-fold." Engines ship unchanged.
-- **If user wants more time:** the decision stays pinned at v0.8.1
-  rather than becoming a floating "potentially post-v1.0" note.
+#### v0.9.0 — bre / vim backref review (decision + exposure)
 
-The slot exists so "what happened to bre/vim backref?" has an
-answer in the roadmap, not just in chat history.
+Pinned for a fuller review pass than v0.8.1 contemplated. The
+question now isn't just "implement or not" but the **exposure
+surface**:
 
-**Cross-engine concerns (apply to v0.8.0 + any future v0.8.x):**
+- ABI shape — new opcode in the Pike NFA shared kernel, vs.
+  per-engine duplication; new error codes (or success-path reuse
+  of the rejection slots `BRE_E_BACKREF_UNSUPPORTED = 2` and
+  `VIM_E_BACKREF_UNSUPPORTED = 2`); behavior under match-time
+  capture-not-yet-set conditions.
+- re2's no-backref linear-time guarantee — preserve by per-engine
+  policy (re2 keeps rejecting), or refactor the kernel so the
+  guarantee is structural? cyim ADR 0002 hint: per-engine policy
+  is fine if the kernel exposes a "supports backref" capability
+  flag.
+- Consumer impact — what does cyim, owl, agnoshi, daimon code
+  look like once backref is available in bre/vim? Does the
+  flavor-selection rubric in `state.md`'s engine-selection table
+  shift?
+
+Three outcomes possible:
+
+- **Implement at v0.9.0** with documented surface (new ADR
+  records the kernel/policy split + the consumer-facing API).
+- **Document permanently out-of-scope for v1.0** with a fold-time
+  ADR explaining why (e.g. "post-fold via cyrius stdlib once
+  niyama vendors").
+- **Further-defer** with refined scope (slot moves to v0.9.x or
+  post-fold).
+
+The review itself is the v0.9.0 deliverable; whether code lands
+depends on what the review concludes.
+
+**Cross-engine concerns (apply to v0.8.0 + any future v0.x):**
 
 - All per-engine ABI extensions (named-capture lookup for re2, flag
   setters, NFD flag, etc.) preserve frozen numeric error code values
@@ -351,17 +371,19 @@ answer in the roadmap, not just in chat history.
   next-available slot per engine.
 - Reserved-but-unused error code slots (e.g.
   `PCRE_E_CONDITIONAL_UNSUPPORTED = 5` after v0.7.0 implements
-  conditionals) are kept for ABI stability.
+  conditionals; `PCRE_E_LOOKBEHIND_UNSUPPORTED = 2` and
+  `PCRE_E_RECURSION_UNSUPPORTED = 4` after v0.8.0) are kept for
+  ABI stability.
 - New tests/fuzz/bench harnesses ship alongside each feature.
 - **v0.8.x ladder.** Any feature that slips out of v0.8.0 during
   implementation gets a v0.8.x pin here with a one-line scope note,
-  not a floating deferral. Currently pinned: v0.8.1 (bre/vim backref
-  decision). New slots appended in numeric order as needed.
+  not a floating deferral. v0.8.1 collapsed (review-pin moved to
+  v0.9.0). New slots appended in numeric order if/when needed.
 - **Don't fragment.** Pinning a deferral isn't a commitment to ship
   a release for it — slots collapse cleanly when the work doesn't
-  warrant a tag.
+  warrant a tag (the v0.8.1 collapse demonstrates this).
 
-### M5 — P(-1) hardening + closeout (post-v0.8.x → freeze)
+### M5 — P(-1) hardening + closeout (post-v0.9.0 → freeze)
 
 **Why before fold.** Per first-party-standards § Security Hardening
 (required before every release) plus the cyim-style closeout pass

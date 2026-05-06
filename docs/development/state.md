@@ -126,22 +126,16 @@ Direct (declared in `cyrius.cyml`):
 
 ## Next
 
-Sequencing through to v1.0 (per ADR 0008's post-stdlib-unicode reshape
-+ the no-fragmentation collapse):
-
-1. **v0.8.0 — M4.5 completion release** — pcre lookbehind
-   `(?<=)`/`(?<!)` (fixed-width), pcre recursion `(?R)`/`(?P>name)`,
-   fuzzy exact-start recovery, `\p{L}` Unicode property classes for
-   re2/pcre/vim (stdlib `unicode_category`), `(?i)` Unicode
-   case-fold upgrade for re2/pcre (stdlib `unicode_fold`), fuzzy
-   `FUZZY_FLAG_UNICODE_NFD` (stdlib `str_normalize`), vim →
-   `src/posix_classes.cyr` refactor. **Surface bre/vim backref
-   decision at ship time** — that question lands separately.
-2. **v0.8.1 — bre/vim backref (decision-gated)** — pinned slot.
-   Only releases if user decides "yes"; collapses to a CHANGELOG
-   note if "no". Either way, "what happened to backref?" has a
-   roadmap answer.
-3. **M5 (post-v0.8.x)** — P(-1) hardening + closeout + surface freeze.
+1. **v0.8.1 — collapsed (does not release).** v0.8.0 ship-time
+   decision: backref question moves to v0.9.0 with a broader
+   review scope. Ladder rule's "pinning ≠ shipping" branch fired.
+2. **v0.9.0 — bre/vim backref review** (decision + exposure
+   surface). Not "implement yes/no" — a fuller pass: ABI shape,
+   kernel vs. per-engine policy split, error-code reuse vs. new
+   slots, re2's no-backref guarantee preservation, consumer
+   impact. Outcome path: implement-with-ADR / out-of-scope-for-v1.0
+   / further-defer-with-refined-scope.
+3. **M5 (post-v0.9.0)** — P(-1) hardening + closeout + surface freeze.
 4. **v1.0** — fold-ready release.
 
 See [`roadmap.md`](roadmap.md) for the full plan.
