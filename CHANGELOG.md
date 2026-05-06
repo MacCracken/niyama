@@ -4,6 +4,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-05-06
+
+**Fold-trigger release + bundled-dist correction.**
+
+The v1.0.0 ship had a defect: `dist/niyama.cyr` was the
+108-line `include`-manifest scaffold (header said "Do not edit
+-- rebuild with: scripts/build-dist.sh (post-M1)" but the
+build-dist.sh never landed). Vendoring that file as
+`lib/niyama.cyr` would dangle on `include "src/posix_classes.cyr"`
+from the consumer's lib/ path. v1.0.1 fixes the dist via
+`cyrius distlib` — the canonical Cyrius bundling tool — yielding
+a proper inlined 6,664-line single-file artifact.
+
+### Fixed
+
+- **Bundled dist** (`dist/niyama.cyr`): regenerated via
+  `cyrius distlib` against new `[lib] modules = [...]` block
+  in `cyrius.cyml`. Inlines all 7 modules (posix_classes,
+  unicode_props, bre, re2, pcre, fuzzy, vim) into a single
+  artifact ready for byte-identical fold-in. v1.0.0's manifest
+  variant retired; sandhi/sakshi/patra/sigil precedent now
+  honored.
+
+### Planning
+
+- **ADR 0011 — Triggered.** Fold trigger fires at cyrius v5.9.0
+  ship. AGNOS-lineage consumer gate met by:
+  1. cyim (consumer #1, active).
+  2. AGNOS bare-metal kernel (consumer #2, queued for
+     cyrius v5.10.0; long-horizon-confirmed pin).
+  Cyrius v5.9.0 vendors `lib/niyama.cyr` byte-identical from
+  this release. niyama-the-repo enters fold-maintenance mode:
+  v1.x patches still land here, propagate via cyrius update;
+  post-fold extensions land in cyrius stdlib's vendored copy.
+
 ## [1.0.0] — 2026-05-05
 
 **Fold-ready release.** Public surface locked per ADR 0010.

@@ -1,7 +1,7 @@
 # 0011 — Fold readiness and post-v1.0 fold trigger
 
-**Status**: Accepted
-**Date**: 2026-05-05
+**Status**: Triggered: 2026-05-06 via cyrius v5.9.0
+**Date**: 2026-05-05 (Accepted) / 2026-05-06 (Triggered)
 
 ## Context
 
@@ -64,6 +64,29 @@ fires. niyama-the-repo enters maintenance mode at v1.0; v1.x
 patches are bug-fix only.
 
 ### 4 — Fold ADR: ✓ THIS DOCUMENT
+
+## Triggered consequences (2026-05-06)
+
+The fold trigger fired at cyrius v5.9.0 ship. AGNOS-lineage
+consumer gate met by:
+
+1. **cyim** (consumer #1, active — v1.2.0+ has `--regex=<flavor>`
+   threaded for all five niyama flavors).
+2. **AGNOS bare-metal kernel** (consumer #2 — long-horizon
+   confirmed pin queued for cyrius v5.10.0 bare-metal target).
+
+Cyrius v5.9.0 vendored `dist/niyama.cyr` (from this repo's
+v1.0.1 tag) byte-identical as `lib/niyama.cyr`. niyama-the-repo
+enters fold-maintenance mode: v1.x patches still land here and
+propagate via cyrius update; post-fold extensions land in
+cyrius stdlib's vendored copy per the original ADR plan.
+
+The v1.0.0 ship had a defect — `dist/niyama.cyr` was the
+108-line `include`-manifest scaffold, not a true bundled
+artifact. v1.0.1 corrected this by wiring `[lib] modules = [...]`
+in `cyrius.cyml` and regenerating via `cyrius distlib` (the
+canonical bundling tool). The fold operation vendored from
+v1.0.1, not v1.0.0.
 
 ## Decision
 

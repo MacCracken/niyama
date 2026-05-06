@@ -1,6 +1,6 @@
 [package]
 name = "niyama"
-version = "1.0.0"
+version = "1.0.1"
 description = "niyama — additional regex engines (bre, re2, pcre, fuzzy, vim) for the AGNOS-lineage Cyrius ecosystem; foldable into stdlib per sandhi pattern"
 license = "GPL-3.0-only"
 language = "cyrius"
@@ -13,4 +13,19 @@ output = "niyama"
 
 [deps]
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "unicode"]
+
+# `[lib]` drives `cyrius distlib` — concatenates the listed modules
+# into `dist/niyama.cyr` for downstream consumers. Single-pass
+# compiler: each module may only reference symbols defined earlier.
+# Order: shared (posix_classes / unicode_props) → engines.
+[lib]
+modules = [
+    "src/posix_classes.cyr",
+    "src/unicode_props.cyr",
+    "src/bre.cyr",
+    "src/re2.cyr",
+    "src/pcre.cyr",
+    "src/fuzzy.cyr",
+    "src/vim.cyr",
+]
 ---

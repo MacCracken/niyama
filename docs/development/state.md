@@ -5,6 +5,15 @@
 
 ## Version
 
+**1.0.1** — fold-trigger release shipped 2026-05-06. ADR 0011
+**triggered**: cyrius v5.9.0 vendored `dist/niyama.cyr` from this
+tag byte-identical as `lib/niyama.cyr`. v1.0.1 also corrected the
+v1.0.0 dist defect (the manifest-scaffold `include` shape) by
+wiring `[lib] modules = [...]` in `cyrius.cyml` and regenerating
+via `cyrius distlib`. niyama-the-repo enters fold-maintenance:
+v1.x patches still land here, propagate via cyrius update;
+post-fold extensions land in cyrius stdlib's vendored copy.
+
 **1.0.0** — fold-ready release shipped 2026-05-05. Public surface
 locked per ADR 0010 + ADR 0011. niyama-the-repo enters maintenance
 mode; v1.x patches are bug-fix only. Post-fold extensions land in
