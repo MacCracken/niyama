@@ -3,6 +3,13 @@
 **Status**: Accepted
 **Date**: 2026-05-03
 
+> **Update 2026-05-05** — the M1 "potentially post-v1.0" deferral
+> on `\1`-`\9` backref is **resolved by ADR 0009**: bre stays
+> permanently backref-rejecting for v1.0 *and* post-fold. Direct
+> bre consumers wanting backref → `niyama_pcre` with the equivalent
+> pattern. `BRE_E_BACKREF_UNSUPPORTED = 2` keeps its current name
+> and meaning.
+
 ## Context
 
 M1 ships niyama's first engine: POSIX BRE (Basic Regular Expressions —

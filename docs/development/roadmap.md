@@ -329,39 +329,25 @@ Decision taken post-v0.8.0: **slot collapses; review pin moves to
 v0.9.0 with broader scope.** No v0.8.1 tag, no release. The ladder
 rule's "pinning ≠ shipping" branch fired exactly as intended.
 
-#### v0.9.0 — bre / vim backref review (decision + exposure)
+#### M4.5b.2 — backref review landed as ADR 0009
 
-Pinned for a fuller review pass than v0.8.1 contemplated. The
-question now isn't just "implement or not" but the **exposure
-surface**:
+The v0.9.0 backref review concluded as **ADR 0009 (Accepted)** —
+asymmetric split:
 
-- ABI shape — new opcode in the Pike NFA shared kernel, vs.
-  per-engine duplication; new error codes (or success-path reuse
-  of the rejection slots `BRE_E_BACKREF_UNSUPPORTED = 2` and
-  `VIM_E_BACKREF_UNSUPPORTED = 2`); behavior under match-time
-  capture-not-yet-set conditions.
-- re2's no-backref linear-time guarantee — preserve by per-engine
-  policy (re2 keeps rejecting), or refactor the kernel so the
-  guarantee is structural? cyim ADR 0002 hint: per-engine policy
-  is fine if the kernel exposes a "supports backref" capability
-  flag.
-- Consumer impact — what does cyim, owl, agnoshi, daimon code
-  look like once backref is available in bre/vim? Does the
-  flavor-selection rubric in `state.md`'s engine-selection table
-  shift?
+- **bre** permanently out-of-scope for v1.0 *and* post-fold. ADR
+  0002 footnote updated.
+- **vim** out-of-scope for v1.0; explicit post-fold revisit via
+  cyrius stdlib `lib/niyama.cyr` if the fold gate is met. ADR
+  0006 footnote updated. Containment design (vim-only,
+  either-or matcher dispatch, no shared kernel, step-limit ABI
+  mirrors pcre) baked into ADR 0009.
+- **re2** structurally backref-free, permanent, per ADR 0003.
 
-Three outcomes possible:
-
-- **Implement at v0.9.0** with documented surface (new ADR
-  records the kernel/policy split + the consumer-facing API).
-- **Document permanently out-of-scope for v1.0** with a fold-time
-  ADR explaining why (e.g. "post-fold via cyrius stdlib once
-  niyama vendors").
-- **Further-defer** with refined scope (slot moves to v0.9.x or
-  post-fold).
-
-The review itself is the v0.9.0 deliverable; whether code lands
-depends on what the review concludes.
+ADR 0009 was the last open decision gate before M5 freeze.
+Accordingly: **v0.9.0 absorbs M5** (see below) — there is no
+separate "v0.9.0 backref review release" tag; the ADR landed as
+docs and the release sequencing folds the hardening pass into
+v0.9.0 directly.
 
 **Cross-engine concerns (apply to v0.8.0 + any future v0.x):**
 
@@ -377,26 +363,64 @@ depends on what the review concludes.
 - New tests/fuzz/bench harnesses ship alongside each feature.
 - **v0.8.x ladder.** Any feature that slips out of v0.8.0 during
   implementation gets a v0.8.x pin here with a one-line scope note,
-  not a floating deferral. v0.8.1 collapsed (review-pin moved to
-  v0.9.0). New slots appended in numeric order if/when needed.
+  not a floating deferral. v0.8.1 collapsed (no release); ADR 0009
+  resolved as docs only.
 - **Don't fragment.** Pinning a deferral isn't a commitment to ship
   a release for it — slots collapse cleanly when the work doesn't
-  warrant a tag (the v0.8.1 collapse demonstrates this).
+  warrant a tag (v0.8.1 + ADR 0009's no-tag landing both demonstrate
+  this).
 
-### M5 — P(-1) hardening + closeout (post-v0.9.0 → freeze)
+### M5 / v0.9.0 — P(-1) hardening + closeout + surface freeze
 
-**Why before fold.** Per first-party-standards § Security Hardening
-(required before every release) plus the cyim-style closeout pass
-(refactor / cleanup / dead-code audit / surface freeze):
+**Why this is one release.** ADR 0009 was the last open decision
+gate before freeze. With it resolved, M5 hardening absorbs the
+v0.9.0 slot directly — no need for a separate "post-decision"
+release. M5 = v0.9.0; v1.0 is the fold-ready follow-up.
 
-- Full audit pass per first-party-standards (input validation, buffer
-  safety, syscall review, pointer validation, no command injection,
-  no path traversal, known-CVE review).
-- Cross-engine refactor — consolidate any parallel codepaths that
-  accreted across M1–M4.
-- Dead-code audit; record floor in CHANGELOG.
-- Surface freeze ADR (template: sandhi ADR 0005).
-- Comprehensive bench history captured.
+The hardening pass follows the P(-1) shape from agnosticos
+[example_claude.md § P(-1)](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/example_claude.md):
+
+1. **Cleanliness baseline** — `cyrius build`, `cyrius lint`,
+   `cyrius audit`; all 598 tests + 1660 fuzz assertions pass on
+   the v0.8.0 starting line.
+2. **Benchmark baseline** — `cyrius bench` across all five engine
+   harnesses; CSV recorded for regression detection through M5
+   and into v1.0.
+3. **Internal deep review** — gaps, optimizations, correctness,
+   edge cases, ABI consistency across engines. Cross-engine
+   parallel codepaths flagged for consolidation.
+4. **External research** — domain completeness check (PCRE2
+   feature coverage, vim flavor coverage, RE2 spec coverage),
+   best-practices review, existing CVE patterns in regex engines
+   (PCRE2 has a rich CVE corpus; cross-check niyama_pcre).
+5. **Security audit** — per first-party-standards § Security
+   Hardening: input validation, buffer safety, syscall review,
+   pointer validation, command-injection check, path-traversal
+   check, known-CVE review. Findings file:
+   `docs/audit/2026-MM-DD-audit.md`.
+6. **Additional tests / fuzz / benchmarks** from findings.
+7. **Post-review benchmarks** — prove wins (or document neutral
+   refactors) against step-2 baseline.
+8. **Documentation audit** — ADRs for any hardening decisions,
+   source citations, guides for public API surface, surface
+   freeze ADR (template: sandhi ADR 0005).
+9. **Closeout pass** — dead-code audit (record floor in
+   CHANGELOG), refactor pass for parallel codepaths, code review
+   pass, cleanup sweep, downstream check (cyim builds against
+   v0.9.0).
+10. **Repeat if heavy** — keep drilling until the surface is
+    auditable and stable.
+
+**Deliverables for v0.9.0 release:**
+
+- `docs/audit/2026-MM-DD-audit.md` — security audit report.
+- `docs/benchmarks.md` — comprehensive bench history (currently
+  scattered in CHANGELOG).
+- Surface freeze ADR (numbered next available — likely 0010).
+- CHANGELOG `[0.9.0]` section recording hardening findings,
+  refactors landed, and the surface-freeze commitment.
+- `dist/niyama.cyr` byte-identical to what cyrius stdlib will
+  vendor at v1.0.
 
 ### v1.0 — Fold-ready release
 

@@ -94,10 +94,145 @@ cyrius test                          # run [build].test + tests/*.tcyr
 
 ## Process
 
-1. **Work phase** — features, roadmap items, bug fixes
-2. **Build check** — `cyrius build`
-3. **Test + benchmark additions** for new code
-4. **Internal review** — performance, memory, correctness, edge cases
-5. **Documentation** — update CHANGELOG, `docs/development/state.md`, any ADR the change earned
-6. **Version sync** — `VERSION`, `cyrius.cyml`, CHANGELOG header
+Process structure follows the AGNOS-lineage convention from
+[example_claude.md § Process](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/example_claude.md#process)
+with niyama-specific notes (per-engine bench harnesses, PCRE2 CVE
+corpus as the highest-risk surface, cyim as consumer #1).
+
+### P(-1): Scaffold / Project Hardening (before any new features)
+
+niyama runs P(-1) before each major-band closeout. **v0.9.0 IS the
+P(-1) for v1.0 fold-ready freeze** — see roadmap.md §
+"M5 / v0.9.0 — P(-1) hardening + closeout + surface freeze".
+
+1. **Cleanliness baseline** — `cyrius build`, `cyrius lint`,
+   `cyrius audit`; all `tests/*.tcyr` pass, all `fuzz/*.fcyr`
+   pass.
+2. **Benchmark baseline** — `cyrius bench tests/<engine>.bcyr`
+   for each of the 5 per-engine harnesses (`bre`, `re2`, `pcre`,
+   `fuzzy`, `vim`); CSV recorded for regression detection through
+   the rest of the hardening pass and into v1.0.
+3. **Internal deep review** — gaps, optimizations, correctness,
+   edge cases, ABI consistency across engines, parallel-codepath
+   identification (matcher loops, opcode-emission helpers,
+   codepoint-decode duplication accreted across v0.7.0/v0.8.0).
+4. **External research** — domain completeness check (PCRE2
+   feature coverage, vim flavor coverage, RE2 spec coverage),
+   best-practices review, **PCRE2 CVE corpus cross-check**
+   against `niyama_pcre` — backtracker, step-limit guard,
+   recursion handling, lookbehind/UCHAR_CI additions.
+5. **Security audit** — per first-party-standards § Security
+   Hardening (see below). File findings in
+   `docs/audit/YYYY-MM-DD-audit.md`.
+6. **Additional tests / fuzz / benchmarks** from findings.
+7. **Post-review benchmarks** — prove wins (or document neutral
+   refactors) against step-2 baseline.
+8. **Documentation audit** — ADRs for hardening decisions,
+   public API guides, surface freeze ADR (template: sandhi
+   ADR 0005). Roll deferred CLAUDE.md sections (Cyrius
+   Conventions, CI/Release, Documentation Structure, .gitignore,
+   CHANGELOG Format) into this step at v1.0 closeout.
+9. **Repeat if heavy** — keep drilling until clean.
+
+### Work Loop (continuous)
+
+1. **Work phase** — features, roadmap items, bug fixes.
+2. **Build check** — `cyrius build`.
+3. **Test + fuzz + bench additions** for new code; existing
+   harnesses must pass.
+4. **Internal review** — performance, memory, correctness,
+   edge cases, per-engine ABI shape preserved.
+5. **Documentation** — CHANGELOG, `docs/development/state.md`,
+   any ADR the change earned.
+6. **Version sync** — `VERSION`, `cyrius.cyml`,
+   CHANGELOG header.
+
+### Security Hardening (before every release)
+
+Per [first-party-standards § Security Hardening](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-standards.md#security-hardening-new--required-before-every-release).
+Minimum:
+
+1. **Input validation** — every public `niyama_<engine>_compile()`
+   / `_match()` / `_search()` validates pattern + input bounds.
+2. **Buffer safety** — every `var buf[N]` audited; opcode-encoded
+   instruction buffers, class bitmaps, name tables, save arrays,
+   step counters all sized correctly. N is **bytes**, not entries.
+3. **Syscall review** — niyama's syscall surface is small (alloc,
+   load/store via stdlib); each one validated.
+4. **Pointer validation** — every `load8` / `load64` / `store8`
+   / `store64` against pattern or input pointers has an upstream
+   bounds check.
+5. **No command injection** — N/A; niyama doesn't shell out.
+6. **No path traversal** — N/A; niyama doesn't touch the
+   filesystem.
+7. **Known-CVE review** — **PCRE2 CVE corpus is the highest-risk
+   surface.** Cross-check `niyama_pcre`'s backtracker, step-limit
+   guard, recursion handling, and the v0.8.0 additions
+   (lookbehind, recursion, UCHAR_CI) against known PCRE2 issue
+   patterns.
+8. **Document findings** — `docs/audit/YYYY-MM-DD-audit.md`.
+
+Severity levels: **CRITICAL** (remote / privilege escalation —
+e.g. heap overflow via crafted pattern), **HIGH** (moderate effort
+— e.g. unbounded backtracking that escapes the step limit),
+**MEDIUM** (specific conditions — e.g. UTF-8 decode at unaligned
+position with adjacent buffer leak), **LOW** (defense in depth).
+
+### Closeout Pass (before every minor/major bump)
+
+Run before tagging X.Y.0 or X.0.0. Ship as the last patch of the
+current minor (e.g. 0.8.5 before 0.9.0). For niyama right now,
+**v0.9.0 is the closeout for v1.0**.
+
+1. **Full test suite** — all `tests/*.tcyr` pass, zero failures.
+   `cyrius fuzz` passes too.
+2. **Benchmark baseline** — `cyrius bench tests/*.bcyr`; CSV
+   compared against the prior closeout (v0.7.0 → v0.8.0 → v0.9.0).
+3. **Dead code audit** — remove unused functions; record floor
+   in CHANGELOG.
+4. **Refactor pass** — consolidate parallel codepaths from the
+   minor's additions. v0.8.0 carved 7 features across 5 engines
+   and added a codepoint-stepped matcher loop in re2 + vim;
+   look for accreted matcher patterns + opcode-emission helpers
+   + UTF-8 decode duplication that should fold.
+5. **Code review pass** — walk diffs end-to-end for missed
+   guards, ABI leaks, off-by-ones, silently-ignored errors.
+6. **Cleanup sweep** — stale comments, dead branches, unused
+   includes, orphaned helpers.
+7. **Security re-scan** — quick grep for new unchecked writes,
+   buffer size mismatches, unsanitized input paths.
+8. **Downstream check** — cyim builds + tests against the new
+   niyama version (cyim is consumer #1 per state.md). When a
+   second long-horizon consumer materializes (owl / agnoshi /
+   daimon), the list grows.
+9. **Doc sync** — CHANGELOG, roadmap, `docs/development/state.md`,
+   CLAUDE.md (if durable content changed).
+10. **Version verify** — `VERSION`, `cyrius.cyml`, CHANGELOG
+    header, intended git tag all match.
+11. **Full build from clean** —
+    `rm -rf build && cyrius deps && CYRIUS_DCE=1 cyrius build`
+    passes clean.
+
+### Task Sizing
+
+- **Low/Medium effort**: batch freely — multiple items per work
+  loop cycle. v0.7.0 batched 8 features; v0.8.0 batched 7.
+- **Large effort**: small bites only — break into sub-tasks,
+  verify each before moving on. The v0.8.0
+  `\p{L}` → multi-byte literals → `(?i)` Unicode → fuzzy NFD
+  chain ran this way; each step's tests went green before the
+  next started.
+- **If unsure**: treat as large.
+
+### Refactoring Policy
+
+- Refactor when the code tells you to — duplication, unclear
+  boundaries, measured bottlenecks. The v0.8.0 vim →
+  posix_classes refactor followed this; duplication was visible
+  and the test suite covered the move.
+- Never refactor speculatively. Wait for the third instance.
+- Every refactor must pass the same test + fuzz + benchmark
+  gates as new code.
+- 3 failed attempts = defer and document — don't burn time in
+  a rabbit hole.
 

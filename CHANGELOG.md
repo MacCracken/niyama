@@ -4,6 +4,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Planning (no code changes)
+
+- **ADR 0009 — Accepted.** bre/vim backref review concluded as
+  **asymmetric split**:
+  - `bre` permanently out of scope for v1.0 *and* post-fold;
+    direct bre consumers wanting backref → `niyama_pcre`. ADR
+    0002 footnote updated.
+  - `vim` out of scope for v1.0; explicit post-fold revisit via
+    cyrius stdlib `lib/niyama.cyr` if the fold gate is met
+    (cyim is the load-bearing consumer that motivates leaving
+    the door open). ADR 0006 footnote updated.
+  - `re2` structurally backref-free, permanent — already enforced
+    via per-engine policy.
+  - Containment design captured in ADR 0009 for the post-fold vim
+    extension if it ever lands (vim-only, either-or matcher
+    dispatch, no shared kernel, step-limit ABI mirrors pcre).
+  - `*_E_BACKREF_UNSUPPORTED = 2` slots keep their current names
+    and meanings through v1.0.
+- **v0.9.0 collapsed into M5 P(-1) hardening.** ADR 0009 was the
+  last open decision gate before freeze; with it resolved as docs
+  only, v0.9.0 absorbs M5 directly. v0.9.0 release shape: P(-1)
+  hardening + closeout + surface freeze (per agnosticos
+  example_claude.md's P(-1) shape — cleanliness baseline → bench
+  baseline → deep review → external research → security audit →
+  additional tests → post-bench → docs audit incl. surface freeze
+  ADR → closeout pass).
+- **Engine-selection rubric** in `state.md` updated: backref now
+  explicitly routes to pcre with the ADR 0009 reference.
+  Linear-time-family vs. backtracking-family rows added.
+
 ## [0.8.0] — 2026-05-05
 
 M4.5 completion release. Per ADR 0008's Unicode-stdlib pivot, every

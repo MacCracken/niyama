@@ -3,6 +3,17 @@
 **Status**: Accepted
 **Date**: 2026-05-03
 
+> **Update 2026-05-05** — the M4 "potentially post-v1.0" deferral
+> on `\1`-`\9` backref is **resolved by ADR 0009**: vim stays
+> backref-rejecting for v1.0; post-fold revisit is explicitly open
+> via cyrius stdlib `lib/niyama.cyr` (sandhi precedent), gated on
+> the fold gate being met. The asymmetry vs. bre (which is
+> permanently closed) is driven by cyim being a load-bearing
+> long-horizon vim-flavor consumer. ADR 0009 carries the
+> containment design that a post-fold implementation must satisfy.
+> `VIM_E_BACKREF_UNSUPPORTED = 2` keeps its current name through
+> v1.0; post-fold extension would shift it to reserved-but-unused.
+
 ## Context
 
 M4 ships niyama's fifth engine: vim — vim/cyim flavor. cyim's

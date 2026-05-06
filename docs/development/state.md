@@ -69,15 +69,19 @@ release-tag dust.
 
 | Want | Use |
 |---|---|
-| `grep -G` / `sed` POSIX BRE compatibility | `bre` |
+| `grep -G` / `sed` POSIX BRE compatibility (no backref) | `bre` |
 | ERE + provable linear-time DoS-safety on untrusted input | `re2` |
-| Backref, lookahead, named captures, atomic groups | `pcre` |
+| **Backref `\1`-`\9`** in any flavor | `pcre` (per ADR 0009 — bre/vim do not implement backref through v1.0; vim *may* gain it post-fold via cyrius stdlib) |
+| Lookahead, lookbehind, named captures, atomic groups, recursion | `pcre` |
 | Both ERE features AND DoS-safety | `re2` (no backref/lookaround) |
 | Both PCRE features AND bounded DoS-safety | `pcre` with `niyama_pcre_set_step_limit()` |
 | Typo-tolerant matching, shell completion, fuzzy-name lookup | `fuzzy` |
 | vim/cyim-flavor patterns (`\<`, `\>`, `\zs`/`\ze`, magicness) | `vim` |
+| Unicode property classes `\p{L}` etc. | `re2`, `pcre`, or `vim` (v0.8.0+) |
 | Case-insensitive / multi-line / dot-newline matching | `re2` or `pcre` with `(?i)`/`(?m)`/`(?s)` |
 | Conditional or branch-reset patterns | `pcre` (`(?(...)...)`, `(?\|...)`) |
+| Linear-time *family* (DoS-safe by construction) | `re2`, `bre`, `vim` — backref structurally rejected |
+| Backtracking *family* (full PCRE feature set, step-limit guarded) | `pcre` |
 
 ## Fold-ready artifact
 
@@ -126,15 +130,28 @@ Direct (declared in `cyrius.cyml`):
 
 ## Next
 
-1. **v0.8.1 — collapsed (does not release).** v0.8.0 ship-time
-   decision: backref question moves to v0.9.0 with a broader
-   review scope. Ladder rule's "pinning ≠ shipping" branch fired.
-2. **v0.9.0 — bre/vim backref review** (decision + exposure
-   surface). Not "implement yes/no" — a fuller pass: ABI shape,
-   kernel vs. per-engine policy split, error-code reuse vs. new
-   slots, re2's no-backref guarantee preservation, consumer
-   impact. Outcome path: implement-with-ADR / out-of-scope-for-v1.0
-   / further-defer-with-refined-scope.
+1. **v0.8.1 — collapsed (does not release).** Backref decision
+   moved to a doc-only review (ADR 0009).
+2. **ADR 0009 — Accepted.** Asymmetric split: bre permanently
+   out (v1.0 + post-fold), vim out for v1.0 with explicit
+   post-fold-via-cyrius-stdlib revisit. re2 structurally
+   backref-free permanent. Containment design captured for the
+   post-fold vim extension if it ever lands. Was the last open
+   decision gate before M5 freeze.
+3. **v0.9.0 = M5 P(-1) hardening + closeout + surface freeze.**
+   ADR 0009 collapsed into docs (no separate review release);
+   v0.9.0 absorbs M5 directly. P(-1) shape per agnosticos
+   [example_claude.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/example_claude.md):
+   cleanliness baseline → bench baseline → internal deep
+   review → external research → security audit
+   (`docs/audit/2026-MM-DD-audit.md`) → additional tests/fuzz/
+   bench from findings → post-review benchmarks → docs audit
+   (incl. surface freeze ADR) → closeout pass (dead-code,
+   refactor, downstream check). See [`roadmap.md`](roadmap.md).
+4. **v1.0 — fold-ready release.** `dist/niyama.cyr`
+   byte-identical fold candidate. Cyrius stdlib vendors as
+   `lib/niyama.cyr` per sandhi v5.7.0 lifecycle once fold gate
+   met (≥2 long-horizon consumers).
 3. **M5 (post-v0.9.0)** — P(-1) hardening + closeout + surface freeze.
 4. **v1.0** — fold-ready release.
 
