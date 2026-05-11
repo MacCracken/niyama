@@ -3,7 +3,7 @@
 
 include "lib/syscalls.cyr"
 
-fn main() {
+fn main(): i64 {
     return 0;
 }
 

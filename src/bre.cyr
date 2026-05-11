@@ -106,7 +106,7 @@ var _bre_m_lastgen = 0;
 var _bre_m_gen = 0;
 var _bre_q_splits = 0;       # 64 slots × 8 bytes — quantifier unrolling
 
-fn _bre_lazy_init() {
+fn _bre_lazy_init(): i64 {
     if (_bre_m_init == 1) { return 0; }
     _bre_m_cur     = alloc(8 + BRE_MAX_INSTRS * 168);
     _bre_m_next    = alloc(8 + BRE_MAX_INSTRS * 168);
@@ -124,11 +124,11 @@ fn _bre_lazy_init() {
 
 # === Instruction emit / patch helpers ================================
 
-fn _bre_w0(op, small, arg1) {
+fn _bre_w0(op, small, arg1): i64 {
     return op | (small << 8) | (arg1 << 32);
 }
 
-fn _bre_emit_raw(w0, w1) {
+fn _bre_emit_raw(w0, w1): i64 {
     var i = _bre_instr_n;
     if (i >= BRE_MAX_INSTRS) { _bre_err = BRE_E_TOO_LARGE; return i; }
     store64(_bre_instr_base + i * 16, w0);
@@ -137,31 +137,31 @@ fn _bre_emit_raw(w0, w1) {
     return i;
 }
 
-fn _bre_emit_op(op)        { return _bre_emit_raw(op, 0); }
-fn _bre_emit_char(c)       { return _bre_emit_raw(BRE_OP_CHAR | (c << 8), 0); }
-fn _bre_emit_class(neg, ci) {
+fn _bre_emit_op(op): i64 { return _bre_emit_raw(op, 0); }
+fn _bre_emit_char(c): i64 { return _bre_emit_raw(BRE_OP_CHAR | (c << 8), 0); }
+fn _bre_emit_class(neg, ci): i64 {
     var op = BRE_OP_CLASS;
     if (neg == 1) { op = BRE_OP_NCLASS; }
     return _bre_emit_raw(op | (ci << 8), 0);
 }
-fn _bre_emit_save(idx)     { return _bre_emit_raw(BRE_OP_SAVE | (idx << 8), 0); }
-fn _bre_emit_jmp(target)   { return _bre_emit_raw(BRE_OP_JMP | (target << 32), 0); }
-fn _bre_emit_split(a, b)   { return _bre_emit_raw(BRE_OP_SPLIT | (a << 32), b); }
+fn _bre_emit_save(idx): i64 { return _bre_emit_raw(BRE_OP_SAVE | (idx << 8), 0); }
+fn _bre_emit_jmp(target): i64 { return _bre_emit_raw(BRE_OP_JMP | (target << 32), 0); }
+fn _bre_emit_split(a, b): i64 { return _bre_emit_raw(BRE_OP_SPLIT | (a << 32), b); }
 
-fn _bre_patch_arg1(idx, arg1) {
+fn _bre_patch_arg1(idx, arg1): i64 {
     var off = _bre_instr_base + idx * 16;
     var w0 = load64(off);
     store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
     return 0;
 }
 
-fn _bre_patch_arg2(idx, arg2) {
+fn _bre_patch_arg2(idx, arg2): i64 {
     store64(_bre_instr_base + idx * 16 + 8, arg2);
     return 0;
 }
 
 # Shift instructions [lo, hi) right by 1 slot (overlap-safe backward copy).
-fn _bre_shift_right(lo, hi) {
+fn _bre_shift_right(lo, hi): i64 {
     var k = (hi - lo) * 16 - 1;
     while (k >= 0) {
         var src = _bre_instr_base + lo * 16 + k;
@@ -177,7 +177,7 @@ fn _bre_shift_right(lo, hi) {
 # iter end with the then-current _bre_instr_n == hi); after shift, that
 # position is hi+1, so the target needs the same bump as targets strictly
 # inside.
-fn _bre_shift_targets_one(lo, hi) {
+fn _bre_shift_targets_one(lo, hi): i64 {
     var i = lo + 1;
     var end = hi + 1;
     while (i < end) {
@@ -206,7 +206,7 @@ fn _bre_shift_targets_one(lo, hi) {
 
 # === Class bitmap helpers ============================================
 
-fn _bre_alloc_class() {
+fn _bre_alloc_class(): i64 {
     var ci = _bre_class_n;
     if (ci >= BRE_MAX_CLASSES) { _bre_err = BRE_E_TOO_LARGE; return ci; }
     var z = 0;
@@ -218,7 +218,7 @@ fn _bre_alloc_class() {
     return ci;
 }
 
-fn _bre_class_set(ci, c) {
+fn _bre_class_set(ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = _bre_class_base + ci * 32 + (c >> 3);
@@ -226,7 +226,7 @@ fn _bre_class_set(ci, c) {
     return 0;
 }
 
-fn _bre_class_range(ci, lo, hi) {
+fn _bre_class_range(ci, lo, hi): i64 {
     var c = lo;
     while (c <= hi) {
         _bre_class_set(ci, c);
@@ -243,7 +243,7 @@ fn _bre_class_range(ci, lo, hi) {
 # any other backslashed byte is the literal byte (`\.` -> `.`, `\\` -> `\`,
 # etc.). Numeric backslash (`\1`..`\9`) is REJECTED upstream by
 # _bre_check_backref before this is called.
-fn _bre_lit_byte() {
+fn _bre_lit_byte(): i64 {
     if (_bre_pos >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0; }
     var c = load8(_bre_pat + _bre_pos);
     _bre_pos = _bre_pos + 1;
@@ -268,7 +268,7 @@ fn _bre_lit_byte() {
 # Scope: ranges (`a-z`), literal characters, `^` for negation as first
 # char, and POSIX bracket character classes `[:alpha:]` etc. (added in
 # v0.7.0 via the shared posix_classes module).
-fn _bre_parse_class() {
+fn _bre_parse_class(): i64 {
     var ci = _bre_alloc_class();
     if (_bre_err != BRE_E_OK) { return ci; }
     var neg = 0;
@@ -332,7 +332,7 @@ fn _bre_parse_class() {
 # Parse a primary (atom body, no quantifier yet). Returns 0 always; sets
 # _bre_err on failure. `at_start` is 1 when this primary is the first
 # atom in the entire pattern (used for ^ anchor placement).
-fn _bre_parse_primary(at_start) {
+fn _bre_parse_primary(at_start): i64 {
     if (_bre_pos >= _bre_pat_len) { _bre_err = BRE_E_SYNTAX; return 0; }
     var c = load8(_bre_pat + _bre_pos);
 
@@ -464,7 +464,7 @@ fn _bre_parse_primary(at_start) {
 
 # Apply `*` to the just-emitted atom at [atom_start, _bre_instr_n).
 # POSIX BRE has no `+`, `?`, lazy quantifiers, or alternation.
-fn _bre_apply_star(atom_start) {
+fn _bre_apply_star(atom_start): i64 {
     var atom_end = _bre_instr_n;
     if (atom_end == atom_start) { _bre_err = BRE_E_SYNTAX; return 0; }
     _bre_pos = _bre_pos + 1;
@@ -483,7 +483,7 @@ fn _bre_apply_star(atom_start) {
 
 # Apply `*` (greedy) to a body at [body_start, _bre_instr_n) — used by
 # {n,} unrolling for the unbounded tail.
-fn _bre_apply_star_inline(body_start) {
+fn _bre_apply_star_inline(body_start): i64 {
     var body_end = _bre_instr_n;
     _bre_shift_right(body_start, body_end);
     _bre_shift_targets_one(body_start, body_end);
@@ -500,7 +500,7 @@ fn _bre_apply_star_inline(body_start) {
 # Apply `\{n,m\}` / `\{n,\}` / `\{n\}` to the atom at [atom_start, _bre_instr_n).
 # `save_primary_start` is the source position before the FIRST primary —
 # used to re-parse for additional copies.
-fn _bre_apply_brace_q(save_primary_start, atom_start) {
+fn _bre_apply_brace_q(save_primary_start, atom_start): i64 {
     if (_bre_instr_n == atom_start) { _bre_err = BRE_E_SYNTAX; return 0; }
     # caller positioned _bre_pos at the `\` of `\{` — consume `\{`.
     _bre_pos = _bre_pos + 2;
@@ -606,7 +606,7 @@ fn _bre_apply_brace_q(save_primary_start, atom_start) {
     return 0;
 }
 
-fn _bre_parse_atom(at_start) {
+fn _bre_parse_atom(at_start): i64 {
     var save_primary_start = _bre_pos;
     var atom_start = _bre_instr_n;
     _bre_parse_primary(at_start);
@@ -625,7 +625,7 @@ fn _bre_parse_atom(at_start) {
 # Parse a concat — a sequence of atoms terminated by end-of-pattern or
 # `\)`. `at_start` is 1 only for the first call (top-level pattern start);
 # nested calls (inside a group) pass 0.
-fn _bre_parse_concat(at_start) {
+fn _bre_parse_concat(at_start): i64 {
     var first = at_start;
     while (_bre_pos < _bre_pat_len) {
         # Stop at `\)` (close-group).
@@ -644,7 +644,7 @@ fn _bre_parse_concat(at_start) {
 # Compile a null-terminated POSIX BRE pattern. Returns an opaque NFA
 # pointer (heap-allocated) or 0 on error. Use niyama_bre_last_error()
 # to get the error code.
-fn niyama_bre_compile(pat) {
+fn niyama_bre_compile(pat): i64 {
     _bre_lazy_init();
     var n = strlen(pat);
     var instr_bytes = BRE_MAX_INSTRS * 16;
@@ -691,13 +691,13 @@ fn niyama_bre_compile(pat) {
     return nfa;
 }
 
-fn niyama_bre_last_error() {
+fn niyama_bre_last_error(): i64 {
     return _bre_last_err;
 }
 
 # === Pike's NFA matcher (forked from stdlib) =========================
 
-fn _bre_at_word_char(input, input_len, pos) {
+fn _bre_at_word_char(input, input_len, pos): i64 {
     if (pos < 0)         { return 0; }
     if (pos >= input_len){ return 0; }
     var c = load8(input + pos);
@@ -708,7 +708,7 @@ fn _bre_at_word_char(input, input_len, pos) {
     return 0;
 }
 
-fn _bre_class_get_at(class_base, ci, c) {
+fn _bre_class_get_at(class_base, ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = class_base + ci * 32 + (c >> 3);
@@ -717,7 +717,7 @@ fn _bre_class_get_at(class_base, ci, c) {
     return 0;
 }
 
-fn _bre_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
+fn _bre_add_thread(list_base, pc, input, input_len, pos, saves, instrs): i64 {
     if (pc < 0)                 { return 0; }
     if (load64(_bre_m_lastgen + pc * 8) == _bre_m_gen) { return 0; }
     store64(_bre_m_lastgen + pc * 8, _bre_m_gen);
@@ -783,7 +783,7 @@ fn _bre_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
     return 0;
 }
 
-fn _bre_pike_run(nfa, input, input_len, start_pos) {
+fn _bre_pike_run(nfa, input, input_len, start_pos): i64 {
     _bre_lazy_init();
     var instrs = nfa + load64(nfa + BRE_OFF_INSTRS_OFF);
     var class_base = nfa + load64(nfa + BRE_OFF_CLASSES_OFF);
@@ -892,7 +892,7 @@ fn _bre_pike_run(nfa, input, input_len, start_pos) {
 
 # === Public API ======================================================
 
-fn niyama_bre_match(nfa, s) {
+fn niyama_bre_match(nfa, s): i64 {
     if (nfa == 0) { return 0; }
     var len = strlen(s);
     var r = _bre_pike_run(nfa, s, len, 0);
@@ -900,13 +900,13 @@ fn niyama_bre_match(nfa, s) {
     return 0;
 }
 
-fn niyama_bre_search(nfa, s) {
+fn niyama_bre_search(nfa, s): i64 {
     if (nfa == 0) { return 0 - 1; }
     var len = strlen(s);
     return niyama_bre_search_at(nfa, s, len, 0);
 }
 
-fn niyama_bre_search_at(nfa, s, len, from) {
+fn niyama_bre_search_at(nfa, s, len, from): i64 {
     if (nfa == 0) { return 0 - 1; }
     var i = from;
     while (i <= len) {
@@ -917,13 +917,13 @@ fn niyama_bre_search_at(nfa, s, len, from) {
     return 0 - 1;
 }
 
-fn niyama_bre_group_start(nfa, n) {
+fn niyama_bre_group_start(nfa, n): i64 {
     if (nfa == 0)        { return 0 - 1; }
     if (n < 0 || n > 9)  { return 0 - 1; }
     return load64(nfa + BRE_OFF_SAVES + n * 16);
 }
 
-fn niyama_bre_group_end(nfa, n) {
+fn niyama_bre_group_end(nfa, n): i64 {
     if (nfa == 0)        { return 0 - 1; }
     if (n < 0 || n > 9)  { return 0 - 1; }
     return load64(nfa + BRE_OFF_SAVES + n * 16 + 8);

@@ -142,7 +142,7 @@ var _re2_q_splits = 0;
 # v0.8.0 — scratch slot for stdlib _uc_decode_utf8 codepoint output.
 var _re2_m_cp_slot = 0;
 
-fn _re2_lazy_init() {
+fn _re2_lazy_init(): i64 {
     if (_re2_m_init == 1) { return 0; }
     _re2_m_cur     = alloc(8 + RE2_MAX_INSTRS * 168);
     _re2_m_next    = alloc(8 + RE2_MAX_INSTRS * 168);
@@ -161,11 +161,11 @@ fn _re2_lazy_init() {
 
 # === Instruction emit / patch helpers ================================
 
-fn _re2_w0(op, small, arg1) {
+fn _re2_w0(op, small, arg1): i64 {
     return op | (small << 8) | (arg1 << 32);
 }
 
-fn _re2_emit_raw(w0, w1) {
+fn _re2_emit_raw(w0, w1): i64 {
     var i = _re2_instr_n;
     if (i >= RE2_MAX_INSTRS) { _re2_err = RE2_E_TOO_LARGE; return i; }
     store64(_re2_instr_base + i * 16, w0);
@@ -174,8 +174,8 @@ fn _re2_emit_raw(w0, w1) {
     return i;
 }
 
-fn _re2_emit_op(op)        { return _re2_emit_raw(op, 0); }
-fn _re2_emit_char(c) {
+fn _re2_emit_op(op): i64 { return _re2_emit_raw(op, 0); }
+fn _re2_emit_char(c): i64 {
     # v0.7.0 — under (?i) emit CHAR_CI; the matcher does case-fold.
     var op = RE2_OP_CHAR;
     if (_re2_flag_i == 1) { op = RE2_OP_CHAR_CI; }
@@ -185,39 +185,39 @@ fn _re2_emit_char(c) {
     if (_re2_flag_i == 1 && c >= 65 && c <= 90) { stored = c + 32; }
     return _re2_emit_raw(op | (stored << 8), 0);
 }
-fn _re2_emit_class(neg, ci) {
+fn _re2_emit_class(neg, ci): i64 {
     var op = RE2_OP_CLASS;
     if (neg == 1) { op = RE2_OP_NCLASS; }
     return _re2_emit_raw(op | (ci << 8), 0);
 }
-fn _re2_emit_save(idx)     { return _re2_emit_raw(RE2_OP_SAVE | (idx << 8), 0); }
-fn _re2_emit_jmp(target)   { return _re2_emit_raw(RE2_OP_JMP | (target << 32), 0); }
-fn _re2_emit_split(a, b)   { return _re2_emit_raw(RE2_OP_SPLIT | (a << 32), b); }
-fn _re2_emit_uprop(neg, mask) {
+fn _re2_emit_save(idx): i64 { return _re2_emit_raw(RE2_OP_SAVE | (idx << 8), 0); }
+fn _re2_emit_jmp(target): i64 { return _re2_emit_raw(RE2_OP_JMP | (target << 32), 0); }
+fn _re2_emit_split(a, b): i64 { return _re2_emit_raw(RE2_OP_SPLIT | (a << 32), b); }
+fn _re2_emit_uprop(neg, mask): i64 {
     var op = RE2_OP_UPROP;
     if (neg == 1) { op = RE2_OP_NUPROP; }
     return _re2_emit_raw(op | (mask << 32), 0);
 }
-fn _re2_emit_uchar(cp) {
+fn _re2_emit_uchar(cp): i64 {
     return _re2_emit_raw(RE2_OP_UCHAR | (cp << 32), 0);
 }
-fn _re2_emit_uchar_ci(cp) {
+fn _re2_emit_uchar_ci(cp): i64 {
     return _re2_emit_raw(RE2_OP_UCHAR_CI | (cp << 32), 0);
 }
 
-fn _re2_patch_arg1(idx, arg1) {
+fn _re2_patch_arg1(idx, arg1): i64 {
     var off = _re2_instr_base + idx * 16;
     var w0 = load64(off);
     store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
     return 0;
 }
 
-fn _re2_patch_arg2(idx, arg2) {
+fn _re2_patch_arg2(idx, arg2): i64 {
     store64(_re2_instr_base + idx * 16 + 8, arg2);
     return 0;
 }
 
-fn _re2_shift_right(lo, hi) {
+fn _re2_shift_right(lo, hi): i64 {
     var k = (hi - lo) * 16 - 1;
     while (k >= 0) {
         var src = _re2_instr_base + lo * 16 + k;
@@ -227,7 +227,7 @@ fn _re2_shift_right(lo, hi) {
     return 0;
 }
 
-fn _re2_shift_targets_one(lo, hi) {
+fn _re2_shift_targets_one(lo, hi): i64 {
     var i = lo + 1;
     var end = hi + 1;
     while (i < end) {
@@ -256,7 +256,7 @@ fn _re2_shift_targets_one(lo, hi) {
 
 # === Class bitmap helpers ============================================
 
-fn _re2_alloc_class() {
+fn _re2_alloc_class(): i64 {
     var ci = _re2_class_n;
     if (ci >= RE2_MAX_CLASSES) { _re2_err = RE2_E_TOO_LARGE; return ci; }
     var z = 0;
@@ -268,7 +268,7 @@ fn _re2_alloc_class() {
     return ci;
 }
 
-fn _re2_class_set(ci, c) {
+fn _re2_class_set(ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = _re2_class_base + ci * 32 + (c >> 3);
@@ -276,7 +276,7 @@ fn _re2_class_set(ci, c) {
     return 0;
 }
 
-fn _re2_class_range(ci, lo, hi) {
+fn _re2_class_range(ci, lo, hi): i64 {
     var c = lo;
     while (c <= hi) {
         _re2_class_set(ci, c);
@@ -285,7 +285,7 @@ fn _re2_class_range(ci, lo, hi) {
     return 0;
 }
 
-fn _re2_class_invert(ci) {
+fn _re2_class_invert(ci): i64 {
     var z = 0;
     while (z < 32) {
         var off = _re2_class_base + ci * 32 + z;
@@ -295,9 +295,9 @@ fn _re2_class_invert(ci) {
     return 0;
 }
 
-fn _re2_class_fill_digit(ci) { _re2_class_range(ci, 48, 57); return 0; }
+fn _re2_class_fill_digit(ci): i64 { _re2_class_range(ci, 48, 57); return 0; }
 
-fn _re2_class_fill_word(ci) {
+fn _re2_class_fill_word(ci): i64 {
     _re2_class_range(ci, 48, 57);
     _re2_class_range(ci, 65, 90);
     _re2_class_range(ci, 97, 122);
@@ -305,7 +305,7 @@ fn _re2_class_fill_word(ci) {
     return 0;
 }
 
-fn _re2_class_fill_space(ci) {
+fn _re2_class_fill_space(ci): i64 {
     _re2_class_set(ci, 32);
     _re2_class_set(ci, 9);
     _re2_class_set(ci, 10);
@@ -316,7 +316,7 @@ fn _re2_class_fill_space(ci) {
 }
 
 # v0.7.0 — set `c` and (under (?i)) also its opposite-case ASCII letter.
-fn _re2_class_set_folded(ci, c) {
+fn _re2_class_set_folded(ci, c): i64 {
     _re2_class_set(ci, c);
     if (_re2_flag_i == 1) {
         if (c >= 65 && c <= 90)   { _re2_class_set(ci, c + 32); }
@@ -325,7 +325,7 @@ fn _re2_class_set_folded(ci, c) {
     return 0;
 }
 
-fn _re2_class_range_folded(ci, lo, hi) {
+fn _re2_class_range_folded(ci, lo, hi): i64 {
     var c = lo;
     while (c <= hi) {
         _re2_class_set_folded(ci, c);
@@ -338,19 +338,19 @@ fn _re2_class_range_folded(ci, lo, hi) {
 # Mirrors niyama_pcre's scheme — same slot layout, same lookup ABI
 # shape so the cross-engine surface stays uniform.
 
-fn _re2_is_name_first(c) {
+fn _re2_is_name_first(c): i64 {
     if (c >= 65 && c <= 90)  { return 1; }
     if (c >= 97 && c <= 122) { return 1; }
     if (c == 95)             { return 1; }
     return 0;
 }
-fn _re2_is_name_rest(c) {
+fn _re2_is_name_rest(c): i64 {
     if (_re2_is_name_first(c) == 1) { return 1; }
     if (c >= 48 && c <= 57)         { return 1; }
     return 0;
 }
 
-fn _re2_add_name(group_idx, terminator) {
+fn _re2_add_name(group_idx, terminator): i64 {
     if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0 - 1; }
     var first = load8(_re2_pat + _re2_pos);
     if (_re2_is_name_first(first) == 0) { _re2_err = RE2_E_SYNTAX; return 0 - 1; }
@@ -412,7 +412,7 @@ fn _re2_add_name(group_idx, terminator) {
 # Returns 1 on success (flags applied + `)` consumed); 0 if the body
 # is not pure-flag (caller should treat as a different (?...) form).
 # Sets _re2_err on syntax error inside a recognized flag run.
-fn _re2_try_inline_flags() {
+fn _re2_try_inline_flags(): i64 {
     var p = _re2_pos;
     # Quick check — first byte must be i/m/s for the entire form to be
     # "(?<flags>)". Caller has already discriminated for `(?<`, `(?=`,
@@ -437,7 +437,7 @@ fn _re2_try_inline_flags() {
     return 1;
 }
 
-fn _re2_lit_byte() {
+fn _re2_lit_byte(): i64 {
     if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
     var c = load8(_re2_pat + _re2_pos);
     _re2_pos = _re2_pos + 1;
@@ -457,7 +457,7 @@ fn _re2_lit_byte() {
 
 # Parse a `[...]` bracket-expression body. Returns the class index;
 # negation encoded as -(ci+1).
-fn _re2_parse_class() {
+fn _re2_parse_class(): i64 {
     var ci = _re2_alloc_class();
     if (_re2_err != RE2_E_OK) { return ci; }
     var neg = 0;
@@ -584,7 +584,7 @@ fn _re2_parse_class() {
 #   `(?R)` -> recursion (REJECT)
 #   `(?...)` (anything else) -> RE2_E_SYNTAX
 
-fn _re2_parse_primary() {
+fn _re2_parse_primary(): i64 {
     if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
     var c = load8(_re2_pat + _re2_pos);
     if (c == 46) {
@@ -803,7 +803,7 @@ fn _re2_parse_primary() {
     return 0;
 }
 
-fn _re2_apply_simple_q(atom_start, op_char) {
+fn _re2_apply_simple_q(atom_start, op_char): i64 {
     var atom_end = _re2_instr_n;
     if (atom_end == atom_start) { _re2_err = RE2_E_SYNTAX; return 0; }
     _re2_pos = _re2_pos + 1;
@@ -858,7 +858,7 @@ fn _re2_apply_simple_q(atom_start, op_char) {
     return 0;
 }
 
-fn _re2_apply_star_inline(body_start, lazy) {
+fn _re2_apply_star_inline(body_start, lazy): i64 {
     var body_end = _re2_instr_n;
     _re2_shift_right(body_start, body_end);
     _re2_shift_targets_one(body_start, body_end);
@@ -878,7 +878,7 @@ fn _re2_apply_star_inline(body_start, lazy) {
     return 0;
 }
 
-fn _re2_apply_brace_q(save_primary_start, atom_start) {
+fn _re2_apply_brace_q(save_primary_start, atom_start): i64 {
     if (_re2_instr_n == atom_start) { _re2_err = RE2_E_SYNTAX; return 0; }
     _re2_pos = _re2_pos + 1;
     var n_min = 0;
@@ -983,7 +983,7 @@ fn _re2_apply_brace_q(save_primary_start, atom_start) {
     return 0;
 }
 
-fn _re2_parse_atom() {
+fn _re2_parse_atom(): i64 {
     var save_primary_start = _re2_pos;
     var atom_start = _re2_instr_n;
     _re2_parse_primary();
@@ -999,7 +999,7 @@ fn _re2_parse_atom() {
     return 0;
 }
 
-fn _re2_parse_concat() {
+fn _re2_parse_concat(): i64 {
     while (_re2_pos < _re2_pat_len) {
         var c = load8(_re2_pat + _re2_pos);
         if (c == 124 || c == 41) { return 0; }
@@ -1009,7 +1009,7 @@ fn _re2_parse_concat() {
     return 0;
 }
 
-fn _re2_parse_alt() {
+fn _re2_parse_alt(): i64 {
     var left_start = _re2_instr_n;
     _re2_parse_concat();
     if (_re2_err != RE2_E_OK) { return 0; }
@@ -1033,7 +1033,7 @@ fn _re2_parse_alt() {
 
 # === Compiler entry ==================================================
 
-fn niyama_re2_compile(pat) {
+fn niyama_re2_compile(pat): i64 {
     _re2_lazy_init();
     var n = strlen(pat);
     var instr_bytes = RE2_MAX_INSTRS * 16;
@@ -1094,13 +1094,13 @@ fn niyama_re2_compile(pat) {
     return nfa;
 }
 
-fn niyama_re2_last_error() {
+fn niyama_re2_last_error(): i64 {
     return _re2_last_err;
 }
 
 # === Pike NFA matcher ================================================
 
-fn _re2_at_word_char(input, input_len, pos) {
+fn _re2_at_word_char(input, input_len, pos): i64 {
     if (pos < 0)         { return 0; }
     if (pos >= input_len){ return 0; }
     var c = load8(input + pos);
@@ -1111,14 +1111,14 @@ fn _re2_at_word_char(input, input_len, pos) {
     return 0;
 }
 
-fn _re2_is_boundary(input, input_len, pos) {
+fn _re2_is_boundary(input, input_len, pos): i64 {
     var l = _re2_at_word_char(input, input_len, pos - 1);
     var r = _re2_at_word_char(input, input_len, pos);
     if (l != r) { return 1; }
     return 0;
 }
 
-fn _re2_class_get_at(class_base, ci, c) {
+fn _re2_class_get_at(class_base, ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = class_base + ci * 32 + (c >> 3);
@@ -1127,7 +1127,7 @@ fn _re2_class_get_at(class_base, ci, c) {
     return 0;
 }
 
-fn _re2_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
+fn _re2_add_thread(list_base, pc, input, input_len, pos, saves, instrs): i64 {
     if (pc < 0)                 { return 0; }
     if (load64(_re2_m_lastgen + pc * 8) == _re2_m_gen) { return 0; }
     store64(_re2_m_lastgen + pc * 8, _re2_m_gen);
@@ -1199,7 +1199,7 @@ fn _re2_add_thread(list_base, pc, input, input_len, pos, saves, instrs) {
     return 0;
 }
 
-fn _re2_pike_run(nfa, input, input_len, start_pos) {
+fn _re2_pike_run(nfa, input, input_len, start_pos): i64 {
     _re2_lazy_init();
     var instrs = nfa + load64(nfa + RE2_OFF_INSTRS_OFF);
     var class_base = nfa + load64(nfa + RE2_OFF_CLASSES_OFF);
@@ -1397,7 +1397,7 @@ fn _re2_pike_run(nfa, input, input_len, start_pos) {
 
 # === Public API ======================================================
 
-fn niyama_re2_match(nfa, s) {
+fn niyama_re2_match(nfa, s): i64 {
     if (nfa == 0) { return 0; }
     var len = strlen(s);
     var r = _re2_pike_run(nfa, s, len, 0);
@@ -1405,13 +1405,13 @@ fn niyama_re2_match(nfa, s) {
     return 0;
 }
 
-fn niyama_re2_search(nfa, s) {
+fn niyama_re2_search(nfa, s): i64 {
     if (nfa == 0) { return 0 - 1; }
     var len = strlen(s);
     return niyama_re2_search_at(nfa, s, len, 0);
 }
 
-fn niyama_re2_search_at(nfa, s, len, from) {
+fn niyama_re2_search_at(nfa, s, len, from): i64 {
     if (nfa == 0) { return 0 - 1; }
     var i = from;
     while (i <= len) {
@@ -1422,13 +1422,13 @@ fn niyama_re2_search_at(nfa, s, len, from) {
     return 0 - 1;
 }
 
-fn niyama_re2_group_start(nfa, n) {
+fn niyama_re2_group_start(nfa, n): i64 {
     if (nfa == 0)        { return 0 - 1; }
     if (n < 0 || n > 9)  { return 0 - 1; }
     return load64(nfa + RE2_OFF_SAVES + n * 16);
 }
 
-fn niyama_re2_group_end(nfa, n) {
+fn niyama_re2_group_end(nfa, n): i64 {
     if (nfa == 0)        { return 0 - 1; }
     if (n < 0 || n > 9)  { return 0 - 1; }
     return load64(nfa + RE2_OFF_SAVES + n * 16 + 8);
@@ -1437,7 +1437,7 @@ fn niyama_re2_group_end(nfa, n) {
 # v0.7.0 — look up a named-capture group index by name. Returns -1 if
 # not found. Same shape as niyama_pcre_group_by_name for cross-engine
 # uniformity.
-fn niyama_re2_group_by_name(nfa, name) {
+fn niyama_re2_group_by_name(nfa, name): i64 {
     if (nfa == 0) { return 0 - 1; }
     var name_count = load64(nfa + RE2_OFF_NAME_COUNT);
     var names_base = nfa + load64(nfa + RE2_OFF_NAMES_OFF);

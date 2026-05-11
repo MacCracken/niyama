@@ -4,6 +4,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-05-11
+
+### Changed
+
+- **Stdlib annotation pass**: every public fn in `src/*.cyr`
+  carries a `: i64` return-type annotation. Mechanical pass
+  matching cyrius's v5.11.x annotation arc; parse-only, zero
+  runtime / codegen change.
+- `cyrius` pin bumped 5.8.65 → 5.11.4 — required for `: i64`
+  return-type syntax (v5.10.x REAL TYPE SYSTEM).
+- `dist/niyama.cyr` regenerated via `cyrius distlib` at v1.0.2
+  (6664 lines). Ready for next cyrius-side fold-in slot.
+
 ## [1.0.1] — 2026-05-06
 
 **Fold-trigger release + bundled-dist correction.**

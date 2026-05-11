@@ -22,7 +22,7 @@
 
 # --- Bit ops on a generic class table -------------------------------
 
-fn _posix_class_set(class_base, ci, c) {
+fn _posix_class_set(class_base, ci, c): i64 {
     if (c < 0)   { return 0; }
     if (c > 255) { return 0; }
     var off = class_base + ci * 32 + (c >> 3);
@@ -30,7 +30,7 @@ fn _posix_class_set(class_base, ci, c) {
     return 0;
 }
 
-fn _posix_class_range(class_base, ci, lo, hi) {
+fn _posix_class_range(class_base, ci, lo, hi): i64 {
     var c = lo;
     while (c <= hi) {
         _posix_class_set(class_base, ci, c);
@@ -41,34 +41,34 @@ fn _posix_class_range(class_base, ci, lo, hi) {
 
 # --- The 12 POSIX bracket classes (ASCII) ---------------------------
 
-fn _posix_fill_alpha(class_base, ci) {
+fn _posix_fill_alpha(class_base, ci): i64 {
     _posix_class_range(class_base, ci, 65, 90);
     _posix_class_range(class_base, ci, 97, 122);
     return 0;
 }
 
-fn _posix_fill_digit(class_base, ci) {
+fn _posix_fill_digit(class_base, ci): i64 {
     _posix_class_range(class_base, ci, 48, 57);
     return 0;
 }
 
-fn _posix_fill_alnum(class_base, ci) {
+fn _posix_fill_alnum(class_base, ci): i64 {
     _posix_fill_alpha(class_base, ci);
     _posix_fill_digit(class_base, ci);
     return 0;
 }
 
-fn _posix_fill_upper(class_base, ci) {
+fn _posix_fill_upper(class_base, ci): i64 {
     _posix_class_range(class_base, ci, 65, 90);
     return 0;
 }
 
-fn _posix_fill_lower(class_base, ci) {
+fn _posix_fill_lower(class_base, ci): i64 {
     _posix_class_range(class_base, ci, 97, 122);
     return 0;
 }
 
-fn _posix_fill_space(class_base, ci) {
+fn _posix_fill_space(class_base, ci): i64 {
     # POSIX [:space:] is HT(9), LF(10), VT(11), FF(12), CR(13), SP(32).
     _posix_class_set(class_base, ci, 9);
     _posix_class_set(class_base, ci, 10);
@@ -79,29 +79,29 @@ fn _posix_fill_space(class_base, ci) {
     return 0;
 }
 
-fn _posix_fill_blank(class_base, ci) {
+fn _posix_fill_blank(class_base, ci): i64 {
     _posix_class_set(class_base, ci, 9);
     _posix_class_set(class_base, ci, 32);
     return 0;
 }
 
-fn _posix_fill_cntrl(class_base, ci) {
+fn _posix_fill_cntrl(class_base, ci): i64 {
     _posix_class_range(class_base, ci, 0, 31);
     _posix_class_set(class_base, ci, 127);
     return 0;
 }
 
-fn _posix_fill_print(class_base, ci) {
+fn _posix_fill_print(class_base, ci): i64 {
     _posix_class_range(class_base, ci, 32, 126);
     return 0;
 }
 
-fn _posix_fill_graph(class_base, ci) {
+fn _posix_fill_graph(class_base, ci): i64 {
     _posix_class_range(class_base, ci, 33, 126);
     return 0;
 }
 
-fn _posix_fill_punct(class_base, ci) {
+fn _posix_fill_punct(class_base, ci): i64 {
     # ASCII punctuation: !"#$%&'()*+,-./ :;<=>?@ [\]^_` {|}~
     _posix_class_range(class_base, ci, 33, 47);
     _posix_class_range(class_base, ci, 58, 64);
@@ -110,7 +110,7 @@ fn _posix_fill_punct(class_base, ci) {
     return 0;
 }
 
-fn _posix_fill_xdigit(class_base, ci) {
+fn _posix_fill_xdigit(class_base, ci): i64 {
     _posix_class_range(class_base, ci, 48, 57);
     _posix_class_range(class_base, ci, 65, 70);
     _posix_class_range(class_base, ci, 97, 102);
@@ -133,7 +133,7 @@ var _posix_match_end_pos = 0;
 # and writes the position immediately after the trailing `:]` to
 # `_posix_match_end_pos`.
 # On no-match returns 0 and leaves `_posix_match_end_pos` unset.
-fn _posix_match_class_name(pat, pos, pat_len) {
+fn _posix_match_class_name(pat, pos, pat_len): i64 {
     var name_start = pos;
     var p = pos;
     var scanning = 1;
@@ -187,7 +187,7 @@ fn _posix_match_class_name(pat, pos, pat_len) {
 # Apply category (1..12) to class `ci` in `class_base`. Caller is
 # responsible for having allocated `ci` already. Unknown category is
 # a no-op (caller's check should have rejected before calling).
-fn _posix_apply_filler(class_base, ci, category) {
+fn _posix_apply_filler(class_base, ci, category): i64 {
     if      (category == 1)  { _posix_fill_alpha(class_base, ci); }
     elif    (category == 2)  { _posix_fill_digit(class_base, ci); }
     elif    (category == 3)  { _posix_fill_space(class_base, ci); }

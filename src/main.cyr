@@ -4,7 +4,7 @@
 # entry that reports identity. Real CLI tooling (testing, benchmarks)
 # lives in programs/ at each milestone.
 
-fn main() {
+fn main(): i64 {
     syscall(1, 1, "niyama 1.0.0 - additional regex engines (fold-ready: bre + re2 + pcre + fuzzy + vim)\n", 87);
     return 0;
 }
