@@ -4,6 +4,37 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-05-21
+
+### Changed
+
+- `cyrius` pin bumped 5.11.4 → 6.0.1 — matches installed
+  toolchain wrapper (5.11.4 pin had drifted; wrapper printed
+  `manifest-pin: 5.11.4 (drift — wrapper is 6.0.1)` on every
+  invocation). Zero source changes; build/test/fuzz green
+  byte-for-byte against 5.11.4 baseline (109 tests, 5 fuzz
+  suites, 0 failures).
+- `dist/niyama.cyr` regenerated via `cyrius distlib` at v1.0.3
+  (6664 lines, unchanged from v1.0.2 — pin-only release).
+
+### Fixed
+
+- **Release upload of `cyrius.lock` no longer fails.** Cyrius
+  6.0.1's `cyrius deps` truncates `cyrius.lock` to 0 bytes when
+  there are no external deps to lock (niyama is stdlib-only per
+  CLAUDE.md "Rules"), and GitHub's release-asset API rejects
+  0-byte assets with `size must be greater than or equal to 1`.
+  Workaround mirrors the yukti / patra pattern: commit a stub
+  `cyrius.lock`, run `cyrius deps --no-lock` in CI / release so
+  the toolchain doesn't overwrite it. Drop `--no-lock` once the
+  upstream lockfile writer is fixed.
+
+### Added
+
+- `cyrius.lock` (comment-only stub) is now shipped as a release
+  asset alongside the source tarball, dist bundle, and smoke
+  binaries; checksum included in `SHA256SUMS`.
+
 ## [1.0.2] — 2026-05-11
 
 ### Changed

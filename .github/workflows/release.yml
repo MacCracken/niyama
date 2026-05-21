@@ -56,7 +56,12 @@ jobs:
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
       - name: Resolve deps
-        run: cyrius deps
+        # See ci.yml for the full rationale: cyrius 6.0.1 truncates
+        # cyrius.lock to 0 bytes when there are no external deps,
+        # which then fails the release-asset upload. `--no-lock`
+        # preserves the committed stub. Drop the flag once upstream
+        # restores the lockfile writer.
+        run: cyrius deps --no-lock
 
       - name: Build (DCE)
         run: |
@@ -94,7 +99,7 @@ jobs:
           if [ -f build/niyama-aarch64 ]; then
             cp build/niyama-aarch64 "niyama-${TAG}-aarch64-linux"
           fi
-          sha256sum niyama-*.tar.gz niyama-*.cyr niyama-*-linux 2>/dev/null > SHA256SUMS
+          sha256sum niyama-*.tar.gz niyama-*.cyr niyama-*-linux cyrius.lock 2>/dev/null > SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
@@ -103,6 +108,7 @@ jobs:
             niyama-*.tar.gz
             niyama-*.cyr
             niyama-*-linux
+            cyrius.lock
             SHA256SUMS
 
   release:
@@ -135,4 +141,5 @@ jobs:
             niyama-*.tar.gz
             niyama-*.cyr
             niyama-*-linux
+            cyrius.lock
             SHA256SUMS
