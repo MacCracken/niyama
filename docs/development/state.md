@@ -51,13 +51,14 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.0.1` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.1.27` (in `cyrius.cyml [package].cyrius`).
   Floor remains `5.8.65` for stdlib `lib/unicode/` per ADR 0008
   (categories at .49, casefold at .50, normalize at .51, codec
   lift at .55, NFKC/NFKD at .60). Bump history: `5.8.42`
   post-v0.7.0 → `5.8.65` for v0.8.0 (per ADR 0008) → `5.11.4`
   at v1.0.2 (for `: i64` return-type syntax) → `6.0.1` at v1.0.3
-  (matches installed wrapper; zero source changes).
+  → `6.1.27` at v1.0.4 (both match installed wrapper; zero
+  source changes).
 
 ## Source
 

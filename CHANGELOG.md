@@ -4,6 +4,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-06-10
+
+### Changed
+
+- `cyrius` pin bumped 6.0.1 → 6.1.27 — matches installed
+  toolchain wrapper (6.0.1 pin had drifted; wrapper printed
+  `manifest-pin: 6.0.1 (drift — wrapper is 6.1.27)` on every
+  invocation). Zero source changes; build/test/fuzz green
+  byte-for-byte against 6.0.1 baseline (109 tests + 6 build
+  tests, 5 fuzz suites, 0 failures).
+- `dist/niyama.cyr` regenerated via `cyrius distlib` at v1.0.4
+  (6664 lines, unchanged from v1.0.3 — pin-only release).
+
 ## [1.0.3] — 2026-05-21
 
 ### Changed

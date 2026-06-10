@@ -273,7 +273,7 @@ project, not niyama-specific.
 - **Toolchain pin**: `cyrius = "X.Y.Z"` field in `cyrius.cyml
   [package]`. **No separate `.cyrius-toolchain` file.** CI and
   release both read from `cyrius.cyml`. Currently pinned to
-  `6.0.1` (floor is `5.8.65` per ADR 0008 for stdlib `lib/unicode/`;
+  `6.1.27` (floor is `5.8.65` per ADR 0008 for stdlib `lib/unicode/`;
   bumped to track the installed wrapper).
 - **Dead code elimination**: every `cyrius build` in CI and
   release runs with `CYRIUS_DCE=1`. Binary size is a release
@@ -299,7 +299,7 @@ project, not niyama-specific.
   `docs/development/state.md`. If the hook doesn't, fix the hook
   — don't hand-maintain state.
 - **`cyrius audit`**: known-broken from 5.8.65 onward (missing
-  `~/.cyrius/bin/check.sh`); verify against the live 6.0.1
+  `~/.cyrius/bin/check.sh`); verify against the live 6.1.27
   toolchain before relying on it. Run constituents individually
   (`cyrius lint` + `cyrius test` + `cyrius fuzz` + clean DCE
   build) until the toolchain bug is fixed.
