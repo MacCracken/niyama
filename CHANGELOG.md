@@ -4,6 +4,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.5] — 2026-06-12
+
+### Changed
+
+- `cyrius` pin bumped 6.1.27 → 6.2.1 (ecosystem-wide stdlib pin sweep onto the
+  current toolchain). No source changes — niyama's `[deps]` carries no carved-out
+  modules. Verified green on 6.2.1: `cyrius deps` resolves cleanly, `.tcyr` suite
+  109/109, bench 6/6, `dist/niyama.cyr` regenerated via `cyrius distlib`.
+
 ## [1.0.4] — 2026-06-10
 
 ### Changed
