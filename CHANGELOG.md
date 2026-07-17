@@ -4,6 +4,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.6] — 2026-07-16
+
+### Changed
+
+- `cyrius` pin bumped 6.2.1 → 6.4.64 — matches installed toolchain wrapper
+  (6.2.1 pin had drifted; wrapper printed `manifest-pin: 6.2.1 (drift — wrapper
+  is 6.4.64)` on every invocation). Zero source changes — niyama's `[deps]`
+  carries no carved-out modules. Verified green on 6.4.64: `cyrius deps` resolves
+  cleanly, DCE build OK, `.tcyr` suite 6 files / 661 assertions, `cyrius fuzz`
+  5 files / 1689 assertions, all 5 per-engine bench harnesses (`bre`, `re2`,
+  `pcre`, `fuzzy`, `vim`) run clean, all 0 failures.
+- `dist/niyama.cyr` regenerated via `cyrius distlib` at v1.0.6 (6664 lines,
+  byte-identical to v1.0.5 except the version header — pin-only release).
+
 ## [1.0.5] — 2026-06-12
 
 ### Changed
