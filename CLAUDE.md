@@ -250,7 +250,7 @@ project, not niyama-specific.
 - Bump allocation via `alloc()` for long-lived data (vec, str
   internals, niyama's NFA structures, class tables, name tables).
 - Enum values for constants — don't consume `gvar_toks` slots
-  (256 initialized globals limit).
+  (4 096 initialized globals limit).
 - Heap-allocate large buffers — `var buf[256000]` bloats the
   binary by 256 KB.
 - `break` in while loops with `var` declarations is unreliable —
@@ -264,9 +264,16 @@ project, not niyama-specific.
 - `return;` without value is invalid — always `return 0;`.
 - All `var` declarations are function-scoped — no block scoping.
 - Max limits per compilation unit: 4 096 variables, 1 024
-  functions, 256 initialized globals. niyama's largest engine
+  functions, 4 096 initialized globals. niyama's largest engine
   (pcre at ~2 000 lines) is well under all three; the dist
   artifact stays comfortably under after bundling.
+- Counting rule: only a top-level `var NAME = <non-literal>;`
+  (call / identifier / expression initializer) consumes an
+  initialized-globals slot; a bare integer-literal init
+  (`var x = 42;`) takes the static-init fast path and enum
+  members are const-folded, so neither counts. See the cyrius
+  guide's **Global Initializers** section
+  (`docs/guides/cyrius-guide.md` in the cyrius repo).
 
 ## CI / Release
 
