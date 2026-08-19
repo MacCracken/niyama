@@ -5,6 +5,19 @@
 
 ## Version
 
+**1.0.7** — maintenance patch shipped 2026-08-19. Toolchain pin
+bumped 6.4.64 → 6.5.29 (wrapper-drift catch-up); no engine source
+changes, `dist/niyama.cyr` byte-identical but for its version
+header. Fixed a pre-existing 2-byte `.rodata` over-read in the
+`src/main.cyr` smoke banner (write length 87 vs an 85-byte
+literal, LOW severity, outside the frozen engine surface) and
+un-pinned that banner's hardcoded `1.0.0` version string.
+Recorded a **binary-size regression upstream**: the DCE'd smoke
+binary grew 4,544 B → 401,240 B purely from the pin bump,
+bisected to cyrius 6.5.15 → 6.5.16 and undocumented in the cyrius
+CHANGELOG — correctness unaffected, tests/fuzz/bench all green.
+See CHANGELOG § 1.0.7 for the full section table.
+
 **1.0.1** — fold-trigger release shipped 2026-05-06. ADR 0011
 **triggered**: cyrius v5.9.0 vendored `dist/niyama.cyr` from this
 tag byte-identical as `lib/niyama.cyr`. v1.0.1 also corrected the
@@ -51,14 +64,25 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.1.27` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.5.29` (in `cyrius.cyml [package].cyrius`).
   Floor remains `5.8.65` for stdlib `lib/unicode/` per ADR 0008
   (categories at .49, casefold at .50, normalize at .51, codec
   lift at .55, NFKC/NFKD at .60). Bump history: `5.8.42`
   post-v0.7.0 → `5.8.65` for v0.8.0 (per ADR 0008) → `5.11.4`
   at v1.0.2 (for `: i64` return-type syntax) → `6.0.1` at v1.0.3
-  → `6.1.27` at v1.0.4 (both match installed wrapper; zero
-  source changes).
+  → `6.1.27` at v1.0.4 → `6.2.1` at v1.0.5 → `6.4.64` at v1.0.6
+  → `6.5.29` at v1.0.7 (each matches the installed wrapper at
+  the time; zero engine source changes across all of them).
+- **Known toolchain regression (6.5.16+)**: whole-program pruning
+  of manifest-included stdlib modules no longer happens. The
+  smoke binary went 4,544 B → 401,240 B on the v1.0.7 bump —
+  `.rodata` carries the full ~307 KB `lib/unicode/*_data.cyr`
+  tables even though the smoke entry never references them, and
+  `CYRIUS_DCE=1` NOPs dead functions in place instead of removing
+  them (no size change). Bisected to 6.5.15 → 6.5.16; not
+  documented in the cyrius CHANGELOG. Correctness unaffected.
+  Library consumers are unaffected — the shipped artifact is the
+  `dist/niyama.cyr` source bundle, not the binary.
 
 ## Source
 

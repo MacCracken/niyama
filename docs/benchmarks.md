@@ -179,3 +179,102 @@ documents B4 with this status.
 v1.0 closeout will re-run benches once more as the final regression
 gate. If any row moves > 5% between v0.9.0 step-7 and v1.0 closeout
 without a known cause, that's a step-9 redo.
+
+## v1.0.7 pin bump (6.4.64 → 6.5.29 — same-day A/B)
+
+**Date**: 2026-08-19
+**Cyrius**: 6.4.64 (old pin) vs 6.5.29 (new pin)
+**Host**: Linux 7.1.8-arch1-3 x86_64
+
+### Method
+
+Unlike the v0.8.0 / v0.9.0 rows above, this is a **same-day A/B on one
+host**, not a comparison against a stored baseline. Both toolchains built
+the identical working tree with the identical vendored `lib/`, so the only
+variable is the compiler. This matters because the numbers here are *not*
+comparable to the v0.8.0 / v0.9.0 tables: `cyrius bench` now measures and
+subtracts a per-sample timer floor (~1.34µs per clock read), which the
+earlier baselines did not do. Both pins report that floor, so old-vs-new
+below is like-for-like even though old-vs-v0.9.0 is not.
+
+Each pin was run **3×** over all 5 harnesses; the table compares per-row
+**medians**, with each row's own run-to-run spread shown so noise is
+visible rather than inferred. A single run of each had suggested 14 rows
+over the ±5% action threshold — all 14 collapsed into the noise band once
+repeated, which is the reason the 3× protocol is recorded here.
+
+### Result
+
+**No regression.** Aggregate drift across all 57 measurements:
+mean **+0.04%**, median **+0.20%**.
+**Zero rows** exceed ±5% by more than their own run-to-run spread. The only
+row nominally over threshold is `bre_search_class` (+7.0%), whose old-side
+spread is 8.3% — noise.
+
+| Bench | 6.4.64 (median) | 6.5.29 (median) | Δ | spread old / new |
+|---|---|---|---|---|
+| `bre_compile_literal` | 4.803µs | 4.671µs | -2.7% | 4.0% / 2.2% |
+| `bre_compile_dot_star` | 4.859µs | 4.776µs | -1.7% | 2.2% / 0.9% |
+| `bre_compile_quantifier` | 4.912µs | 4.775µs | -2.8% | 3.7% / 1.2% |
+| `bre_compile_group` | 4.759µs | 4.695µs | -1.3% | 1.7% / 0.6% |
+| `bre_search_literal_hit` | 32.638µs | 32.729µs | +0.3% | 0.4% / 0.9% |
+| `bre_search_literal_miss` | 5.802µs | 5.847µs | +0.8% | 1.5% / 0.2% |
+| `bre_search_dot_star` | 109.610µs | 110.382µs | +0.7% | 7.0% / 3.6% |
+| `bre_search_class` | 1.406µs | 1.505µs | +7.0% | 8.3% / 0.5% |
+| `bre_search_quantifier` | 2.180µs | 2.195µs | +0.7% | 2.4% / 1.7% |
+| `bre_search_anchored` | 1.255µs | 1.275µs | +1.6% | 1.5% / 1.9% |
+| `bre_search_group` | 15.192µs | 15.199µs | +0.0% | 1.2% / 2.2% |
+| `re2_compile_literal` | 5.367µs | 5.393µs | +0.5% | 9.5% / 3.4% |
+| `re2_compile_alt` | 5.907µs | 5.902µs | -0.1% | 7.0% / 0.7% |
+| `re2_compile_email` | 6.256µs | 6.319µs | +1.0% | 6.9% / 3.2% |
+| `re2_search_literal` | 32.865µs | 32.577µs | -0.9% | 3.3% / 2.6% |
+| `re2_search_alt` | 62.472µs | 63.345µs | +1.4% | 2.6% / 1.6% |
+| `re2_search_class` | 141.947µs | 141.979µs | +0.0% | 1.8% / 1.1% |
+| `re2_search_email` | 13.660µs | 13.593µs | -0.5% | 2.2% / 3.2% |
+| `re2_dos_alt_explosion (200a)` | 83.986µs | 86.291µs | +2.7% | 2.6% / 2.5% |
+| `re2_dos_nested_star (200a)` | 59.148µs | 60.632µs | +2.5% | 2.5% / 4.4% |
+| `re2_dos_optional_chain (30a)` | 207.328µs | 205.191µs | -1.0% | 1.2% / 1.5% |
+| `pcre_compile_literal` | 5.345µs | 5.360µs | +0.3% | 2.6% / 2.0% |
+| `pcre_compile_email` | 6.260µs | 6.173µs | -1.4% | 3.4% / 3.4% |
+| `pcre_compile_backref` | 5.702µs | 5.723µs | +0.4% | 3.3% / 4.0% |
+| `pcre_compile_lookahead` | 5.397µs | 5.383µs | -0.3% | 3.3% / 0.4% |
+| `pcre_search_literal` | 12.019µs | 12.022µs | +0.0% | 1.1% / 2.6% |
+| `pcre_search_alt` | 44.806µs | 45.072µs | +0.6% | 2.7% / 1.4% |
+| `pcre_search_email` | 5.902µs | 5.929µs | +0.5% | 0.6% / 0.5% |
+| `pcre_backref` | 770ns | 776ns | +0.8% | 1.9% / 3.1% |
+| `pcre_lookahead` | 133.646µs | 134.052µs | +0.3% | 1.7% / 1.5% |
+| `pcre_neg_lookahead` | 849ns | 865ns | +1.9% | 1.6% / 1.2% |
+| `pcre_atomic` | 1.539µs | 1.559µs | +1.3% | 3.3% / 1.7% |
+| `pcre_named_captures` | 1.773µs | 1.728µs | -2.5% | 1.6% / 1.6% |
+| `pcre_dos_bounded (step_limit=50k)` | 1.956ms | 1.973ms | +0.9% | 1.8% / 1.0% |
+| `fuzzy_compile_default` | 534ns | 528ns | -1.1% | 1.3% / 0.6% |
+| `fuzzy_compile_opts` | 512ns | 513ns | +0.2% | 2.5% / 2.1% |
+| `fuzzy_distance_short` | 461ns | 455ns | -1.3% | 2.6% / 1.1% |
+| `fuzzy_distance_long` | 2.420µs | 2.443µs | +1.0% | 3.1% / 0.1% |
+| `fuzzy_match` | 462ns | 459ns | -0.6% | 2.8% / 0.4% |
+| `fuzzy_search_short` | 2.683µs | 2.690µs | +0.3% | 4.6% / 2.2% |
+| `fuzzy_search_long_256B` | 27.521µs | 27.651µs | +0.5% | 0.2% / 11.0% |
+| `fuzzy_search_prefix` | 1.524µs | 1.557µs | +2.2% | 4.9% / 2.2% |
+| `fuzzy_case_insensitive` | 583ns | 590ns | +1.2% | 0.5% / 1.7% |
+| `fuzzy_medium_pattern_distance` | 14.999µs | 15.070µs | +0.5% | 1.1% / 1.7% |
+| `vim_compile_magic` | 4.849µs | 4.883µs | +0.7% | 5.4% / 2.2% |
+| `vim_compile_very_magic` | 4.827µs | 4.783µs | -0.9% | 0.0% / 5.5% |
+| `vim_compile_nomagic` | 4.888µs | 4.774µs | -2.3% | 3.0% / 2.7% |
+| `vim_compile_very_nomagic` | 4.918µs | 4.844µs | -1.5% | 3.4% / 1.6% |
+| `vim_compile_zs_ze` | 5.042µs | 5.050µs | +0.2% | 0.4% / 1.4% |
+| `vim_compile_posix` | 5.077µs | 5.074µs | -0.1% | 1.8% / 0.9% |
+| `vim_search_magic` | 5.321µs | 5.352µs | +0.6% | 1.5% / 1.4% |
+| `vim_search_very_magic` | 5.409µs | 5.334µs | -1.4% | 2.9% / 2.8% |
+| `vim_search_nomagic` | 5.354µs | 5.270µs | -1.6% | 1.3% / 2.5% |
+| `vim_search_very_nomagic` | 5.361µs | 5.320µs | -0.8% | 1.5% / 4.0% |
+| `vim_search_zs_ze` | 1.731µs | 1.691µs | -2.3% | 2.7% / 1.5% |
+| `vim_search_posix` | 1.981µs | 1.957µs | -1.2% | 3.6% / 2.7% |
+| `vim_search_word_bound` | 1.963µs | 1.945µs | -0.9% | 2.5% / 10.1% |
+
+### Note — binary size, not speed
+
+The pin bump carries a large **binary-size** regression that these
+timings do not capture: the DCE'd smoke binary grew 4,544 B → 401,240 B,
+bisected to cyrius 6.5.15 → 6.5.16. See CHANGELOG § 1.0.7 and
+`development/state.md` § Toolchain. Runtime performance is unaffected —
+that is what the table above establishes.

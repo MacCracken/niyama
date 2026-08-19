@@ -279,9 +279,10 @@ project, not niyama-specific.
 
 - **Toolchain pin**: `cyrius = "X.Y.Z"` field in `cyrius.cyml
   [package]`. **No separate `.cyrius-toolchain` file.** CI and
-  release both read from `cyrius.cyml`. Currently pinned to
-  `6.1.27` (floor is `5.8.65` per ADR 0008 for stdlib `lib/unicode/`;
-  bumped to track the installed wrapper).
+  release both read from `cyrius.cyml`. The live pin number is
+  **state** — see `docs/development/state.md` § Toolchain; the
+  floor is `5.8.65` per ADR 0008 for stdlib `lib/unicode/`, and
+  the pin is bumped to track the installed wrapper.
 - **Dead code elimination**: every `cyrius build` in CI and
   release runs with `CYRIUS_DCE=1`. Binary size is a release
   metric — track in CHANGELOG.
@@ -306,7 +307,7 @@ project, not niyama-specific.
   `docs/development/state.md`. If the hook doesn't, fix the hook
   — don't hand-maintain state.
 - **`cyrius audit`**: known-broken from 5.8.65 onward (missing
-  `~/.cyrius/bin/check.sh`); verify against the live 6.1.27
+  `~/.cyrius/bin/check.sh`); verify against the live pinned
   toolchain before relying on it. Run constituents individually
   (`cyrius lint` + `cyrius test` + `cyrius fuzz` + clean DCE
   build) until the toolchain bug is fixed.
@@ -354,9 +355,10 @@ docs/ (when earned — niyama doesn't have yet):
 ## .gitignore (Required)
 
 niyama-specific .gitignore — note divergence from the example
-template: niyama **keeps `dist/niyama.cyr` and `lib/*.cyr`
-checked in** (vendored stdlib + fold-ready artifact, both
-load-bearing).
+template: niyama **keeps `dist/niyama.cyr` checked in** (the
+fold-ready artifact is load-bearing). `lib/` is *not* checked in
+— it is populated by `cyrius deps` from `cyrius.cyml [deps]` and
+is a build artifact.
 
 ```gitignore
 # Build
@@ -388,16 +390,23 @@ Thumbs.db
 .env.*
 *.pem
 *.key
+
+# `lib/` is populated by `cyrius deps` from cyrius.cyml [deps] — a
+# build artifact, not source. Never commit; never replace with a
+# symlink to a cyrius checkout.
+/lib/
 ```
 
 **Note**: unlike the agnosticos template, niyama does NOT ignore:
 - `/dist/` — `dist/niyama.cyr` is the fold-ready bundled artifact,
   byte-identical to what cyrius stdlib will vendor as
   `lib/niyama.cyr` post-fold. Checked in.
-- `lib/*.cyr` — niyama vendors the cyrius stdlib subset it needs
-  (alloc, string, fmt, vec, str, syscalls, assert, unicode/*).
-  `cyrius update` re-vendors from the toolchain. Checked in to
-  freeze the stdlib version with the niyama version.
+
+niyama DOES ignore `/lib/`, matching the template: `cyrius deps`
+vendors the stdlib subset niyama declares in `cyrius.cyml [deps]`
+(string, fmt, alloc, io, vec, str, syscalls, assert, unicode) into
+`lib/` on demand. The stdlib version is frozen by the `cyrius`
+pin, not by committing the vendored copy.
 
 ## CHANGELOG Format
 

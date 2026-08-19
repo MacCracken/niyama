@@ -4,6 +4,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.7] — 2026-08-19
+
+### Changed
+
+- `cyrius` pin bumped 6.4.64 → 6.5.29 — matches installed toolchain wrapper
+  (6.4.64 pin had drifted; wrapper printed `manifest-pin: 6.4.64 (drift — wrapper
+  is 6.5.29)` on every invocation). No engine source changes — niyama's `[deps]`
+  carries no carved-out modules. Verified green on 6.5.29: `cyrius deps --no-lock`
+  resolves cleanly (21 stdlib files + 7 under `lib/unicode/`), clean DCE build OK,
+  `.tcyr` suite 6 files / 661 assertions, `cyrius fuzz` 5 harnesses / 1689
+  assertions, all 5 per-engine bench harnesses (`bre`, `re2`, `pcre`, `fuzzy`,
+  `vim`) run clean — 0 failures throughout.
+- `dist/niyama.cyr` regenerated via `cyrius distlib` at v1.0.7 (6664 lines,
+  byte-identical to v1.0.6 except the version header — pin-only release).
+
+### Fixed
+
+- **`src/main.cyr` smoke banner wrote 2 bytes past the end of its string
+  literal.** The `syscall(1, 1, "...", 87)` write length was 87 while the literal
+  is 85 bytes, so every run emitted two bytes of adjacent `.rodata` to stdout
+  (visible as a trailing `00 00` in `./build/niyama | hexdump -C`). Corrected to
+  85. Severity **LOW** (defense in depth): the over-read is a fixed 2-byte
+  constant into the program's own read-only segment, is not attacker-influenced
+  (niyama's smoke entry takes no input), and cannot reach past the mapped page.
+  Pre-existing since v1.0.0; found by the v1.0.7 buffer-safety re-scan per
+  CLAUDE.md § Security Hardening step 2. Engine code is unaffected — the defect
+  was confined to the smoke entry, which is not part of the frozen
+  `niyama_<engine>_*` surface and not included in `dist/niyama.cyr`.
+- Smoke banner version string was pinned at `niyama 1.0.0` since the v1.0.0
+  freeze; it now reports the real `VERSION` (`niyama 1.0.7`). The replacement is
+  length-neutral, so the corrected 85-byte write stays exact.
+
+### Tests / fuzz
+
+- No assertion-count change: `cyrius test` 6 files / **661 assertions**,
+  `cyrius fuzz` 5 harnesses / **1689 assertions**, both 0 failures — identical
+  to the v1.0.6 baseline re-measured on 6.4.64 immediately before the bump.
+
+### Bench
+
+- **No regression.** All **57** measurements across the 5 harnesses compared
+  old-pin (6.4.64) vs new-pin (6.5.29) on the same host, same tree, same
+  vendored `lib/`. Single-run sampling showed 14 rows apparently over the ±5%
+  action threshold, so each pin was re-run **3×** and compared on per-row
+  medians: **0 rows** exceed ±5% once each row's own run-to-run spread is
+  accounted for. Aggregate drift mean **+0.04%**, median **+0.20%**. The one
+  row still nominally over threshold, `bre_search_class` (+7.0%), has an
+  old-side spread of 8.3% — noise, not signal. Both pins report the same
+  measured timer floor (~1.34µs/clock-read, subtracted per sample), so the
+  comparison is methodologically like-for-like.
+
+### Toolchain notes — binary size regression upstream (not a niyama defect)
+
+- **The DCE'd smoke binary grew 4,544 B → 401,240 B (~88×) purely from the pin
+  bump.** Same source, same vendored `lib/`, `CYRIUS_DCE=1` both sides:
+
+  | pin | `.text` | `.rodata` | total |
+  |---|---:|---:|---:|
+  | 6.4.64 | 160 B | 86 B | **4,544 B** |
+  | 6.5.29 | 88,912 B | 307,308 B | **401,240 B** |
+
+  6.4.64 pruned the manifest-included stdlib down to just what `main` reaches
+  (160 B of `.text`). 6.5.29 emits every included module: the 307 KB of
+  `.rodata` corresponds to the `lib/unicode/{_normalize,_casefold,_categories}_data.cyr`
+  tables, which the smoke entry never references. `CYRIUS_DCE=1` no longer
+  changes the output size at all on 6.5.29 — it reports `358 unreachable fns
+  (60698 bytes NOPed)`, i.e. dead functions are overwritten in place rather than
+  removed, and unreferenced data tables are never dropped.
+
+  Bisected across installed toolchains to **6.5.15 → 6.5.16** as the transition.
+  The cyrius 6.5.16 CHANGELOG documents no such change, so this appears to be an
+  undocumented side-effect rather than an intended trade. **Correctness is
+  unaffected** — tests, fuzz, and benches are all green and the binary runs
+  correctly — so the bump is not blocked, but binary size is a tracked release
+  metric per CLAUDE.md § CI/Release and the regression is recorded here rather
+  than absorbed silently. Worth filing upstream against cyrius.
+
+  Scope note: this affects the **smoke binary only**. niyama ships as a library;
+  its consumer-facing artifact is the `dist/niyama.cyr` source bundle, which is
+  unchanged in size.
+
+
 ## [1.0.6] — 2026-07-16
 
 ### Changed
