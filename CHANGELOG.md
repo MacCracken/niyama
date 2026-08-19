@@ -55,36 +55,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   measured timer floor (~1.34µs/clock-read, subtracted per sample), so the
   comparison is methodologically like-for-like.
 
-### Toolchain notes — binary size regression upstream (not a niyama defect)
+### Toolchain notes — binary size grew because `[deps]` finally links
 
-- **The DCE'd smoke binary grew 4,544 B → 401,240 B (~88×) purely from the pin
-  bump.** Same source, same vendored `lib/`, `CYRIUS_DCE=1` both sides:
+- **The DCE'd smoke binary grew 4,544 B → 401,240 B (~88×) across the bump.**
+  The cause is *not* lost dead-code elimination — it is that cyrius **≤ 6.5.15
+  silently ignored `[deps] stdlib` auto-include**, and **6.5.16 fixed it**. The
+  old binary was small because the declared stdlib was never linked at all.
 
-  | pin | `.text` | `.rodata` | total |
-  |---|---:|---:|---:|
-  | 6.4.64 | 160 B | 86 B | **4,544 B** |
-  | 6.5.29 | 88,912 B | 307,308 B | **401,240 B** |
+  Measured with a probe calling `unicode_category(48)` / `unicode_category(65)`
+  with **no explicit `include`**, relying solely on `cyrius.cyml [deps]`:
 
-  6.4.64 pruned the manifest-included stdlib down to just what `main` reaches
-  (160 B of `.text`). 6.5.29 emits every included module: the 307 KB of
-  `.rodata` corresponds to the `lib/unicode/{_normalize,_casefold,_categories}_data.cyr`
-  tables, which the smoke entry never references. `CYRIUS_DCE=1` no longer
-  changes the output size at all on 6.5.29 — it reports `358 unreachable fns
-  (60698 bytes NOPed)`, i.e. dead functions are overwritten in place rather than
-  removed, and unreferenced data tables are never dropped.
+  | toolchain | result |
+  |---|---|
+  | 6.4.64, 6.5.10, 6.5.14, 6.5.15 | `warning: undefined function 'unicode_category'` ×3, no working binary |
+  | 6.5.16, 6.5.17, 6.5.20, 6.5.29 | builds, returns the correct categories (exit 80), 0 warnings |
 
-  Bisected across installed toolchains to **6.5.15 → 6.5.16** as the transition.
-  The cyrius 6.5.16 CHANGELOG documents no such change, so this appears to be an
-  undocumented side-effect rather than an intended trade. **Correctness is
-  unaffected** — tests, fuzz, and benches are all green and the binary runs
-  correctly — so the bump is not blocked, but binary size is a tracked release
-  metric per CLAUDE.md § CI/Release and the regression is recorded here rather
-  than absorbed silently. Worth filing upstream against cyrius.
+  Note the old failure mode was a **warning, not an error** — a manifest-only
+  build could emit a binary containing an undefined call.
+
+  So the new size is the manifest's 9 declared stdlib modules being linked as
+  declared, ~307 KB of which is the `lib/unicode/*_data.cyr` tables. With an
+  explicit `include "lib/unicode/categories.cyr"` — the spelling niyama actually
+  uses — 6.4.64 links fine and produces 66,920 B, confirming the module itself
+  was always reachable when named directly.
+
+- **niyama was never functionally affected**, which is why this went unnoticed
+  through v1.0.6. Every `tests/*.tcyr` and every engine consumer uses explicit
+  `include` lines (`lib/unicode/categories.cyr`, `casefold.cyr`, `normalize.cyr`,
+  …), and `src/main.cyr` references no stdlib at all — it only uses the `syscall`
+  builtin. Nothing ever depended on the broken auto-include path.
+
+- **Residual observation** (not acted on): 6.5.16+ links every module the
+  manifest declares whether or not the entry point references it, so the smoke
+  binary carries the full unicode tables it never calls. That is defensible
+  link-as-declared behaviour rather than a defect, and `[deps]` is shared with
+  the library surface, so it stays as-is. Recorded because binary size is a
+  tracked release metric per CLAUDE.md § CI/Release.
 
   Scope note: this affects the **smoke binary only**. niyama ships as a library;
-  its consumer-facing artifact is the `dist/niyama.cyr` source bundle, which is
-  unchanged in size.
-
+  its consumer-facing artifact is the `dist/niyama.cyr` source bundle, whose size
+  is unchanged.
 
 ## [1.0.6] — 2026-07-16
 

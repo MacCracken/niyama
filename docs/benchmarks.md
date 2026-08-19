@@ -273,8 +273,10 @@ spread is 8.3% — noise.
 
 ### Note — binary size, not speed
 
-The pin bump carries a large **binary-size** regression that these
-timings do not capture: the DCE'd smoke binary grew 4,544 B → 401,240 B,
-bisected to cyrius 6.5.15 → 6.5.16. See CHANGELOG § 1.0.7 and
-`development/state.md` § Toolchain. Runtime performance is unaffected —
-that is what the table above establishes.
+The pin bump also changed **binary size**, which these timings do not
+capture: the DCE'd smoke binary grew 4,544 B → 401,240 B. That is a fix
+rather than a regression — cyrius ≤ 6.5.15 silently ignored
+`[deps] stdlib` auto-include, so the old binary simply had no stdlib
+linked into it. Runtime performance is unaffected, which is what the
+table above establishes. See CHANGELOG § 1.0.7 and
+`development/state.md` § Toolchain.

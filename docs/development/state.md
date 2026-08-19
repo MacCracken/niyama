@@ -12,11 +12,13 @@ header. Fixed a pre-existing 2-byte `.rodata` over-read in the
 `src/main.cyr` smoke banner (write length 87 vs an 85-byte
 literal, LOW severity, outside the frozen engine surface) and
 un-pinned that banner's hardcoded `1.0.0` version string.
-Recorded a **binary-size regression upstream**: the DCE'd smoke
-binary grew 4,544 B → 401,240 B purely from the pin bump,
-bisected to cyrius 6.5.15 → 6.5.16 and undocumented in the cyrius
-CHANGELOG — correctness unaffected, tests/fuzz/bench all green.
-See CHANGELOG § 1.0.7 for the full section table.
+The smoke binary grew 4,544 B → 401,240 B across the bump —
+**not** a regression: cyrius ≤ 6.5.15 silently ignored
+`[deps] stdlib` auto-include, and 6.5.16 fixed it, so the declared
+stdlib (incl. the ~307 KB `lib/unicode/*_data.cyr` tables) is now
+actually linked. niyama was never affected functionally — all
+`.tcyr` files and engine consumers use explicit `include` lines.
+Tests/fuzz/bench all green. See CHANGELOG § 1.0.7.
 
 **1.0.1** — fold-trigger release shipped 2026-05-06. ADR 0011
 **triggered**: cyrius v5.9.0 vendored `dist/niyama.cyr` from this
@@ -73,16 +75,21 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
   → `6.1.27` at v1.0.4 → `6.2.1` at v1.0.5 → `6.4.64` at v1.0.6
   → `6.5.29` at v1.0.7 (each matches the installed wrapper at
   the time; zero engine source changes across all of them).
-- **Known toolchain regression (6.5.16+)**: whole-program pruning
-  of manifest-included stdlib modules no longer happens. The
-  smoke binary went 4,544 B → 401,240 B on the v1.0.7 bump —
-  `.rodata` carries the full ~307 KB `lib/unicode/*_data.cyr`
-  tables even though the smoke entry never references them, and
-  `CYRIUS_DCE=1` NOPs dead functions in place instead of removing
-  them (no size change). Bisected to 6.5.15 → 6.5.16; not
-  documented in the cyrius CHANGELOG. Correctness unaffected.
-  Library consumers are unaffected — the shipped artifact is the
-  `dist/niyama.cyr` source bundle, not the binary.
+- **`[deps] stdlib` auto-include only works from cyrius 6.5.16.**
+  Every toolchain through 6.5.15 silently ignored manifest-declared
+  stdlib deps — a probe calling `unicode_category()` with no
+  explicit `include` drew `warning: undefined function` (a warning,
+  **not** an error) on 6.4.64 / 6.5.10 / 6.5.14 / 6.5.15, and links
+  correctly on 6.5.16 onward. This is why the v1.0.7 smoke binary
+  went 4,544 B → 401,240 B: the declared stdlib is now genuinely
+  linked, ~307 KB of it the `lib/unicode/*_data.cyr` tables.
+  **niyama never relied on the broken path** — all `tests/*.tcyr`
+  and engine consumers name their stdlib modules with explicit
+  `include` lines, and `src/main.cyr` references no stdlib at all.
+  Consequence to remember: 6.5.16+ links every declared module
+  whether or not the entry point uses it, so the smoke binary
+  carries tables it never calls. Library consumers are unaffected —
+  the shipped artifact is the `dist/niyama.cyr` source bundle.
 
 ## Source
 
