@@ -140,6 +140,7 @@ var _vim_m_msaves = 0;
 var _vim_m_cp_slot = 0;
 
 fn _vim_lazy_init(): i64 {
+    _nfa_init();
     if (_vim_m_init == 1) { return 0; }
     _vim_m_cur     = alloc(8 + VIM_MAX_INSTRS * 168);
     _vim_m_next    = alloc(8 + VIM_MAX_INSTRS * 168);
@@ -206,54 +207,36 @@ fn _vim_emit_uchar(cp): i64 {
     return _vim_emit_raw(VIM_OP_UCHAR | (cp << 32), 0);
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _vim_patch_arg1(idx, arg1): i64 {
-    var off = _vim_instr_base + idx * 16;
-    var w0 = load64(off);
-    store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
-    return 0;
+    return _nfa_patch_arg1(_vim_instr_base, idx, arg1);
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _vim_patch_arg2(idx, arg2): i64 {
-    store64(_vim_instr_base + idx * 16 + 8, arg2);
-    return 0;
+    return _nfa_patch_arg2(_vim_instr_base, idx, arg2);
 }
 
 # v1.0.9 — snapshot instructions [lo, hi) into _vim_tmpl. Returns the count.
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _vim_tmpl_save(lo, hi): i64 {
-    var n = hi - lo;
-    var i = 0;
-    while (i < n) {
-        store64(_vim_tmpl + i * 16,     load64(_vim_instr_base + (lo + i) * 16));
-        store64(_vim_tmpl + i * 16 + 8, load64(_vim_instr_base + (lo + i) * 16 + 8));
-        i = i + 1;
-    }
-    return n;
+    return _nfa_tmpl_save(_vim_instr_base, _vim_tmpl, lo, hi);
 }
 
 # v1.0.9 — append a relocated copy of the saved template at _vim_instr_n. Branch
 # targets inside [lo, lo+n] shift by (dst - lo); a target of exactly lo+n means
 # "fall out of the atom" and the same delta lands it just past the copy.
+# v1.0.10 — the target-relocation arithmetic moved to _nfa_tmpl_reloc in
+# src/nfa_edit.cyr (identical in bre/re2/vim, and the part that is easy to
+# get wrong). The emit stays here: only _vim_emit_raw knows this engine's
+# MAX_INSTRS ceiling and error code.
 fn _vim_tmpl_append(lo, n): i64 {
     var dst = _vim_instr_n;
     var delta = dst - lo;
-    var hi = lo + n;
     var i = 0;
     while (i < n) {
-        var w0 = load64(_vim_tmpl + i * 16);
-        var w1 = load64(_vim_tmpl + i * 16 + 8);
-        var op = w0 & 0xFF;
-        var is_branch = 0;
-        if (op == VIM_OP_JMP)   { is_branch = 1; }
-        if (op == VIM_OP_SPLIT) { is_branch = 1; }
-        if (is_branch == 1) {
-            var a1 = (w0 >> 32) & 0xFFFFFFFF;
-            if (a1 >= lo && a1 <= hi) {
-                w0 = (w0 & 0xFFFFFFFF) | ((a1 + delta) << 32);
-            }
-            if (op == VIM_OP_SPLIT) {
-                if (w1 >= lo && w1 <= hi) { w1 = w1 + delta; }
-            }
-        }
+        var w0 = _nfa_tmpl_reloc(_vim_tmpl, i, lo, n, delta);
+        var w1 = load64(_nfa_slot);
         _vim_emit_raw(w0, w1);
         if (_vim_err != VIM_E_OK) { return 0; }
         i = i + 1;
@@ -261,53 +244,29 @@ fn _vim_tmpl_append(lo, n): i64 {
     return 0;
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr (was a byte-identical copy in
+# each of the four engines). The MAX_INSTRS ceiling check stays at the call
+# sites, which is where v1.0.9 put it — the shared helper cannot see it.
 fn _vim_shift_right(lo, hi): i64 {
-    var k = (hi - lo) * 16 - 1;
-    while (k >= 0) {
-        var src = _vim_instr_base + lo * 16 + k;
-        store8(src + 16, load8(src));
-        k = k - 1;
-    }
-    return 0;
+    return _nfa_shift_right(_vim_instr_base, lo, hi);
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr. bre, re2 and vim share the same
+# branch-opcode set (JMP, SPLIT) and the same numbering, so one
+# implementation covers all three. pcre carries more branch-carrying opcodes
+# and keeps its own extended version.
 fn _vim_shift_targets_one(lo, hi): i64 {
-    var i = lo + 1;
-    var end = hi + 1;
-    while (i < end) {
-        var off = _vim_instr_base + i * 16;
-        var w0 = load64(off);
-        var op = w0 & 0xFF;
-        var is_branch = 0;
-        if (op == VIM_OP_JMP)   { is_branch = 1; }
-        if (op == VIM_OP_SPLIT) { is_branch = 1; }
-        if (is_branch == 1) {
-            var arg1 = (w0 >> 32) & 0xFFFFFFFF;
-            if (arg1 >= lo && arg1 <= hi) {
-                _vim_patch_arg1(i, arg1 + 1);
-            }
-            if (op == VIM_OP_SPLIT) {
-                var arg2 = load64(off + 8);
-                if (arg2 >= lo && arg2 <= hi) {
-                    _vim_patch_arg2(i, arg2 + 1);
-                }
-            }
-        }
-        i = i + 1;
-    }
-    return 0;
+    return _nfa_shift_targets_one(_vim_instr_base, lo, hi);
 }
 
 # === Class bitmap helpers ============================================
 
+# v1.0.10 — the 32-byte bitmap zeroing moved to src/nfa_edit.cyr; the counter
+# and the MAX_CLASSES bound stay here because the error code is per-engine.
 fn _vim_alloc_class(): i64 {
     var ci = _vim_class_n;
     if (ci >= VIM_MAX_CLASSES) { _vim_err = VIM_E_TOO_LARGE; return ci; }
-    var z = 0;
-    while (z < 32) {
-        store8(_vim_class_base + ci * 32 + z, 0);
-        z = z + 1;
-    }
+    _nfa_zero_class(_vim_class_base, ci);
     _vim_class_n = ci + 1;
     return ci;
 }
@@ -509,22 +468,15 @@ fn _vim_anchor_eol_bare(c, at_end): i64 {
 
 # === Pattern decoder =================================================
 
+# v1.0.10 — delegates to src/nfa_edit.cyr. The shared decoder returns
+# (0 - 1) when the pattern ends mid-token; each engine maps that to its own
+# SYNTAX code (all four number it 1, but each owns its own error global).
 fn _vim_lit_byte(): i64 {
-    if (_vim_pos >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0; }
-    var c = load8(_vim_pat + _vim_pos);
-    _vim_pos = _vim_pos + 1;
-    if (c != 92) { return c; }
-    if (_vim_pos >= _vim_pat_len) { _vim_err = VIM_E_SYNTAX; return 0; }
-    var e = load8(_vim_pat + _vim_pos);
-    _vim_pos = _vim_pos + 1;
-    if (e == 110) { return 10; }
-    if (e == 114) { return 13; }
-    if (e == 116) { return 9; }
-    if (e == 48)  { return 0; }
-    if (e == 97)  { return 7; }
-    if (e == 102) { return 12; }
-    if (e == 118) { return 11; }
-    return e;
+    store64(_nfa_slot, _vim_pos);
+    var c = _nfa_lit_byte(_vim_pat, _vim_pat_len, _nfa_slot);
+    _vim_pos = load64(_nfa_slot);
+    if (c < 0) { _vim_err = VIM_E_SYNTAX; return 0; }
+    return c;
 }
 
 # Parse `[...]` body (caller consumed `[`). Returns class index;

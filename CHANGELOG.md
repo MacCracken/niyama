@@ -4,6 +4,118 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.10] — 2026-09-08
+
+Refactor release: the cross-engine duplication that v1.0.9's audit
+identified but deferred. **No behaviour change** — no engine semantics, no
+error codes, no public surface. 779 assertions and 1689 fuzz assertions
+pass unchanged, and no benchmark row moved.
+
+### Added
+
+- **`src/nfa_edit.cyr`** — shared NFA-blob edit primitives, the first new
+  module since v0.8.0. All four regex engines compile to the same
+  instruction-blob shape (flat 16-byte instructions; opcode in bits 0-7,
+  small operand in 8-31, arg1 in 32-63, arg2 in word1), and each had grown
+  its own byte-identical copy of the primitives that edit it. The module
+  takes `instr_base` explicitly rather than reading an engine global, which
+  is the only reason the code can be shared at all.
+
+  It is concatenated **first** in `cyrius.cyml [lib] modules`, ahead of
+  `posix_classes`, and is included before the engine in the 12
+  test/fuzz/bench files that pull in a *regex* engine — Cyrius is
+  single-pass, so a module may only reference symbols defined earlier. The
+  three `fuzzy` harnesses do not include it: fuzzy is the one engine with
+  no instruction array at all (Levenshtein DP), so it references nothing in
+  the module.
+  **Consumers of `dist/niyama.cyr` are unaffected**: the bundle is still one
+  file, and `dist/niyama.deps` is unchanged (9 stdlib leaves).
+
+### Changed
+
+- **Six primitives went from four implementations to one**, two from four
+  to two. The per-engine `_<engine>_*` entry points remain as thin
+  delegates, so **all ~183 call sites and the per-engine naming are
+  untouched** — the same pattern v1.0.9 used for `_at_word_char`.
+
+  | Primitive | Before | After |
+  |---|---|---|
+  | `_shift_right` | 4 copies | 1 |
+  | `_patch_arg1` | 4 copies | 1 |
+  | `_patch_arg2` | 4 copies | 1 |
+  | `_tmpl_save` | 4 copies | 1 |
+  | `_lit_byte` (escape decoder) | 4 copies | 1 |
+  | class-bitmap zeroing | 4 copies | 1 |
+  | `_shift_targets_one` | 4 copies | 2 |
+  | template target relocation | 4 copies | 2 |
+
+- **pcre keeps its own `_shift_targets_one` and `_tmpl_append`, on
+  purpose.** bre/re2/vim carry exactly two branch-carrying opcodes (JMP,
+  SPLIT); pcre adds LOOKAHEAD, NLOOKAHEAD, ATOMIC, LOOKBEHIND and
+  NLOOKBEHIND — all with a pc in arg1 — plus COND, whose arg1 is a *group
+  index* that must not move while its arg2 is the pc. Sharing that would
+  need a per-engine branch-opcode predicate, which buys less than it costs.
+  Both functions now carry a comment saying so, so the next reader does not
+  re-derive it.
+
+- Two responsibilities deliberately stayed with the engines rather than
+  moving into the shared module, because only the engine knows them:
+  the `MAX_INSTRS` ceiling check before a shift (added in v1.0.9 for the
+  CRITICAL heap overflow) and the `MAX_CLASSES` bound, each of which sets a
+  per-engine error code. `_nfa_lit_byte` likewise returns `0 - 1` on a
+  truncated escape and lets each engine map that to its own SYNTAX
+  constant.
+
+- **Correction to the v1.0.9 CHANGELOG.** That entry stated the reviewer's
+  claim of "four byte-identical `_lit_byte` copies" was "not accurate."
+  That was wrong, and the reviewer was right: normalising only the
+  `_<engine>_` function prefix left the error-constant *names* differing
+  (`BRE_E_SYNTAX` vs `RE2_E_SYNTAX`), which looked like a real difference.
+  Normalising the engine prefix too shows all four are byte-identical.
+  Same for `_shift_right`, `_patch_arg1`, `_patch_arg2`, `_tmpl_save` and
+  `_alloc_class`; `_shift_targets_one` and `_tmpl_append` are identical
+  across bre/re2/vim with pcre genuinely extended.
+
+### Size
+
+- **Code lines (excluding comments and blanks): 5293 → 5178, −115.**
+  Per file: bre −67, re2 −67, vim −67, pcre −30, and +116 for the new
+  shared module.
+- Raw line count is **+37**, because `src/nfa_edit.cyr` carries the
+  blob-layout and ordering documentation that four anonymous duplicate
+  copies never had. The reduction that matters is implementations per
+  primitive, not lines.
+- `dist/niyama.cyr`: 7258 → 7295 lines. DCE binary unchanged at 323 432 B.
+
+### Tests / fuzz
+
+- `cyrius test` 6 files / **779 assertions** (was 747; **+32**), 0 failures.
+  `tests/niyama.tcyr` was a 2-assertion scaffold; it is now the home for
+  **cross-engine invariants** — the assumptions no single-engine suite can
+  see:
+  - Every engine's `OP_JMP` and `OP_SPLIT` equal `NFA_OP_JMP` /
+    `NFA_OP_SPLIT`. The shared relocation code identifies branch
+    instructions by those numbers, so renumbering an engine would make it
+    treat the wrong instructions as branches and emit a corrupt program.
+    This pins the invariant instead of leaving it to be discovered as a
+    miscompile.
+  - `MAX_CLASSES` is 64 in all four (the shared bitmap zeroing strides 32
+    bytes).
+  - The shared escape decoder produces identical results through all four
+    engines (`\t`, `\n`, `\r`, `\f`, `\v`).
+  - The shared blob-edit path still compiles correct programs for the `?`,
+    `*`, alternation and `{n,m}` shapes that drive it.
+- `cyrius fuzz` 5 harnesses / **1689 assertions**, 0 failures (unchanged).
+
+### Bench
+
+- **No movement.** 53 rows, **0 over ±5%**, mean **+0.68%**, median +0.64%,
+  worst +3.5% (`fuzzy_compile_default` — and fuzzy does not use
+  `nfa_edit` at all, so that row is the measurement noise floor). The
+  delegate indirection costs nothing measurable; the primitives it wraps
+  are compile-time, not matcher-hot.
+
+
 ## [1.0.9] — 2026-09-08
 
 P(-1) hardening pass: audit, refactor, optimization and security sweep.

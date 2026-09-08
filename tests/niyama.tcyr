@@ -1,13 +1,88 @@
-# niyama test suite — M0 scaffold smoke tests.
-# Real per-engine test suites land at each milestone (tests/bre.tcyr,
-# tests/re2.tcyr, tests/pcre.tcyr, tests/fuzzy.tcyr, tests/vim.tcyr).
+# niyama test suite — cross-engine invariants.
+#
+# Per-engine coverage lives in tests/{bre,re2,pcre,fuzzy,vim}.tcyr. This file
+# holds the assumptions that span engines — the ones a single-engine suite
+# cannot see, and that shared code in src/nfa_edit.cyr depends on.
 
+include "lib/alloc.cyr"
+include "lib/string.cyr"
 include "lib/assert.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/unicode/categories.cyr"
+include "lib/unicode/casefold.cyr"
+include "lib/unicode/normalize.cyr"
+include "src/nfa_edit.cyr"
+include "src/posix_classes.cyr"
+include "src/unicode_props.cyr"
+include "src/bre.cyr"
+include "src/re2.cyr"
+include "src/pcre.cyr"
+include "src/vim.cyr"
 
 fn main() {
+    alloc_init();
+
     test_group("scaffold");
     assert(1, "scaffold is alive");
     assert_eq(1 + 1, 2, "math works");
+
+    # === v1.0.10 — shared-primitive invariants ========================
+    # src/nfa_edit.cyr relocates branch targets using NFA_OP_JMP and
+    # NFA_OP_SPLIT. That is only correct while every engine numbers those
+    # opcodes identically. If someone renumbers an engine, the shared
+    # relocation silently treats the wrong instructions as branches and
+    # produces a corrupt program — so pin it here rather than discover it
+    # as a miscompile.
+    test_group("nfa-shared-opcode-invariant");
+    assert_eq(BRE_OP_JMP,    NFA_OP_JMP,   "bre JMP matches shared");
+    assert_eq(RE2_OP_JMP,    NFA_OP_JMP,   "re2 JMP matches shared");
+    assert_eq(PCRE_OP_JMP,   NFA_OP_JMP,   "pcre JMP matches shared");
+    assert_eq(VIM_OP_JMP,    NFA_OP_JMP,   "vim JMP matches shared");
+    assert_eq(BRE_OP_SPLIT,  NFA_OP_SPLIT, "bre SPLIT matches shared");
+    assert_eq(RE2_OP_SPLIT,  NFA_OP_SPLIT, "re2 SPLIT matches shared");
+    assert_eq(PCRE_OP_SPLIT, NFA_OP_SPLIT, "pcre SPLIT matches shared");
+    assert_eq(VIM_OP_SPLIT,  NFA_OP_SPLIT, "vim SPLIT matches shared");
+
+    # The shared blob layout assumes 16-byte instructions and 32-byte class
+    # bitmaps in every engine. _nfa_shift_right / _nfa_tmpl_save stride by
+    # 16, and _nfa_zero_class clears 32.
+    test_group("nfa-shared-layout-invariant");
+    assert_eq(BRE_MAX_CLASSES,  64, "bre class count unchanged");
+    assert_eq(RE2_MAX_CLASSES,  64, "re2 class count unchanged");
+    assert_eq(PCRE_MAX_CLASSES, 64, "pcre class count unchanged");
+    assert_eq(VIM_MAX_CLASSES,  64, "vim class count unchanged");
+
+    # === Shared escape decoder behaves identically in all four ========
+    # _nfa_lit_byte replaced four byte-identical copies. Each engine still
+    # owns its own error global, so exercise the decode through all four.
+    test_group("nfa-shared-lit-byte");
+    assert_eq(niyama_bre_match(niyama_bre_compile("a\\tb"),  "a\tb"),  1, "bre \\t");
+    assert_eq(niyama_re2_match(niyama_re2_compile("a\\tb"),  "a\tb"),  1, "re2 \\t");
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("a\\tb"), "a\tb"), 1, "pcre \\t");
+    assert_eq(niyama_vim_match(niyama_vim_compile("a\\tb"),  "a\tb"),  1, "vim \\t");
+    assert_eq(niyama_bre_match(niyama_bre_compile("a\\nb"),  "a\nb"),  1, "bre \\n");
+    assert_eq(niyama_re2_match(niyama_re2_compile("a\\nb"),  "a\nb"),  1, "re2 \\n");
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("a\\nb"), "a\nb"), 1, "pcre \\n");
+    assert_eq(niyama_vim_match(niyama_vim_compile("a\\nb"),  "a\nb"),  1, "vim \\n");
+    assert_eq(niyama_re2_match(niyama_re2_compile("a\\rb"),  "a\rb"),  1, "re2 \\r");
+    assert_eq(niyama_re2_match(niyama_re2_compile("a\\fb"),  "a\fb"),  1, "re2 \\f");
+    assert_eq(niyama_re2_match(niyama_re2_compile("a\\vb"),  "a\vb"),  1, "re2 \\v");
+
+    # === Shared blob edit path still produces correct programs ========
+    # _nfa_shift_right / _nfa_shift_targets_one / _nfa_tmpl_reloc drive the
+    # quantifier, alternation and brace-repetition paths in three engines.
+    test_group("nfa-shared-edit-paths");
+    assert_eq(niyama_re2_match(niyama_re2_compile("(?:ab)?c"),   "abc"),  1, "re2 ? shift path");
+    assert_eq(niyama_re2_match(niyama_re2_compile("(?:ab)?c"),   "c"),    1, "re2 ? empty arm");
+    assert_eq(niyama_re2_match(niyama_re2_compile("(?:ab)*c"),   "ababc"),1, "re2 * shift path");
+    assert_eq(niyama_re2_match(niyama_re2_compile("ab|cd"),      "cd"),   1, "re2 alternation shift");
+    assert_eq(niyama_re2_match(niyama_re2_compile("(?:ab){2}"),  "abab"), 1, "re2 brace copy path");
+    assert_eq(niyama_re2_match(niyama_re2_compile("(?:ab){2}"),  "ab"),   0, "re2 brace rejects short");
+    assert_eq(niyama_vim_match(niyama_vim_compile("\\(ab\\)\\{2\\}"), "abab"), 1, "vim brace copy path");
+    assert_eq(niyama_bre_match(niyama_bre_compile("\\(ab\\)\\{2\\}"), "abab"), 1, "bre brace copy path");
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("(?:ab){2}"), "abab"), 1, "pcre brace copy path");
+
     return assert_summary();
 }
 

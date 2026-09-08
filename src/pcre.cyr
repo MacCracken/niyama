@@ -262,6 +262,7 @@ var _pcre_depth_limit = 256;
 var _pcre_snap_pool = 0;
 
 fn _pcre_lazy_init(): i64 {
+    _nfa_init();
     if (_pcre_init == 1) { return 0; }
     _pcre_q_splits  = alloc(PCRE_MAX_QSPLITS * 8);
     _pcre_m_cp_slot = alloc(8);
@@ -375,34 +376,32 @@ fn _pcre_compute_width(body_start, body_end): i64 {
     return width;
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _pcre_patch_arg1(idx, arg1): i64 {
-    var off = _pcre_instr_base + idx * 16;
-    var w0 = load64(off);
-    store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
-    return 0;
+    return _nfa_patch_arg1(_pcre_instr_base, idx, arg1);
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _pcre_patch_arg2(idx, arg2): i64 {
-    store64(_pcre_instr_base + idx * 16 + 8, arg2);
-    return 0;
+    return _nfa_patch_arg2(_pcre_instr_base, idx, arg2);
 }
 
 # v1.0.9 — snapshot instructions [lo, hi) into _pcre_tmpl. Returns the count.
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _pcre_tmpl_save(lo, hi): i64 {
-    var n = hi - lo;
-    var i = 0;
-    while (i < n) {
-        store64(_pcre_tmpl + i * 16,     load64(_pcre_instr_base + (lo + i) * 16));
-        store64(_pcre_tmpl + i * 16 + 8, load64(_pcre_instr_base + (lo + i) * 16 + 8));
-        i = i + 1;
-    }
-    return n;
+    return _nfa_tmpl_save(_pcre_instr_base, _pcre_tmpl, lo, hi);
 }
 
 # v1.0.9 — append a relocated copy of the saved template at _pcre_instr_n. The
 # branch set mirrors _pcre_shift_targets_one exactly: arg1 is a pc for JMP, SPLIT,
 # LOOKAHEAD/NLOOKAHEAD, ATOMIC and LOOKBEHIND/NLOOKBEHIND; SPLIT also carries a pc
 # in arg2; COND's arg1 is a GROUP INDEX and must not move, only its arg2 no_pc.
+# v1.0.10 — NOT shared with src/nfa_edit.cyr, deliberately. bre/re2/vim carry
+# exactly two branch-carrying opcodes (JMP, SPLIT); pcre adds LOOKAHEAD,
+# NLOOKAHEAD, ATOMIC, LOOKBEHIND and NLOOKBEHIND — all with a pc in arg1 —
+# plus COND, whose arg1 is a GROUP INDEX that must not move and whose arg2
+# is the pc. Folding that into the shared copy would need a per-engine
+# branch-opcode predicate, which buys less than it costs here.
 fn _pcre_tmpl_append(lo, n): i64 {
     var dst = _pcre_instr_n;
     var delta = dst - lo;
@@ -439,16 +438,19 @@ fn _pcre_tmpl_append(lo, n): i64 {
     return 0;
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr (was a byte-identical copy in
+# each of the four engines). The MAX_INSTRS ceiling check stays at the call
+# sites, which is where v1.0.9 put it — the shared helper cannot see it.
 fn _pcre_shift_right(lo, hi): i64 {
-    var k = (hi - lo) * 16 - 1;
-    while (k >= 0) {
-        var src = _pcre_instr_base + lo * 16 + k;
-        store8(src + 16, load8(src));
-        k = k - 1;
-    }
-    return 0;
+    return _nfa_shift_right(_pcre_instr_base, lo, hi);
 }
 
+# v1.0.10 — NOT shared with src/nfa_edit.cyr, deliberately. bre/re2/vim carry
+# exactly two branch-carrying opcodes (JMP, SPLIT); pcre adds LOOKAHEAD,
+# NLOOKAHEAD, ATOMIC, LOOKBEHIND and NLOOKBEHIND — all with a pc in arg1 —
+# plus COND, whose arg1 is a GROUP INDEX that must not move and whose arg2
+# is the pc. Folding that into the shared shift would need a per-engine
+# branch-opcode predicate, which buys less than it costs here.
 fn _pcre_shift_targets_one(lo, hi): i64 {
     var i = lo + 1;
     var end = hi + 1;
@@ -493,14 +495,12 @@ fn _pcre_shift_targets_one(lo, hi): i64 {
 
 # === Class bitmap helpers (mirrors re2) ==============================
 
+# v1.0.10 — the 32-byte bitmap zeroing moved to src/nfa_edit.cyr; the counter
+# and the MAX_CLASSES bound stay here because the error code is per-engine.
 fn _pcre_alloc_class(): i64 {
     var ci = _pcre_class_n;
     if (ci >= PCRE_MAX_CLASSES) { _pcre_err = PCRE_E_TOO_LARGE; return ci; }
-    var z = 0;
-    while (z < 32) {
-        store8(_pcre_class_base + ci * 32 + z, 0);
-        z = z + 1;
-    }
+    _nfa_zero_class(_pcre_class_base, ci);
     _pcre_class_n = ci + 1;
     return ci;
 }
@@ -703,22 +703,15 @@ fn _pcre_lookup_name(name_buf, name_len): i64 {
 
 # === Pattern decoder =================================================
 
+# v1.0.10 — delegates to src/nfa_edit.cyr. The shared decoder returns
+# (0 - 1) when the pattern ends mid-token; each engine maps that to its own
+# SYNTAX code (all four number it 1, but each owns its own error global).
 fn _pcre_lit_byte(): i64 {
-    if (_pcre_pos >= _pcre_pat_len) { _pcre_err = PCRE_E_SYNTAX; return 0; }
-    var c = load8(_pcre_pat + _pcre_pos);
-    _pcre_pos = _pcre_pos + 1;
-    if (c != 92) { return c; }
-    if (_pcre_pos >= _pcre_pat_len) { _pcre_err = PCRE_E_SYNTAX; return 0; }
-    var e = load8(_pcre_pat + _pcre_pos);
-    _pcre_pos = _pcre_pos + 1;
-    if (e == 110) { return 10; }
-    if (e == 114) { return 13; }
-    if (e == 116) { return 9; }
-    if (e == 48)  { return 0; }
-    if (e == 97)  { return 7; }
-    if (e == 102) { return 12; }
-    if (e == 118) { return 11; }
-    return e;
+    store64(_nfa_slot, _pcre_pos);
+    var c = _nfa_lit_byte(_pcre_pat, _pcre_pat_len, _nfa_slot);
+    _pcre_pos = load64(_nfa_slot);
+    if (c < 0) { _pcre_err = PCRE_E_SYNTAX; return 0; }
+    return c;
 }
 
 fn _pcre_parse_class(): i64 {

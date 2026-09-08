@@ -1,0 +1,188 @@
+# nfa_edit.cyr — shared NFA-blob edit primitives.
+#
+# Every niyama regex engine (bre, re2, pcre, vim) compiles to the same
+# instruction-blob shape: a flat array of 16-byte instructions, two 64-bit
+# words each.
+#
+#   word0 : bits  0..7   opcode
+#           bits  8..31  small operand (class index, capture index, ...)
+#           bits 32..63  arg1 — for branch opcodes, an absolute pc
+#   word1 : arg2 — for SPLIT, the second branch target
+#
+# The four engines grew independently across M1..M4 and ended up with
+# byte-identical copies of the primitives that edit that blob. v1.0.9's audit
+# counted the duplication; v1.0.10 folds it here, keeping one implementation of
+# each. The per-engine `_<engine>_*` entry points remain as thin delegates, so
+# all ~183 existing call sites and the per-engine naming are untouched.
+#
+# These functions take `instr_base` explicitly rather than reading an engine
+# global, which is the only reason they can be shared at all.
+#
+# Ordering: this module must be concatenated BEFORE the engines in
+# `cyrius.cyml [lib] modules` and included before them in tests/fuzz/bench —
+# Cyrius is a single-pass compiler, so a module may only reference symbols
+# defined earlier.
+#
+# All globals/functions are `_nfa_*` / `NFA_*`-prefixed for collision-free
+# coexistence with `_bre_*` / `_re2_*` / `_pcre_*` / `_vim_*`.
+
+# Branch opcodes. All four engines number these identically (JMP = 5,
+# SPLIT = 6) — a parallel-design invariant the shared relocation code depends
+# on. tests/niyama.tcyr asserts the per-engine constants still match these, so
+# renumbering an engine fails the suite rather than silently miscompiling.
+var NFA_OP_JMP   = 5;
+var NFA_OP_SPLIT = 6;
+
+# Scratch slot for functions that need an in/out integer (Cyrius has no
+# out-parameters and no tuple returns). Process-lifetime; callers write the
+# input value, call, then read the updated value back.
+var _nfa_slot = 0;
+
+fn _nfa_init(): i64 {
+    if (_nfa_slot != 0) { return 0; }
+    _nfa_slot = alloc(8);
+    return 0;
+}
+
+# Move instructions [lo, hi) one slot to the right, byte-wise from the top so
+# the copy is safe for the overlapping ranges the quantifier paths produce.
+# The caller is responsible for the MAX_INSTRS ceiling check (v1.0.9 C1) — this
+# function cannot see the engine's limit.
+fn _nfa_shift_right(instr_base, lo, hi): i64 {
+    var k = (hi - lo) * 16 - 1;
+    while (k >= 0) {
+        var src = instr_base + lo * 16 + k;
+        store8(src + 16, load8(src));
+        k = k - 1;
+    }
+    return 0;
+}
+
+fn _nfa_patch_arg1(instr_base, idx, arg1): i64 {
+    var off = instr_base + idx * 16;
+    var w0 = load64(off);
+    store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
+    return 0;
+}
+
+fn _nfa_patch_arg2(instr_base, idx, arg2): i64 {
+    store64(instr_base + idx * 16 + 8, arg2);
+    return 0;
+}
+
+# After a _nfa_shift_right(lo, hi), fix up branch targets that pointed into the
+# moved range so they follow it. A target of exactly `hi` means "fall out of the
+# range" and also moves. Handles the JMP/SPLIT opcode set shared by bre, re2 and
+# vim; pcre has additional branch-carrying opcodes and keeps its own extended
+# version (see _pcre_shift_targets_one).
+fn _nfa_shift_targets_one(instr_base, lo, hi): i64 {
+    var i = lo + 1;
+    var end = hi + 1;
+    while (i < end) {
+        var off = instr_base + i * 16;
+        var w0 = load64(off);
+        var op = w0 & 0xFF;
+        var is_branch = 0;
+        if (op == NFA_OP_JMP)   { is_branch = 1; }
+        if (op == NFA_OP_SPLIT) { is_branch = 1; }
+        if (is_branch == 1) {
+            var arg1 = (w0 >> 32) & 0xFFFFFFFF;
+            if (arg1 >= lo && arg1 <= hi) {
+                _nfa_patch_arg1(instr_base, i, arg1 + 1);
+            }
+            if (op == NFA_OP_SPLIT) {
+                var arg2 = load64(off + 8);
+                if (arg2 >= lo && arg2 <= hi) {
+                    _nfa_patch_arg2(instr_base, i, arg2 + 1);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Snapshot instructions [lo, hi) into `tmpl`. Returns the count. Used by the
+# brace-quantifier path, which repeats an atom by appending relocated copies of
+# it rather than re-parsing the source (v1.0.9 C4).
+fn _nfa_tmpl_save(instr_base, tmpl, lo, hi): i64 {
+    var n = hi - lo;
+    var i = 0;
+    while (i < n) {
+        store64(tmpl + i * 16,     load64(instr_base + (lo + i) * 16));
+        store64(tmpl + i * 16 + 8, load64(instr_base + (lo + i) * 16 + 8));
+        i = i + 1;
+    }
+    return n;
+}
+
+# Relocate template instruction `i` for a copy being appended at (lo + delta).
+# Returns the adjusted word0; writes the adjusted word1 into _nfa_slot, which
+# the caller reads back. Targets inside [lo, lo+n] shift by `delta`; a target of
+# exactly lo+n lands just past the copy, which the same delta produces.
+#
+# The emit itself stays with the engine: only _<engine>_emit_raw knows that
+# engine's MAX_INSTRS ceiling and error code. This function owns the part that
+# is identical everywhere and easy to get wrong — the target arithmetic.
+fn _nfa_tmpl_reloc(tmpl, i, lo, n, delta): i64 {
+    var w0 = load64(tmpl + i * 16);
+    var w1 = load64(tmpl + i * 16 + 8);
+    var hi = lo + n;
+    var op = w0 & 0xFF;
+    var is_branch = 0;
+    if (op == NFA_OP_JMP)   { is_branch = 1; }
+    if (op == NFA_OP_SPLIT) { is_branch = 1; }
+    if (is_branch == 1) {
+        var a1 = (w0 >> 32) & 0xFFFFFFFF;
+        if (a1 >= lo && a1 <= hi) {
+            w0 = (w0 & 0xFFFFFFFF) | ((a1 + delta) << 32);
+        }
+        if (op == NFA_OP_SPLIT) {
+            if (w1 >= lo && w1 <= hi) { w1 = w1 + delta; }
+        }
+    }
+    store64(_nfa_slot, w1);
+    return w0;
+}
+
+# Zero a 32-byte class bitmap in place. The bounds check against the engine's
+# MAX_CLASSES stays with the caller, which owns the counter and the error code.
+fn _nfa_zero_class(class_base, ci): i64 {
+    var z = 0;
+    while (z < 32) {
+        store8(class_base + ci * 32 + z, 0);
+        z = z + 1;
+    }
+    return 0;
+}
+
+# Read one literal byte from `pat` at the position held in `pos_slot`, decoding
+# a backslash escape if present, and advance the slot past what it consumed.
+# Returns the byte, or (0 - 1) if the pattern ends mid-token — the caller maps
+# that to its own SYNTAX error code (all four engines number theirs 1, but each
+# owns its own error global).
+fn _nfa_lit_byte(pat, pat_len, pos_slot): i64 {
+    var pos = load64(pos_slot);
+    if (pos >= pat_len) { return 0 - 1; }
+    var c = load8(pat + pos);
+    pos = pos + 1;
+    if (c != 92) {
+        store64(pos_slot, pos);
+        return c;
+    }
+    if (pos >= pat_len) {
+        store64(pos_slot, pos);
+        return 0 - 1;
+    }
+    var e = load8(pat + pos);
+    pos = pos + 1;
+    store64(pos_slot, pos);
+    if (e == 110) { return 10; }
+    if (e == 114) { return 13; }
+    if (e == 116) { return 9; }
+    if (e == 48)  { return 0; }
+    if (e == 97)  { return 7; }
+    if (e == 102) { return 12; }
+    if (e == 118) { return 11; }
+    return e;
+}

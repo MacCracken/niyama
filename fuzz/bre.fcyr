@@ -13,6 +13,7 @@
 include "lib/alloc.cyr"
 include "lib/string.cyr"
 include "lib/assert.cyr"
+include "src/nfa_edit.cyr"
 include "src/posix_classes.cyr"
 include "src/bre.cyr"
 

@@ -166,6 +166,7 @@ var _re2_m_msaves = 0;
 var _re2_m_cp_slot = 0;
 
 fn _re2_lazy_init(): i64 {
+    _nfa_init();
     if (_re2_m_init == 1) { return 0; }
     _re2_m_cur     = alloc(8 + RE2_MAX_INSTRS * 168);
     _re2_m_next    = alloc(8 + RE2_MAX_INSTRS * 168);
@@ -244,55 +245,37 @@ fn _re2_emit_uchar_ci(cp): i64 {
     return _re2_emit_raw(RE2_OP_UCHAR_CI | (cp << 32), 0);
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _re2_patch_arg1(idx, arg1): i64 {
-    var off = _re2_instr_base + idx * 16;
-    var w0 = load64(off);
-    store64(off, (w0 & 0xFFFFFFFF) | (arg1 << 32));
-    return 0;
+    return _nfa_patch_arg1(_re2_instr_base, idx, arg1);
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _re2_patch_arg2(idx, arg2): i64 {
-    store64(_re2_instr_base + idx * 16 + 8, arg2);
-    return 0;
+    return _nfa_patch_arg2(_re2_instr_base, idx, arg2);
 }
 
 # v1.0.9 — snapshot instructions [lo, hi) into _re2_tmpl. Returns the count.
+# v1.0.10 — delegates to src/nfa_edit.cyr.
 fn _re2_tmpl_save(lo, hi): i64 {
-    var n = hi - lo;
-    var i = 0;
-    while (i < n) {
-        store64(_re2_tmpl + i * 16,     load64(_re2_instr_base + (lo + i) * 16));
-        store64(_re2_tmpl + i * 16 + 8, load64(_re2_instr_base + (lo + i) * 16 + 8));
-        i = i + 1;
-    }
-    return n;
+    return _nfa_tmpl_save(_re2_instr_base, _re2_tmpl, lo, hi);
 }
 
 # v1.0.9 — append a relocated copy of the saved template at _re2_instr_n. `lo` is
 # the pc the template was captured from, so branch targets inside [lo, lo+n] shift
 # by (dst - lo). A target of exactly lo+n means "fall out of the atom" and must
 # relocate to the instruction just past the copy, which the same delta gives.
+# v1.0.10 — the target-relocation arithmetic moved to _nfa_tmpl_reloc in
+# src/nfa_edit.cyr (identical in bre/re2/vim, and the part that is easy to
+# get wrong). The emit stays here: only _re2_emit_raw knows this engine's
+# MAX_INSTRS ceiling and error code.
 fn _re2_tmpl_append(lo, n): i64 {
     var dst = _re2_instr_n;
     var delta = dst - lo;
-    var hi = lo + n;
     var i = 0;
     while (i < n) {
-        var w0 = load64(_re2_tmpl + i * 16);
-        var w1 = load64(_re2_tmpl + i * 16 + 8);
-        var op = w0 & 0xFF;
-        var is_branch = 0;
-        if (op == RE2_OP_JMP)   { is_branch = 1; }
-        if (op == RE2_OP_SPLIT) { is_branch = 1; }
-        if (is_branch == 1) {
-            var a1 = (w0 >> 32) & 0xFFFFFFFF;
-            if (a1 >= lo && a1 <= hi) {
-                w0 = (w0 & 0xFFFFFFFF) | ((a1 + delta) << 32);
-            }
-            if (op == RE2_OP_SPLIT) {
-                if (w1 >= lo && w1 <= hi) { w1 = w1 + delta; }
-            }
-        }
+        var w0 = _nfa_tmpl_reloc(_re2_tmpl, i, lo, n, delta);
+        var w1 = load64(_nfa_slot);
         _re2_emit_raw(w0, w1);
         if (_re2_err != RE2_E_OK) { return 0; }
         i = i + 1;
@@ -300,53 +283,29 @@ fn _re2_tmpl_append(lo, n): i64 {
     return 0;
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr (was a byte-identical copy in
+# each of the four engines). The MAX_INSTRS ceiling check stays at the call
+# sites, which is where v1.0.9 put it — the shared helper cannot see it.
 fn _re2_shift_right(lo, hi): i64 {
-    var k = (hi - lo) * 16 - 1;
-    while (k >= 0) {
-        var src = _re2_instr_base + lo * 16 + k;
-        store8(src + 16, load8(src));
-        k = k - 1;
-    }
-    return 0;
+    return _nfa_shift_right(_re2_instr_base, lo, hi);
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr. bre, re2 and vim share the same
+# branch-opcode set (JMP, SPLIT) and the same numbering, so one
+# implementation covers all three. pcre carries more branch-carrying opcodes
+# and keeps its own extended version.
 fn _re2_shift_targets_one(lo, hi): i64 {
-    var i = lo + 1;
-    var end = hi + 1;
-    while (i < end) {
-        var off = _re2_instr_base + i * 16;
-        var w0 = load64(off);
-        var op = w0 & 0xFF;
-        var is_branch = 0;
-        if (op == RE2_OP_JMP)   { is_branch = 1; }
-        if (op == RE2_OP_SPLIT) { is_branch = 1; }
-        if (is_branch == 1) {
-            var arg1 = (w0 >> 32) & 0xFFFFFFFF;
-            if (arg1 >= lo && arg1 <= hi) {
-                _re2_patch_arg1(i, arg1 + 1);
-            }
-            if (op == RE2_OP_SPLIT) {
-                var arg2 = load64(off + 8);
-                if (arg2 >= lo && arg2 <= hi) {
-                    _re2_patch_arg2(i, arg2 + 1);
-                }
-            }
-        }
-        i = i + 1;
-    }
-    return 0;
+    return _nfa_shift_targets_one(_re2_instr_base, lo, hi);
 }
 
 # === Class bitmap helpers ============================================
 
+# v1.0.10 — the 32-byte bitmap zeroing moved to src/nfa_edit.cyr; the counter
+# and the MAX_CLASSES bound stay here because the error code is per-engine.
 fn _re2_alloc_class(): i64 {
     var ci = _re2_class_n;
     if (ci >= RE2_MAX_CLASSES) { _re2_err = RE2_E_TOO_LARGE; return ci; }
-    var z = 0;
-    while (z < 32) {
-        store8(_re2_class_base + ci * 32 + z, 0);
-        z = z + 1;
-    }
+    _nfa_zero_class(_re2_class_base, ci);
     _re2_class_n = ci + 1;
     return ci;
 }
@@ -520,22 +479,15 @@ fn _re2_try_inline_flags(): i64 {
     return 1;
 }
 
+# v1.0.10 — delegates to src/nfa_edit.cyr. The shared decoder returns
+# (0 - 1) when the pattern ends mid-token; each engine maps that to its own
+# SYNTAX code (all four number it 1, but each owns its own error global).
 fn _re2_lit_byte(): i64 {
-    if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
-    var c = load8(_re2_pat + _re2_pos);
-    _re2_pos = _re2_pos + 1;
-    if (c != 92) { return c; }
-    if (_re2_pos >= _re2_pat_len) { _re2_err = RE2_E_SYNTAX; return 0; }
-    var e = load8(_re2_pat + _re2_pos);
-    _re2_pos = _re2_pos + 1;
-    if (e == 110) { return 10; }
-    if (e == 114) { return 13; }
-    if (e == 116) { return 9; }
-    if (e == 48)  { return 0; }
-    if (e == 97)  { return 7; }
-    if (e == 102) { return 12; }
-    if (e == 118) { return 11; }
-    return e;
+    store64(_nfa_slot, _re2_pos);
+    var c = _nfa_lit_byte(_re2_pat, _re2_pat_len, _nfa_slot);
+    _re2_pos = load64(_nfa_slot);
+    if (c < 0) { _re2_err = RE2_E_SYNTAX; return 0; }
+    return c;
 }
 
 # Parse a `[...]` bracket-expression body. Returns the class index;

@@ -5,6 +5,24 @@
 
 ## Version
 
+**1.0.10** — refactor release shipped 2026-09-08. Lands the
+cross-engine duplication v1.0.9's audit identified but deferred. New
+shared module **`src/nfa_edit.cyr`** holds the NFA-blob edit primitives
+every engine had its own byte-identical copy of; six primitives went
+from four implementations to one, two from four to two (pcre keeps
+extended versions — it has five more branch-carrying opcodes plus
+COND, whose arg1 is a group index that must not relocate). The
+per-engine `_<engine>_*` entry points remain thin delegates, so all
+~183 call sites and the per-engine naming are untouched. **No
+behaviour change**: no engine semantics, no error codes, no public
+surface. Code lines 5293 → 5178 (−115); raw lines +37 because the
+shared module carries the layout/ordering documentation four anonymous
+copies never had. Tests 747 → **779** — `tests/niyama.tcyr` is now the
+cross-engine invariant suite, pinning `OP_JMP`/`OP_SPLIT` numbering
+across all four engines because the shared relocation code identifies
+branches by those numbers. Bench: 53 rows, **0 over ±5%**, mean
++0.68%. See CHANGELOG § 1.0.10.
+
 **1.0.9** — P(-1) hardening pass shipped 2026-09-08. Audit,
 refactor, optimization and security sweep. **One CRITICAL and eight
 HIGH findings, all fixed** — a heap out-of-bounds write via a crafted
@@ -165,6 +183,13 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 
 - `src/main.cyr` — smoke entry (prints identity banner).
 - `src/test.cyr` — top-level test entry per `[build].test`.
+- **`src/nfa_edit.cyr`** — shared NFA-blob edit primitives (v1.0.10).
+  `_nfa_shift_right`, `_nfa_patch_arg1/2`, `_nfa_shift_targets_one`,
+  `_nfa_tmpl_save`, `_nfa_tmpl_reloc`, `_nfa_zero_class`,
+  `_nfa_lit_byte`. Takes `instr_base` explicitly rather than reading an
+  engine global, which is what makes sharing possible. **Must come first**
+  in `[lib] modules` and in every test/fuzz/bench include list — Cyrius is
+  single-pass. ~188 lines.
 - **`src/posix_classes.cyr`** — shared POSIX bracket-class fillers
   + name recognizer (v0.7.0). vim folded onto this module at v0.8.0.
 - **`src/unicode_props.cyr`** — shared `\p{NAME}` / `\P{NAME}`
@@ -254,7 +279,10 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
 - `dist/niyama.deps` — sidecar emitted by `cyrius distlib` from 6.6.0
   (v1.0.8), listing the 9 stdlib leaf requirements for downstream
   `cyrius deps`. Checked in alongside the bundle.
-- `dist/niyama.cyr` — single-include bundle. v0.8.0 prepends both
+- `dist/niyama.cyr` — single-include bundle. v1.0.10 prepends
+  `src/nfa_edit.cyr` ahead of the two other shared modules; consumers are
+  unaffected because the bundle is still one file and `dist/niyama.deps`
+  is unchanged. v0.8.0 prepends both
   shared modules (`src/posix_classes.cyr` then `src/unicode_props.cyr`)
   ahead of the five engine modules. Consumers also need stdlib
   `lib/str.cyr` and `lib/unicode/{categories,casefold,normalize}.cyr`.
@@ -262,7 +290,13 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
 
 ## Tests
 
-- `tests/niyama.tcyr` — scaffold smoke (2 assertions).
+- `tests/niyama.tcyr` — **cross-engine invariants** (34 assertions,
+  was a 2-assertion scaffold). Pins the assumptions no single-engine suite
+  can see: every engine's `OP_JMP`/`OP_SPLIT` must equal `NFA_OP_JMP`/
+  `NFA_OP_SPLIT` (the shared relocation code identifies branches by those
+  numbers, so renumbering an engine would silently emit a corrupt program),
+  `MAX_CLASSES == 64` everywhere, and the shared escape decoder and
+  blob-edit paths behaving identically across engines.
 - **`tests/bre.tcyr`** — 123 BRE assertions (v1.0.9: +11).
 - **`tests/re2.tcyr`** — 199 RE2 assertions (v1.0.9: +24).
 - **`tests/pcre.tcyr`** — 225 PCRE assertions (v1.0.9: +19).
@@ -274,9 +308,9 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
   stdlib does not expose. 6 runnable bench harnesses total.
 - **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
 
-Aggregate: `cyrius test` reports **6 files, 747 assertions** all passing
-(was 661 at v1.0.8; +86 v1.0.9 P(-1) regression coverage — every
-CRITICAL/HIGH/MEDIUM finding in the 2026-09-08 audit has an assertion).
+Aggregate: `cyrius test` reports **6 files, 779 assertions** all passing
+(661 at v1.0.8 → 747 at v1.0.9 with the P(-1) regression coverage →
+779 at v1.0.10 with the cross-engine invariant suite).
 `cyrius fuzz` reports **5 files, 1689 assertions** all passing
 (unchanged from v0.9.0; no engine code changes).
 
