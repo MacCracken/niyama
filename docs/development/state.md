@@ -5,6 +5,33 @@
 
 ## Version
 
+**1.0.9** — P(-1) hardening pass shipped 2026-09-08. Audit,
+refactor, optimization and security sweep. **One CRITICAL and eight
+HIGH findings, all fixed** — a heap out-of-bounds write via a crafted
+nested-`?` pattern (all four engines' shift-based growth paths bypassed
+the `MAX_INSTRS` ceiling), three unbounded unreclaimable heap-growth
+sites (per-start-position and per-backtrack `alloc()` on a bump
+allocator that never frees — measured 6.4 MB and 45.7 MB retained,
+both now 0), a catastrophic-backtracking guard that was `(len+1)x`
+weaker than documented, and `{n,m}` compiled by re-parsing the atom
+(corrupting capture numbering and falsely rejecting `(a){10}` /
+`(?<x>a){2}` in all four engines). Plus 6 MEDIUM and 6 LOW. Every
+finding was reproduced with a compiled probe before repair.
+**All 53 bench rows faster or neutral, 0 regressions, mean −14.29%** —
+a side effect of removing locked `alloc()` calls from the matcher hot
+loop. Tests 661 → **747 assertions**. Two confirmed findings were
+rejected on measurement. See CHANGELOG § 1.0.9 and
+[`../audit/2026-09-08-audit.md`](../audit/2026-09-08-audit.md).
+
+**Known limitation (documented, not fixed)**: `_pcre_match_run`
+recurses natively per input position, so `PCRE_MAX_DEPTH = 256` caps
+consuming quantifiers at ~250 positions — `a*$` over 300 bytes reports
+no match. Pre-existing and **not a tunable**: frames measure ~20 KB and
+the process SIGSEGVs past ~400 frames on an 8 MB stack. The fix is an
+explicit heap backtrack stack (matcher-core rewrite), deferred.
+Mitigated by `PCRE_E_DEPTH_EXCEEDED = 12` so the condition is
+observable rather than a silent false negative.
+
 **1.0.8** — maintenance patch shipped 2026-09-07. Toolchain pin
 bumped 6.5.29 → 6.6.0 (wrapper-drift catch-up) and the vendored
 `lib/` re-synced from the 6.6.0 snapshot. No engine source changes;
@@ -236,21 +263,20 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
 ## Tests
 
 - `tests/niyama.tcyr` — scaffold smoke (2 assertions).
-- **`tests/bre.tcyr`** — 112 BRE assertions (v1.0: +3 empty-pattern).
-- **`tests/re2.tcyr`** — 175 RE2 assertions (v1.0: +3 ß
-  semantics-lock, +3 empty-pattern).
-- **`tests/pcre.tcyr`** — 206 PCRE assertions (v1.0: +3 ß, +12
-  recursion-nesting, +3 empty-pattern).
-- **`tests/fuzzy.tcyr`** — 57 fuzzy assertions (v1.0: +4 empty).
-- **`tests/vim.tcyr`** — 109 vim assertions (v1.0: +3 empty).
+- **`tests/bre.tcyr`** — 123 BRE assertions (v1.0.9: +11).
+- **`tests/re2.tcyr`** — 199 RE2 assertions (v1.0.9: +24).
+- **`tests/pcre.tcyr`** — 225 PCRE assertions (v1.0.9: +19).
+- **`tests/fuzzy.tcyr`** — 70 fuzzy assertions (v1.0.9: +13).
+- **`tests/vim.tcyr`** — 122 vim assertions (v1.0.9: +13).
 - **`tests/{bre,re2,pcre,fuzzy,vim}.bcyr`** — per-engine bench harnesses.
 - `tests/niyama.bcyr` — scaffold smoke bench (1 row). Repaired at
   v1.0.8; it had never compiled, calling a `bench()` entry point
   stdlib does not expose. 6 runnable bench harnesses total.
 - **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
 
-Aggregate: `cyrius test` reports **6 files, 661 assertions** all passing
-(was 627 at v0.9.0; +34 v1.0 sweep).
+Aggregate: `cyrius test` reports **6 files, 747 assertions** all passing
+(was 661 at v1.0.8; +86 v1.0.9 P(-1) regression coverage — every
+CRITICAL/HIGH/MEDIUM finding in the 2026-09-08 audit has an assertion).
 `cyrius fuzz` reports **5 files, 1689 assertions** all passing
 (unchanged from v0.9.0; no engine code changes).
 

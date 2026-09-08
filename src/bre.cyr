@@ -81,6 +81,11 @@ var BRE_E_OK                   = 0;
 var BRE_E_SYNTAX               = 1;
 var BRE_E_BACKREF_UNSUPPORTED  = 2;
 var BRE_E_TOO_LARGE            = 3;
+# Slot 4 is reserved (frozen ABI per ADR 0010) but NEVER emitted: POSIX
+# BRE treats `^`/`$` mid-pattern as literals rather than an error, so no
+# codepath can produce a bad-anchor condition. Declared to hold the ABI
+# slot per ADR 0002's error table. Verified unused by the v1.0.9 P(-1)
+# dead-code sweep — do not repurpose the number.
 var BRE_E_BAD_ANCHOR           = 4;
 
 # === Compile-time globals ============================================
@@ -104,19 +109,55 @@ var _bre_m_cur = 0;
 var _bre_m_next = 0;
 var _bre_m_lastgen = 0;
 var _bre_m_gen = 0;
-var _bre_q_splits = 0;       # 64 slots × 8 bytes — quantifier unrolling
+# v1.0.9 — the split-list capacity must match the `n_max > 1000` ceiling this
+# engine advertises. It was 64, so every `{0,65}`..`{0,1000}` was rejected
+# TOO_LARGE despite passing that check. BRE_MAX_INSTRS remains the real
+# backstop: a repetition count that fits here can still exhaust the program.
+var BRE_MAX_QSPLITS = 1000;
+var _bre_q_splits = 0;
+# v1.0.9 — process-lifetime matcher scratch. These were alloc()'d fresh
+# inside _bre_pike_run, which runs once PER START POSITION of a search,
+# so an N-byte unanchored search burned 2*BRE_MAX_SAVES*8*N bytes of
+# bump heap that alloc() can never reclaim. Both arrays are fully
+# re-initialised at the top of every run, so sharing one copy across
+# runs is behaviour-identical.
+# v1.0.9 — brace-quantifier template buffer. {n,m} used to be compiled by
+# rewinding _bre_pos and RE-PARSING the atom once per repetition, re-running
+# _bre_parse_primary's non-idempotent side effects: each copy burned another
+# capture index (renumbering the user's later groups), another name-table slot
+# and another class bitmap. Re-parsing was also re-entrant, clobbering the
+# shared _bre_q_splits scratch for nested quantifiers. We now snapshot the
+# compiled atom once and append relocated copies of it.
+var _bre_tmpl = 0;
+var _bre_m_saves = 0;
+var _bre_m_msaves = 0;       # 64 slots × 8 bytes — quantifier unrolling
 
 fn _bre_lazy_init(): i64 {
     if (_bre_m_init == 1) { return 0; }
     _bre_m_cur     = alloc(8 + BRE_MAX_INSTRS * 168);
     _bre_m_next    = alloc(8 + BRE_MAX_INSTRS * 168);
     _bre_m_lastgen = alloc(BRE_MAX_INSTRS * 8);
-    _bre_q_splits  = alloc(64 * 8);
+    _bre_q_splits  = alloc(BRE_MAX_QSPLITS * 8);
+    _bre_tmpl      = alloc(BRE_MAX_INSTRS * 16);
+    _bre_m_saves   = alloc(BRE_MAX_SAVES * 8);
+    _bre_m_msaves  = alloc(BRE_MAX_SAVES * 8);
     var i = 0;
     while (i < BRE_MAX_INSTRS) {
         store64(_bre_m_lastgen + i * 8, 0);
         i = i + 1;
     }
+    # v1.0.9 — alloc() returns 0 on exhaustion (lib/alloc.cyr). Every pointer
+    # above is dereferenced unconditionally by the compiler and matcher, so an
+    # unchecked 0 turned heap exhaustion into a write to the NULL page. Bail
+    # WITHOUT setting the init flag, so a later call retries rather than
+    # running on half-initialised state.
+    if (_bre_m_cur == 0) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+    if (_bre_m_next == 0) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+    if (_bre_m_lastgen == 0) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+    if (_bre_q_splits == 0) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+    if (_bre_tmpl == 0) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+    if (_bre_m_saves == 0) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+    if (_bre_m_msaves == 0) { _bre_err = BRE_E_TOO_LARGE; return 0; }
     _bre_m_init = 1;
     _bre_m_gen = 1;
     return 0;
@@ -161,6 +202,49 @@ fn _bre_patch_arg2(idx, arg2): i64 {
 }
 
 # Shift instructions [lo, hi) right by 1 slot (overlap-safe backward copy).
+# v1.0.9 — snapshot instructions [lo, hi) into _bre_tmpl. Returns the count.
+fn _bre_tmpl_save(lo, hi): i64 {
+    var n = hi - lo;
+    var i = 0;
+    while (i < n) {
+        store64(_bre_tmpl + i * 16,     load64(_bre_instr_base + (lo + i) * 16));
+        store64(_bre_tmpl + i * 16 + 8, load64(_bre_instr_base + (lo + i) * 16 + 8));
+        i = i + 1;
+    }
+    return n;
+}
+
+# v1.0.9 — append a relocated copy of the saved template at _bre_instr_n. Branch
+# targets inside [lo, lo+n] shift by (dst - lo); a target of exactly lo+n means
+# "fall out of the atom" and the same delta lands it just past the copy.
+fn _bre_tmpl_append(lo, n): i64 {
+    var dst = _bre_instr_n;
+    var delta = dst - lo;
+    var hi = lo + n;
+    var i = 0;
+    while (i < n) {
+        var w0 = load64(_bre_tmpl + i * 16);
+        var w1 = load64(_bre_tmpl + i * 16 + 8);
+        var op = w0 & 0xFF;
+        var is_branch = 0;
+        if (op == BRE_OP_JMP)   { is_branch = 1; }
+        if (op == BRE_OP_SPLIT) { is_branch = 1; }
+        if (is_branch == 1) {
+            var a1 = (w0 >> 32) & 0xFFFFFFFF;
+            if (a1 >= lo && a1 <= hi) {
+                w0 = (w0 & 0xFFFFFFFF) | ((a1 + delta) << 32);
+            }
+            if (op == BRE_OP_SPLIT) {
+                if (w1 >= lo && w1 <= hi) { w1 = w1 + delta; }
+            }
+        }
+        _bre_emit_raw(w0, w1);
+        if (_bre_err != BRE_E_OK) { return 0; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn _bre_shift_right(lo, hi): i64 {
     var k = (hi - lo) * 16 - 1;
     while (k >= 0) {
@@ -469,6 +553,11 @@ fn _bre_apply_star(atom_start): i64 {
     if (atom_end == atom_start) { _bre_err = BRE_E_SYNTAX; return 0; }
     _bre_pos = _bre_pos + 1;
     # SPLIT body, exit ; body ; JMP back ; exit
+    # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+    # _bre_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+    # this guard a deeply-nested pattern walks _bre_instr_n past the end of the
+    # NFA's instruction region and _bre_shift_right writes out of bounds.
+    if (_bre_instr_n >= BRE_MAX_INSTRS) { _bre_err = BRE_E_TOO_LARGE; return 0; }
     _bre_shift_right(atom_start, atom_end);
     _bre_shift_targets_one(atom_start, atom_end);
     _bre_instr_n = _bre_instr_n + 1;
@@ -485,6 +574,11 @@ fn _bre_apply_star(atom_start): i64 {
 # {n,} unrolling for the unbounded tail.
 fn _bre_apply_star_inline(body_start): i64 {
     var body_end = _bre_instr_n;
+    # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+    # _bre_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+    # this guard a deeply-nested pattern walks _bre_instr_n past the end of the
+    # NFA's instruction region and _bre_shift_right writes out of bounds.
+    if (_bre_instr_n >= BRE_MAX_INSTRS) { _bre_err = BRE_E_TOO_LARGE; return 0; }
     _bre_shift_right(body_start, body_end);
     _bre_shift_targets_one(body_start, body_end);
     _bre_instr_n = _bre_instr_n + 1;
@@ -502,6 +596,8 @@ fn _bre_apply_star_inline(body_start): i64 {
 # used to re-parse for additional copies.
 fn _bre_apply_brace_q(save_primary_start, atom_start): i64 {
     if (_bre_instr_n == atom_start) { _bre_err = BRE_E_SYNTAX; return 0; }
+    # v1.0.9 — snapshot the compiled atom; repetitions are relocated copies.
+    var tmpl_n = _bre_tmpl_save(atom_start, _bre_instr_n);
     # caller positioned _bre_pos at the `\` of `\{` — consume `\{`.
     _bre_pos = _bre_pos + 2;
     var n_min = 0;
@@ -539,20 +635,18 @@ fn _bre_apply_brace_q(save_primary_start, atom_start): i64 {
         if (open_ended == 1) {
             # {0,} ≡ *
             var ts = _bre_instr_n;
-            _bre_pos = save_primary_start;
-            _bre_parse_primary(0);
+            _bre_tmpl_append(atom_start, tmpl_n);
             if (_bre_err != BRE_E_OK) { return 0; }
             _bre_apply_star_inline(ts);
         } else {
             var sn = 0;
             var k = 0;
             while (k < n_max) {
-                if (sn >= 64) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+                if (sn >= BRE_MAX_QSPLITS) { _bre_err = BRE_E_TOO_LARGE; return 0; }
                 var sx = _bre_emit_split(0, 0);
                 store64(_bre_q_splits + sn * 8, sx);
                 sn = sn + 1;
-                _bre_pos = save_primary_start;
-                _bre_parse_primary(0);
+                _bre_tmpl_append(atom_start, tmpl_n);
                 if (_bre_err != BRE_E_OK) { return 0; }
                 k = k + 1;
             }
@@ -568,27 +662,24 @@ fn _bre_apply_brace_q(save_primary_start, atom_start): i64 {
     } else {
         var k1 = 1;
         while (k1 < n_min) {
-            _bre_pos = save_primary_start;
-            _bre_parse_primary(0);
+            _bre_tmpl_append(atom_start, tmpl_n);
             if (_bre_err != BRE_E_OK) { return 0; }
             k1 = k1 + 1;
         }
         if (open_ended == 1) {
             var ts2 = _bre_instr_n;
-            _bre_pos = save_primary_start;
-            _bre_parse_primary(0);
+            _bre_tmpl_append(atom_start, tmpl_n);
             if (_bre_err != BRE_E_OK) { return 0; }
             _bre_apply_star_inline(ts2);
         } elif (n_max > n_min) {
             var sn2 = 0;
             var k2 = n_min;
             while (k2 < n_max) {
-                if (sn2 >= 64) { _bre_err = BRE_E_TOO_LARGE; return 0; }
+                if (sn2 >= BRE_MAX_QSPLITS) { _bre_err = BRE_E_TOO_LARGE; return 0; }
                 var sy = _bre_emit_split(0, 0);
                 store64(_bre_q_splits + sn2 * 8, sy);
                 sn2 = sn2 + 1;
-                _bre_pos = save_primary_start;
-                _bre_parse_primary(0);
+                _bre_tmpl_append(atom_start, tmpl_n);
                 if (_bre_err != BRE_E_OK) { return 0; }
                 k2 = k2 + 1;
             }
@@ -697,15 +788,10 @@ fn niyama_bre_last_error(): i64 {
 
 # === Pike's NFA matcher (forked from stdlib) =========================
 
+# v1.0.9 — delegates to the shared implementation in src/posix_classes.cyr
+# (was a byte-identical copy in each of the four engines).
 fn _bre_at_word_char(input, input_len, pos): i64 {
-    if (pos < 0)         { return 0; }
-    if (pos >= input_len){ return 0; }
-    var c = load8(input + pos);
-    if (c >= 48 && c <= 57)   { return 1; }
-    if (c >= 65 && c <= 90)   { return 1; }
-    if (c >= 97 && c <= 122)  { return 1; }
-    if (c == 95)              { return 1; }
-    return 0;
+    return _posix_is_word_char(input, input_len, pos);
 }
 
 fn _bre_class_get_at(class_base, ci, c): i64 {
@@ -714,6 +800,21 @@ fn _bre_class_get_at(class_base, ci, c): i64 {
     var off = class_base + ci * 32 + (c >> 3);
     var b = load8(off);
     if ((b >> (c & 7)) & 1) { return 1; }
+    return 0;
+}
+
+# v1.0.9 — copy thread `ti`'s save slots out of `list_base` into `dst`. The
+# matcher had this exact loop hand-inlined once per opcode arm (19 copies
+# across bre/re2/vim), each repeating the 168-byte thread stride and the
+# 8-byte header offset. One transcription error in any of them would have
+# silently corrupted captures for that one opcode.
+fn _bre_thread_saves_to(list_base, ti, dst): i64 {
+    var k = 0;
+    while (k < BRE_MAX_SAVES) {
+        var v = load64(list_base + 8 + ti * 168 + 8 + k * 8);
+        store64(dst + k * 8, v);
+        k = k + 1;
+    }
     return 0;
 }
 
@@ -788,13 +889,13 @@ fn _bre_pike_run(nfa, input, input_len, start_pos): i64 {
     var instrs = nfa + load64(nfa + BRE_OFF_INSTRS_OFF);
     var class_base = nfa + load64(nfa + BRE_OFF_CLASSES_OFF);
     var matched = 0 - 1;
-    var saves_scratch = alloc(BRE_MAX_SAVES * 8);
+    var saves_scratch = _bre_m_saves;
     var k = 0;
     while (k < BRE_MAX_SAVES) {
         store64(saves_scratch + k * 8, 0 - 1);
         k = k + 1;
     }
-    var match_saves = alloc(BRE_MAX_SAVES * 8);
+    var match_saves = _bre_m_msaves;
     var k2 = 0;
     while (k2 < BRE_MAX_SAVES) {
         store64(match_saves + k2 * 8, 0 - 1);
@@ -820,31 +921,19 @@ fn _bre_pike_run(nfa, input, input_len, start_pos): i64 {
             var iop = iw0 & 0xFF;
             if (iop == BRE_OP_MATCH) {
                 matched = pos;
-                var ks = 0;
-                while (ks < BRE_MAX_SAVES) {
-                    store64(match_saves + ks * 8, load64(cur + 8 + ti * 168 + 8 + ks * 8));
-                    ks = ks + 1;
-                }
+                _bre_thread_saves_to(cur, ti, match_saves);
                 ti = n_cur;
             }
             elif (iop == BRE_OP_CHAR) {
                 var want = (iw0 >> 8) & 0xFF;
                 if (c >= 0 && c == want) {
-                    var ks2 = 0;
-                    while (ks2 < BRE_MAX_SAVES) {
-                        store64(saves_scratch + ks2 * 8, load64(cur + 8 + ti * 168 + 8 + ks2 * 8));
-                        ks2 = ks2 + 1;
-                    }
+                    _bre_thread_saves_to(cur, ti, saves_scratch);
                     _bre_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
                 }
             }
             elif (iop == BRE_OP_ANY) {
                 if (c >= 0) {
-                    var ks3 = 0;
-                    while (ks3 < BRE_MAX_SAVES) {
-                        store64(saves_scratch + ks3 * 8, load64(cur + 8 + ti * 168 + 8 + ks3 * 8));
-                        ks3 = ks3 + 1;
-                    }
+                    _bre_thread_saves_to(cur, ti, saves_scratch);
                     _bre_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
                 }
             }
@@ -856,11 +945,7 @@ fn _bre_pike_run(nfa, input, input_len, start_pos): i64 {
                         if (hit == 1) { hit = 0; } else { hit = 1; }
                     }
                     if (hit == 1) {
-                        var ks4 = 0;
-                        while (ks4 < BRE_MAX_SAVES) {
-                            store64(saves_scratch + ks4 * 8, load64(cur + 8 + ti * 168 + 8 + ks4 * 8));
-                            ks4 = ks4 + 1;
-                        }
+                        _bre_thread_saves_to(cur, ti, saves_scratch);
                         _bre_add_thread(nxt, pc + 1, input, input_len, pos + 1, saves_scratch, instrs);
                     }
                 }
@@ -908,6 +993,10 @@ fn niyama_bre_search(nfa, s): i64 {
 
 fn niyama_bre_search_at(nfa, s, len, from): i64 {
     if (nfa == 0) { return 0 - 1; }
+    # v1.0.9 — `from` is caller-supplied and was never validated; a negative
+    # value walked the matcher backwards off the front of the subject buffer.
+    if (from < 0) { return 0 - 1; }
+    if (len < 0) { return 0 - 1; }
     var i = from;
     while (i <= len) {
         var r = _bre_pike_run(nfa, s, len, i);

@@ -174,6 +174,45 @@ fn main() {
     assert_neq(h_no_nfd, 0, "no-NFD compile succeeds");
     assert_eq(niyama_fuzzy_match(h_no_nfd, "config"), 1, "no-NFD ASCII match");
 
+
+    # === v1.0.9 P(-1) regressions =====================================
+    test_group("fuzzy-v109-overlong-subject");
+    # Over-long subjects were silently CLAMPED inside the DP, so a match past
+    # byte 4096 reported "no match" with FUZZY_E_OK.
+    var v109_big = alloc(FUZZY_MAX_TEXT_LEN + 200);
+    var v109_i = 0;
+    while (v109_i < FUZZY_MAX_TEXT_LEN + 100) {
+        store8(v109_big + v109_i, 97);
+        v109_i = v109_i + 1;
+    }
+    store8(v109_big + FUZZY_MAX_TEXT_LEN + 100, 0);
+    var v109_h = niyama_fuzzy_compile("needle");
+    assert_eq(niyama_fuzzy_distance(v109_h, v109_big), 0 - 1, "over-long distance rejected");
+    assert_eq(niyama_fuzzy_last_error(), FUZZY_E_TEXT_TOO_LONG, "reports TEXT_TOO_LONG");
+    assert_eq(niyama_fuzzy_match(v109_h, v109_big), 0, "over-long match is not a false positive");
+    assert_eq(niyama_fuzzy_search(v109_h, v109_big), 0 - 1, "over-long search rejected");
+    assert_eq(niyama_fuzzy_search_prefix(v109_h, v109_big), 0, "over-long prefix rejected");
+
+    test_group("fuzzy-v109-normal-paths");
+    var v109_h2 = niyama_fuzzy_compile("needle");
+    assert_eq(niyama_fuzzy_distance(v109_h2, "needle"), 0, "exact distance still 0");
+    assert_eq(niyama_fuzzy_last_error(), FUZZY_E_OK, "error cleared on a good call");
+    assert_eq(niyama_fuzzy_distance(v109_h2, "nedle"), 1, "one-edit distance");
+    assert_eq(niyama_fuzzy_match(v109_h2, "nedle"),    1, "one-edit match");
+    assert_eq(niyama_fuzzy_search(v109_h2, "a needle here"), 2, "search offset");
+
+    test_group("fuzzy-v109-nfd-offset");
+    # niyama_fuzzy_search returned an offset into the NFD-normalized scratch
+    # buffer, which could point PAST the end of the caller's string.
+    var v109_nh = niyama_fuzzy_compile_opts("dog", 0, FUZZY_FLAG_UNICODE_NFD);
+    var v109_subj = "\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9dog";
+    var v109_off = niyama_fuzzy_search(v109_nh, v109_subj);
+    assert_eq(v109_off, 10, "NFD search offset is in CALLER coordinates");
+    assert_lte(v109_off, strlen(v109_subj), "NFD offset never past end of subject");
+    # ASCII fast path must be unaffected.
+    var v109_ah = niyama_fuzzy_compile_opts("dog", 0, FUZZY_FLAG_UNICODE_NFD);
+    assert_eq(niyama_fuzzy_search(v109_ah, "a dog here"), 2, "ASCII NFD path offset");
+
     return assert_summary();
 }
 

@@ -240,6 +240,32 @@ fn main() {
     assert_neq(niyama_vim_compile("\\(a\\)\\(b\\)\\(c\\)\\(d\\)\\(e\\)\\(f\\)\\(g\\)\\(h\\)\\(i\\)"),
                0, "9 groups compile (max valid)");
 
+
+    # === v1.0.9 P(-1) regressions =====================================
+    test_group("vim-v109-word-boundaries");
+    # `\<` and `\>` both compiled to the symmetric \b test, so each fired at
+    # BOTH ends of a word.
+    assert_eq(t_match("\\<x", "x"), 1, "\\<x matches at word start");
+    assert_eq(t_match("\\>x", "x"), 0, "\\>x must NOT match at word start");
+    assert_eq(t_match("x\\>", "x"), 1, "x\\> matches at word end");
+    assert_eq(t_match("x\\<", "x"), 0, "x\\< must NOT match at word end");
+    assert_eq(t_match("\\<foo\\>", "foo"), 1, "\\<foo\\> still matches");
+    assert_eq(t_search("\\<foo\\>", "a foo b"), 2, "\\<foo\\> search offset");
+
+    test_group("vim-v109-brace-nesting");
+    assert_eq(t_match("\\(a\\{1,2\\}\\)\\{1,2\\}", "aa"), 1, "nested brace vs aa");
+    var v109_g = niyama_vim_compile("\\(a\\)\\{2\\}\\(b\\)");
+    assert_neq(v109_g, 0, "\\(a\\)\\{2\\}\\(b\\) compiles");
+    niyama_vim_search(v109_g, "aab");
+    assert_eq(niyama_vim_group_start(v109_g, 2), 2, "g2 is (b), not a copy of (a)");
+    assert_neq(niyama_vim_compile("\\(a\\)\\{10\\}"), 0, "\\(a\\)\\{10\\} not falsely SYNTAX");
+
+    test_group("vim-v109-search-at-bounds");
+    var v109_n = niyama_vim_compile("b");
+    assert_eq(niyama_vim_search_at(v109_n, "abc", 3, 0 - 1), 0 - 1, "negative from rejected");
+    assert_eq(niyama_vim_search_at(v109_n, "abc", 0 - 1, 0), 0 - 1, "negative len rejected");
+    assert_eq(niyama_vim_search_at(v109_n, "abc", 3, 0),     1,     "valid from still works");
+
     return assert_summary();
 }
 

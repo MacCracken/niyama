@@ -103,7 +103,11 @@ var PCRE_OP_UCHAR_CI   = 26;
 # into upper 32 bits of word0; end_pc reuses LOOKAHEAD_END (matcher
 # treats LOOKAHEAD_END identically: return pos at success). Body must
 # consume exactly `width` bytes ending at the current pos.
-var PCRE_OP_LOOKBEHIND  = 28;  # arg1 (32:48): width, arg1 (48:): end_pc
+# v1.0.9 — comment corrected. arg1 (upper 32 of word0) is the end_pc, a plain
+# instruction index; the fixed width lives in arg2 (word1). The old note claimed
+# both were bit-packed into arg1, which contradicted _pcre_emit_lookbehind and
+# the matcher (which reads lb_width from word1).
+var PCRE_OP_LOOKBEHIND  = 28;  # arg1: end_pc; arg2: fixed width
 var PCRE_OP_NLOOKBEHIND = 29;
 # v0.8.0 — recursion `(?R)` (whole pattern), `(?P>NAME)` (named group).
 # Stores target group_idx in low 16 bits of arg1. Matcher walks the
@@ -166,6 +170,17 @@ var PCRE_E_LOOKBEHIND_VARWIDTH     = 10;
 # is reserved (frozen ABI) but no longer emitted. New error for an
 # (?P>name) ref that doesn't resolve to any defined group.
 var PCRE_E_BAD_RECURSION_REF       = 11;
+# v1.0.9 — MATCH-time (not compile-time) signal: the backtracker hit its
+# recursion ceiling and abandoned the attempt. Previously indistinguishable from
+# a genuine non-match: niyama_pcre_match simply returned 0. The ceiling is
+# structural, not a tunable — _pcre_match_run frames measure ~20 KB, so the 8 MB
+# default stack SIGSEGVs somewhere past ~400 frames and PCRE_MAX_DEPTH=256 is
+# already close to it. Because SPLIT and SAVE each recurse per input position
+# rather than per nesting level, a quantifier that must consume more than ~250
+# positions exhausts it: `a*$` over 300 bytes is the smallest reproducer.
+# Removing the limit needs an explicit heap-allocated backtrack stack in place of
+# native recursion — deferred, see CHANGELOG 1.0.9 "Known limitation".
+var PCRE_E_DEPTH_EXCEEDED          = 12;
 
 # === Compile-time globals ============================================
 
@@ -185,9 +200,22 @@ var _pcre_last_err = 0;
 
 # Process-lifetime scratch.
 var _pcre_init = 0;
+# v1.0.9 — capacity must match the `n_max > 1000` ceiling this engine advertises;
+# it was 64, so {0,65}..{0,1000} were rejected TOO_LARGE despite passing it.
+var PCRE_MAX_QSPLITS = 1000;
 var _pcre_q_splits = 0;
 # v0.8.0 — UTF-8 codepoint scratch slot for UPROP / NUPROP.
 var _pcre_m_cp_slot = 0;
+# v1.0.9 — process-lifetime top-level saves array. Was alloc()'d fresh in
+# _pcre_run_at, which runs once PER START POSITION of a search, so an N-byte
+# unanchored search burned PCRE_MAX_SAVES*8*N bytes of unreclaimable bump
+# heap. Fully re-initialised at the top of every run.
+# v1.0.9 — brace-quantifier template buffer; see _pcre_apply_brace_q. {n,m} used
+# to re-parse the atom per repetition, re-running _pcre_parse_primary's
+# non-idempotent side effects (capture index, name table, class bitmap) and
+# re-entering _pcre_apply_brace_q, which clobbered the shared _pcre_q_splits.
+var _pcre_tmpl = 0;
+var _pcre_m_saves = 0;
 var _pcre_step_limit = 1000000;
 var _pcre_step_count = 0;
 # v0.8.0 — recursion: when (?R) / (?P>NAME) makes a recursive call,
@@ -219,12 +247,37 @@ var _pcre_last_callout = 0 - 1;
 # without this. 256 is comfortably above any legitimate pattern's
 # recursive call depth (saves + nested groups + lookaround + atomic
 # all stack additively; real patterns peak around 50).
+# v1.0.9 — PCRE_MAX_DEPTH is the HARD ceiling that sizes _pcre_snap_pool.
+# _pcre_depth_limit stays the tunable policy knob but can never exceed it,
+# because _pcre_match_run indexes the pool by `depth`.
+var PCRE_MAX_DEPTH = 256;
 var _pcre_depth_limit = 256;
+# v1.0.9 — depth-indexed save-snapshot pool. SPLIT / LOOKAHEAD / NLOOKAHEAD /
+# LOOKBEHIND / RECURSE each used to alloc() a fresh 160-byte snapshot every time
+# they executed. alloc() is a bump allocator that never reclaims, and SPLIT runs
+# at every backtrack point — bounded only by the 1M-step limit, so one
+# adversarial match could retain ~160 MB. Each snapshot's lifetime is confined to
+# a single iteration at a single recursion depth (take, recurse, restore), and at
+# most one is live per depth, so one slot per depth is sufficient.
+var _pcre_snap_pool = 0;
 
 fn _pcre_lazy_init(): i64 {
     if (_pcre_init == 1) { return 0; }
-    _pcre_q_splits  = alloc(64 * 8);
+    _pcre_q_splits  = alloc(PCRE_MAX_QSPLITS * 8);
     _pcre_m_cp_slot = alloc(8);
+    _pcre_tmpl      = alloc(PCRE_MAX_INSTRS * 16);
+    _pcre_m_saves   = alloc(PCRE_MAX_SAVES * 8);
+    _pcre_snap_pool = alloc((PCRE_MAX_DEPTH + 2) * PCRE_MAX_SAVES * 8);
+    # v1.0.9 — alloc() returns 0 on exhaustion (lib/alloc.cyr). Every pointer
+    # above is dereferenced unconditionally by the compiler and matcher, so an
+    # unchecked 0 turned heap exhaustion into a write to the NULL page. Bail
+    # WITHOUT setting the init flag, so a later call retries rather than
+    # running on half-initialised state.
+    if (_pcre_q_splits == 0) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
+    if (_pcre_m_cp_slot == 0) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
+    if (_pcre_tmpl == 0) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
+    if (_pcre_m_saves == 0) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
+    if (_pcre_snap_pool == 0) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
     _pcre_init = 1;
     return 0;
 }
@@ -331,6 +384,58 @@ fn _pcre_patch_arg1(idx, arg1): i64 {
 
 fn _pcre_patch_arg2(idx, arg2): i64 {
     store64(_pcre_instr_base + idx * 16 + 8, arg2);
+    return 0;
+}
+
+# v1.0.9 — snapshot instructions [lo, hi) into _pcre_tmpl. Returns the count.
+fn _pcre_tmpl_save(lo, hi): i64 {
+    var n = hi - lo;
+    var i = 0;
+    while (i < n) {
+        store64(_pcre_tmpl + i * 16,     load64(_pcre_instr_base + (lo + i) * 16));
+        store64(_pcre_tmpl + i * 16 + 8, load64(_pcre_instr_base + (lo + i) * 16 + 8));
+        i = i + 1;
+    }
+    return n;
+}
+
+# v1.0.9 — append a relocated copy of the saved template at _pcre_instr_n. The
+# branch set mirrors _pcre_shift_targets_one exactly: arg1 is a pc for JMP, SPLIT,
+# LOOKAHEAD/NLOOKAHEAD, ATOMIC and LOOKBEHIND/NLOOKBEHIND; SPLIT also carries a pc
+# in arg2; COND's arg1 is a GROUP INDEX and must not move, only its arg2 no_pc.
+fn _pcre_tmpl_append(lo, n): i64 {
+    var dst = _pcre_instr_n;
+    var delta = dst - lo;
+    var hi = lo + n;
+    var i = 0;
+    while (i < n) {
+        var w0 = load64(_pcre_tmpl + i * 16);
+        var w1 = load64(_pcre_tmpl + i * 16 + 8);
+        var op = w0 & 0xFF;
+        var is_branch = 0;
+        if (op == PCRE_OP_JMP)         { is_branch = 1; }
+        if (op == PCRE_OP_SPLIT)       { is_branch = 1; }
+        if (op == PCRE_OP_LOOKAHEAD)   { is_branch = 1; }
+        if (op == PCRE_OP_NLOOKAHEAD)  { is_branch = 1; }
+        if (op == PCRE_OP_ATOMIC)      { is_branch = 1; }
+        if (op == PCRE_OP_LOOKBEHIND)  { is_branch = 1; }
+        if (op == PCRE_OP_NLOOKBEHIND) { is_branch = 1; }
+        if (is_branch == 1) {
+            var a1 = (w0 >> 32) & 0xFFFFFFFF;
+            if (a1 >= lo && a1 <= hi) {
+                w0 = (w0 & 0xFFFFFFFF) | ((a1 + delta) << 32);
+            }
+            if (op == PCRE_OP_SPLIT) {
+                if (w1 >= lo && w1 <= hi) { w1 = w1 + delta; }
+            }
+        }
+        if (op == PCRE_OP_COND) {
+            if (w1 >= lo && w1 <= hi) { w1 = w1 + delta; }
+        }
+        _pcre_emit_raw(w0, w1);
+        if (_pcre_err != PCRE_E_OK) { return 0; }
+        i = i + 1;
+    }
     return 0;
 }
 
@@ -1189,6 +1294,11 @@ fn _pcre_parse_primary(): i64 {
 # Wrap [atom_start, _pcre_instr_n) inside an ATOMIC block.
 fn _pcre_wrap_atomic(atom_start): i64 {
     var atom_end = _pcre_instr_n;
+    # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+    # _pcre_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+    # this guard a deeply-nested pattern walks _pcre_instr_n past the end of the
+    # NFA's instruction region and _pcre_shift_right writes out of bounds.
+    if (_pcre_instr_n >= PCRE_MAX_INSTRS) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
     _pcre_shift_right(atom_start, atom_end);
     _pcre_shift_targets_one(atom_start, atom_end);
     _pcre_instr_n = _pcre_instr_n + 1;
@@ -1219,6 +1329,11 @@ fn _pcre_apply_simple_q(atom_start, op_char): i64 {
         }
     }
     if (op_char == 42) {
+        # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+        # _pcre_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+        # this guard a deeply-nested pattern walks _pcre_instr_n past the end of the
+        # NFA's instruction region and _pcre_shift_right writes out of bounds.
+        if (_pcre_instr_n >= PCRE_MAX_INSTRS) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
         _pcre_shift_right(atom_start, atom_end);
         _pcre_shift_targets_one(atom_start, atom_end);
         _pcre_instr_n = _pcre_instr_n + 1;
@@ -1245,6 +1360,11 @@ fn _pcre_apply_simple_q(atom_start, op_char): i64 {
         }
     }
     elif (op_char == 63) {
+        # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+        # _pcre_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+        # this guard a deeply-nested pattern walks _pcre_instr_n past the end of the
+        # NFA's instruction region and _pcre_shift_right writes out of bounds.
+        if (_pcre_instr_n >= PCRE_MAX_INSTRS) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
         _pcre_shift_right(atom_start, atom_end);
         _pcre_shift_targets_one(atom_start, atom_end);
         _pcre_instr_n = _pcre_instr_n + 1;
@@ -1266,6 +1386,11 @@ fn _pcre_apply_simple_q(atom_start, op_char): i64 {
 
 fn _pcre_apply_star_inline(body_start, lazy): i64 {
     var body_end = _pcre_instr_n;
+    # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+    # _pcre_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+    # this guard a deeply-nested pattern walks _pcre_instr_n past the end of the
+    # NFA's instruction region and _pcre_shift_right writes out of bounds.
+    if (_pcre_instr_n >= PCRE_MAX_INSTRS) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
     _pcre_shift_right(body_start, body_end);
     _pcre_shift_targets_one(body_start, body_end);
     _pcre_instr_n = _pcre_instr_n + 1;
@@ -1286,6 +1411,8 @@ fn _pcre_apply_star_inline(body_start, lazy): i64 {
 
 fn _pcre_apply_brace_q(save_primary_start, atom_start): i64 {
     if (_pcre_instr_n == atom_start) { _pcre_err = PCRE_E_SYNTAX; return 0; }
+    # v1.0.9 — snapshot the compiled atom; repetitions are relocated copies.
+    var tmpl_n = _pcre_tmpl_save(atom_start, _pcre_instr_n);
     _pcre_pos = _pcre_pos + 1;
     var n_min = 0;
     var have_min = 0;
@@ -1324,20 +1451,18 @@ fn _pcre_apply_brace_q(save_primary_start, atom_start): i64 {
         _pcre_instr_n = atom_start;
         if (open_ended == 1) {
             var ts = _pcre_instr_n;
-            _pcre_pos = save_primary_start;
-            _pcre_parse_primary();
+            _pcre_tmpl_append(atom_start, tmpl_n);
             if (_pcre_err != PCRE_E_OK) { return 0; }
             _pcre_apply_star_inline(ts, lazy);
         } else {
             var sn = 0;
             var k = 0;
             while (k < n_max) {
-                if (sn >= 64) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
+                if (sn >= PCRE_MAX_QSPLITS) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
                 var sx = _pcre_emit_split(0, 0);
                 store64(_pcre_q_splits + sn * 8, sx);
                 sn = sn + 1;
-                _pcre_pos = save_primary_start;
-                _pcre_parse_primary();
+                _pcre_tmpl_append(atom_start, tmpl_n);
                 if (_pcre_err != PCRE_E_OK) { return 0; }
                 k = k + 1;
             }
@@ -1353,27 +1478,24 @@ fn _pcre_apply_brace_q(save_primary_start, atom_start): i64 {
     } else {
         var k1 = 1;
         while (k1 < n_min) {
-            _pcre_pos = save_primary_start;
-            _pcre_parse_primary();
+            _pcre_tmpl_append(atom_start, tmpl_n);
             if (_pcre_err != PCRE_E_OK) { return 0; }
             k1 = k1 + 1;
         }
         if (open_ended == 1) {
             var ts2 = _pcre_instr_n;
-            _pcre_pos = save_primary_start;
-            _pcre_parse_primary();
+            _pcre_tmpl_append(atom_start, tmpl_n);
             if (_pcre_err != PCRE_E_OK) { return 0; }
             _pcre_apply_star_inline(ts2, lazy);
         } elif (n_max > n_min) {
             var sn2 = 0;
             var k2 = n_min;
             while (k2 < n_max) {
-                if (sn2 >= 64) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
+                if (sn2 >= PCRE_MAX_QSPLITS) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
                 var sy = _pcre_emit_split(0, 0);
                 store64(_pcre_q_splits + sn2 * 8, sy);
                 sn2 = sn2 + 1;
-                _pcre_pos = save_primary_start;
-                _pcre_parse_primary();
+                _pcre_tmpl_append(atom_start, tmpl_n);
                 if (_pcre_err != PCRE_E_OK) { return 0; }
                 k2 = k2 + 1;
             }
@@ -1435,6 +1557,11 @@ fn _pcre_parse_alt(): i64 {
     while (_pcre_pos < _pcre_pat_len && load8(_pcre_pat + _pcre_pos) == 124) {
         _pcre_pos = _pcre_pos + 1;
         var left_end = _pcre_instr_n;
+        # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+        # _pcre_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+        # this guard a deeply-nested pattern walks _pcre_instr_n past the end of the
+        # NFA's instruction region and _pcre_shift_right writes out of bounds.
+        if (_pcre_instr_n >= PCRE_MAX_INSTRS) { _pcre_err = PCRE_E_TOO_LARGE; return 0; }
         _pcre_shift_right(left_start, left_end);
         _pcre_shift_targets_one(left_start, left_end);
         _pcre_instr_n = _pcre_instr_n + 1;
@@ -1586,15 +1713,10 @@ fn _pcre_find_group_pcs(instrs, instr_count, group_idx): i64 {
     return 0;
 }
 
+# v1.0.9 — delegates to the shared implementation in src/posix_classes.cyr
+# (was a byte-identical copy in each of the four engines).
 fn _pcre_at_word_char(input, input_len, pos): i64 {
-    if (pos < 0)         { return 0; }
-    if (pos >= input_len){ return 0; }
-    var c = load8(input + pos);
-    if (c >= 48 && c <= 57)   { return 1; }
-    if (c >= 65 && c <= 90)   { return 1; }
-    if (c >= 97 && c <= 122)  { return 1; }
-    if (c == 95)              { return 1; }
-    return 0;
+    return _posix_is_word_char(input, input_len, pos);
 }
 
 fn _pcre_is_boundary(input, input_len, pos): i64 {
@@ -1633,7 +1755,9 @@ fn _pcre_saves_restore(saves, src): i64 {
 }
 
 fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, start_pos, saves, depth): i64 {
-    if (depth > _pcre_depth_limit) { return 0 - 1; }
+    if (depth > _pcre_depth_limit) { _pcre_err = PCRE_E_DEPTH_EXCEEDED; return 0 - 1; }
+    # v1.0.9 — independent hard bound: _pcre_snap_pool is indexed by depth below.
+    if (depth > PCRE_MAX_DEPTH) { _pcre_err = PCRE_E_DEPTH_EXCEEDED; return 0 - 1; }
     var pc = start_pc;
     var pos = start_pos;
     while (pc >= 0) {
@@ -1775,7 +1899,7 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
         elif (op == PCRE_OP_SPLIT) {
             var a = (w0 >> 32) & 0xFFFFFFFF;
             var b = load64(instrs + pc * 16 + 8);
-            var snap = alloc(PCRE_MAX_SAVES * 8);
+            var snap = _pcre_snap_pool + depth * PCRE_MAX_SAVES * 8;
             _pcre_saves_snapshot(saves, snap);
             var r = _pcre_match_run(instrs, instr_count, class_base, input, input_len, a, pos, saves, depth + 1);
             if (r >= 0) { return r; }
@@ -1809,7 +1933,7 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
         }
         elif (op == PCRE_OP_LOOKAHEAD) {
             var end_pc3 = (w0 >> 32) & 0xFFFFFFFF;
-            var snap2 = alloc(PCRE_MAX_SAVES * 8);
+            var snap2 = _pcre_snap_pool + depth * PCRE_MAX_SAVES * 8;
             _pcre_saves_snapshot(saves, snap2);
             # v0.8.0 — clear recursion stop for the sub-match (lookahead
             # is its own scope; outer recursion's stop_pc shouldn't fire
@@ -1824,11 +1948,17 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
             }
             # Positive lookahead succeeded. Captures from sub stay (PCRE2
             # semantics). Don't advance pos. Skip past the END marker.
+            # v1.0.9 — but slot 0 is the MATCH START, not a user capture. A `\K`
+            # inside the lookahead emits SAVE 0, so it used to rewrite the outer
+            # match start to a position inside the lookahead — which is zero-width
+            # and to the RIGHT of where the match began, yielding an inverted
+            # group-0 span (start > end). PCRE2 scopes \K to the lookaround.
+            store64(saves, load64(snap2));
             pc = end_pc3 + 1;
         }
         elif (op == PCRE_OP_NLOOKAHEAD) {
             var end_pc4 = (w0 >> 32) & 0xFFFFFFFF;
-            var snap3 = alloc(PCRE_MAX_SAVES * 8);
+            var snap3 = _pcre_snap_pool + depth * PCRE_MAX_SAVES * 8;
             _pcre_saves_snapshot(saves, snap3);
             var prev_stop_nla = _pcre_recurse_stop_pc;
             _pcre_recurse_stop_pc = 0 - 1;
@@ -1855,7 +1985,7 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
                 else             { return 0 - 1; }
             }
             else {
-                var snap_lb = alloc(PCRE_MAX_SAVES * 8);
+                var snap_lb = _pcre_snap_pool + depth * PCRE_MAX_SAVES * 8;
                 _pcre_saves_snapshot(saves, snap_lb);
                 var prev_stop_lb = _pcre_recurse_stop_pc;
                 _pcre_recurse_stop_pc = 0 - 1;
@@ -1864,6 +1994,9 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
                 # Body succeeded only if it landed exactly at pos
                 # (consumed lb_width bytes). rb == pos means success.
                 if (rb == pos) {
+                    # v1.0.9 — see the LOOKAHEAD arm: slot 0 is the match start,
+                    # so a `\K` inside the lookbehind must not move it.
+                    store64(saves, load64(snap_lb));
                     if (lb_neg == 1) {
                         _pcre_saves_restore(saves, snap_lb);
                         return 0 - 1;
@@ -1900,7 +2033,7 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
             }
             var rec_open  = _pcre_grp_open_pc;
             var rec_close = _pcre_grp_close_pc;
-            var rec_snap = alloc(PCRE_MAX_SAVES * 8);
+            var rec_snap = _pcre_snap_pool + depth * PCRE_MAX_SAVES * 8;
             _pcre_saves_snapshot(saves, rec_snap);
             var prev_stop_rec = _pcre_recurse_stop_pc;
             _pcre_recurse_stop_pc = rec_close + 1;
@@ -1939,13 +2072,26 @@ fn _pcre_match_run(instrs, instr_count, class_base, input, input_len, start_pc, 
 
 # === Public API ======================================================
 
-fn _pcre_run_at(nfa, input, input_len, from): i64 {
+# v1.0.9 — begin a NEW match operation: arm the step budget and clear the
+# callout record. Called once per public entry point, NOT per start offset.
+# _pcre_run_at used to reset the counter itself, so niyama_pcre_search's
+# offset loop handed every position a fresh 1M-step budget and the documented
+# catastrophic-backtracking ceiling was really (len+1) x _pcre_step_limit.
+fn _pcre_begin_match(): i64 {
     _pcre_step_count = 0;
     _pcre_last_callout = 0 - 1;
+    # v1.0.9 — clear the match-time error so niyama_pcre_last_error() after a
+    # match/search reports THIS operation. Compile errors are read straight after
+    # niyama_pcre_compile, before any match can run, so nothing is lost.
+    _pcre_err = PCRE_E_OK;
+    return 0;
+}
+
+fn _pcre_run_at(nfa, input, input_len, from): i64 {
     var instrs = nfa + load64(nfa + PCRE_OFF_INSTRS_OFF);
     var instr_count = load64(nfa + PCRE_OFF_INSTR_COUNT);
     var class_base = nfa + load64(nfa + PCRE_OFF_CLASSES_OFF);
-    var saves = alloc(PCRE_MAX_SAVES * 8);
+    var saves = _pcre_m_saves;
     var k = 0;
     while (k < PCRE_MAX_SAVES) {
         store64(saves + k * 8, 0 - 1);
@@ -1970,6 +2116,7 @@ fn _pcre_run_at(nfa, input, input_len, from): i64 {
 
 fn niyama_pcre_match(nfa, s): i64 {
     if (nfa == 0) { return 0; }
+    _pcre_begin_match();
     var len = strlen(s);
     var r = _pcre_run_at(nfa, s, len, 0);
     if (r >= 0) { return 1; }
@@ -1984,6 +2131,11 @@ fn niyama_pcre_search(nfa, s): i64 {
 
 fn niyama_pcre_search_at(nfa, s, len, from): i64 {
     if (nfa == 0) { return 0 - 1; }
+    # v1.0.9 — `from` is caller-supplied and was never validated; a negative
+    # value walked the matcher backwards off the front of the subject buffer.
+    if (from < 0) { return 0 - 1; }
+    if (len < 0) { return 0 - 1; }
+    _pcre_begin_match();
     var i = from;
     while (i <= len) {
         var r = _pcre_run_at(nfa, s, len, i);

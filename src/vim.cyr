@@ -54,6 +54,13 @@ var VIM_OP_NUPROP     = 13;     # \P{NAME} — cp_category(cp) ∉ mask
 # v0.8.0 — multi-byte literal char in pattern (codepoint stored in
 # upper 32 bits of word0). See re2.cyr's UCHAR comment for rationale.
 var VIM_OP_UCHAR      = 14;     # codepoint literal — match cp == stored
+# v1.0.9 — vim's `\<` and `\>` both compiled to VIM_OP_BOUNDARY, which is the
+# symmetric `\b` test, so `\>` fired at word STARTS and `\<` at word ENDS.
+# `\<foo\>` happened to look right only because each end was independently a
+# boundary. These give the two directions their own strict tests, matching
+# BRE_OP_WORDBEGIN / BRE_OP_WORDEND, which bre has had since v0.7.0.
+var VIM_OP_WORDBEGIN  = 15;     # \< — left is non-word, right is word
+var VIM_OP_WORDEND    = 16;     # \> — left is word, right is non-word
 
 var VIM_NFA_HEADER_SIZE = 216;
 var VIM_OFF_INSTR_COUNT = 0;
@@ -107,7 +114,28 @@ var _vim_m_cur = 0;
 var _vim_m_next = 0;
 var _vim_m_lastgen = 0;
 var _vim_m_gen = 0;
+# v1.0.9 — the split-list capacity must match the `n_max > 1000` ceiling this
+# engine advertises. It was 64, so every `{0,65}`..`{0,1000}` was rejected
+# TOO_LARGE despite passing that check. VIM_MAX_INSTRS remains the real
+# backstop: a repetition count that fits here can still exhaust the program.
+var VIM_MAX_QSPLITS = 1000;
 var _vim_q_splits = 0;
+# v1.0.9 — process-lifetime matcher scratch. These were alloc()'d fresh
+# inside _vim_pike_run, which runs once PER START POSITION of a search,
+# so an N-byte unanchored search burned 2*VIM_MAX_SAVES*8*N bytes of
+# bump heap that alloc() can never reclaim. Both arrays are fully
+# re-initialised at the top of every run, so sharing one copy across
+# runs is behaviour-identical.
+# v1.0.9 — brace-quantifier template buffer. {n,m} used to be compiled by
+# rewinding _vim_pos and RE-PARSING the atom once per repetition, re-running
+# _vim_parse_primary's non-idempotent side effects: each copy burned another
+# capture index (renumbering the user's later groups), another name-table slot
+# and another class bitmap. Re-parsing was also re-entrant, clobbering the
+# shared _vim_q_splits scratch for nested quantifiers. We now snapshot the
+# compiled atom once and append relocated copies of it.
+var _vim_tmpl = 0;
+var _vim_m_saves = 0;
+var _vim_m_msaves = 0;
 # v0.8.0 — UTF-8 codepoint scratch slot for UPROP / NUPROP.
 var _vim_m_cp_slot = 0;
 
@@ -116,13 +144,29 @@ fn _vim_lazy_init(): i64 {
     _vim_m_cur     = alloc(8 + VIM_MAX_INSTRS * 168);
     _vim_m_next    = alloc(8 + VIM_MAX_INSTRS * 168);
     _vim_m_lastgen = alloc(VIM_MAX_INSTRS * 8);
-    _vim_q_splits  = alloc(64 * 8);
+    _vim_q_splits  = alloc(VIM_MAX_QSPLITS * 8);
+    _vim_tmpl      = alloc(VIM_MAX_INSTRS * 16);
+    _vim_m_saves   = alloc(VIM_MAX_SAVES * 8);
+    _vim_m_msaves  = alloc(VIM_MAX_SAVES * 8);
     _vim_m_cp_slot = alloc(8);
     var i = 0;
     while (i < VIM_MAX_INSTRS) {
         store64(_vim_m_lastgen + i * 8, 0);
         i = i + 1;
     }
+    # v1.0.9 — alloc() returns 0 on exhaustion (lib/alloc.cyr). Every pointer
+    # above is dereferenced unconditionally by the compiler and matcher, so an
+    # unchecked 0 turned heap exhaustion into a write to the NULL page. Bail
+    # WITHOUT setting the init flag, so a later call retries rather than
+    # running on half-initialised state.
+    if (_vim_m_cur == 0) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+    if (_vim_m_next == 0) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+    if (_vim_m_lastgen == 0) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+    if (_vim_q_splits == 0) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+    if (_vim_tmpl == 0) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+    if (_vim_m_saves == 0) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+    if (_vim_m_msaves == 0) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+    if (_vim_m_cp_slot == 0) { _vim_err = VIM_E_TOO_LARGE; return 0; }
     _vim_m_init = 1;
     _vim_m_gen = 1;
     return 0;
@@ -171,6 +215,49 @@ fn _vim_patch_arg1(idx, arg1): i64 {
 
 fn _vim_patch_arg2(idx, arg2): i64 {
     store64(_vim_instr_base + idx * 16 + 8, arg2);
+    return 0;
+}
+
+# v1.0.9 — snapshot instructions [lo, hi) into _vim_tmpl. Returns the count.
+fn _vim_tmpl_save(lo, hi): i64 {
+    var n = hi - lo;
+    var i = 0;
+    while (i < n) {
+        store64(_vim_tmpl + i * 16,     load64(_vim_instr_base + (lo + i) * 16));
+        store64(_vim_tmpl + i * 16 + 8, load64(_vim_instr_base + (lo + i) * 16 + 8));
+        i = i + 1;
+    }
+    return n;
+}
+
+# v1.0.9 — append a relocated copy of the saved template at _vim_instr_n. Branch
+# targets inside [lo, lo+n] shift by (dst - lo); a target of exactly lo+n means
+# "fall out of the atom" and the same delta lands it just past the copy.
+fn _vim_tmpl_append(lo, n): i64 {
+    var dst = _vim_instr_n;
+    var delta = dst - lo;
+    var hi = lo + n;
+    var i = 0;
+    while (i < n) {
+        var w0 = load64(_vim_tmpl + i * 16);
+        var w1 = load64(_vim_tmpl + i * 16 + 8);
+        var op = w0 & 0xFF;
+        var is_branch = 0;
+        if (op == VIM_OP_JMP)   { is_branch = 1; }
+        if (op == VIM_OP_SPLIT) { is_branch = 1; }
+        if (is_branch == 1) {
+            var a1 = (w0 >> 32) & 0xFFFFFFFF;
+            if (a1 >= lo && a1 <= hi) {
+                w0 = (w0 & 0xFFFFFFFF) | ((a1 + delta) << 32);
+            }
+            if (op == VIM_OP_SPLIT) {
+                if (w1 >= lo && w1 <= hi) { w1 = w1 + delta; }
+            }
+        }
+        _vim_emit_raw(w0, w1);
+        if (_vim_err != VIM_E_OK) { return 0; }
+        i = i + 1;
+    }
     return 0;
 }
 
@@ -647,18 +734,19 @@ fn _vim_parse_primary(at_start): i64 {
             _vim_err = VIM_E_SYNTAX; return 0;
         }
 
-        # \< start-of-word boundary (BOUNDARY at word-start position is
-        # close enough to vim's semantics; vim's \< is essentially \b).
+        # \< start-of-word boundary. v1.0.9 — was VIM_OP_BOUNDARY (the symmetric
+        # \b test), which also fired at word ENDS.
         if (e == 60) {
             _vim_pos = _vim_pos + 2;
-            _vim_emit_op(VIM_OP_BOUNDARY);
+            _vim_emit_op(VIM_OP_WORDBEGIN);
             return 0;
         }
 
-        # \> end-of-word boundary.
+        # \> end-of-word boundary. v1.0.9 — was VIM_OP_BOUNDARY, so it also fired
+        # at word STARTS: `\>x` matched "x" at position 0.
         if (e == 62) {
             _vim_pos = _vim_pos + 2;
-            _vim_emit_op(VIM_OP_BOUNDARY);
+            _vim_emit_op(VIM_OP_WORDEND);
             return 0;
         }
 
@@ -809,6 +897,11 @@ fn _vim_apply_simple_q(atom_start, op_char, lazy): i64 {
     var atom_end = _vim_instr_n;
     if (atom_end == atom_start) { _vim_err = VIM_E_SYNTAX; return 0; }
     if (op_char == 42) {
+        # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+        # _vim_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+        # this guard a deeply-nested pattern walks _vim_instr_n past the end of the
+        # NFA's instruction region and _vim_shift_right writes out of bounds.
+        if (_vim_instr_n >= VIM_MAX_INSTRS) { _vim_err = VIM_E_TOO_LARGE; return 0; }
         _vim_shift_right(atom_start, atom_end);
         _vim_shift_targets_one(atom_start, atom_end);
         _vim_instr_n = _vim_instr_n + 1;
@@ -835,6 +928,11 @@ fn _vim_apply_simple_q(atom_start, op_char, lazy): i64 {
         }
     }
     elif (op_char == 63) {
+        # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+        # _vim_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+        # this guard a deeply-nested pattern walks _vim_instr_n past the end of the
+        # NFA's instruction region and _vim_shift_right writes out of bounds.
+        if (_vim_instr_n >= VIM_MAX_INSTRS) { _vim_err = VIM_E_TOO_LARGE; return 0; }
         _vim_shift_right(atom_start, atom_end);
         _vim_shift_targets_one(atom_start, atom_end);
         _vim_instr_n = _vim_instr_n + 1;
@@ -853,6 +951,11 @@ fn _vim_apply_simple_q(atom_start, op_char, lazy): i64 {
 
 fn _vim_apply_star_inline(body_start, lazy): i64 {
     var body_end = _vim_instr_n;
+    # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+    # _vim_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+    # this guard a deeply-nested pattern walks _vim_instr_n past the end of the
+    # NFA's instruction region and _vim_shift_right writes out of bounds.
+    if (_vim_instr_n >= VIM_MAX_INSTRS) { _vim_err = VIM_E_TOO_LARGE; return 0; }
     _vim_shift_right(body_start, body_end);
     _vim_shift_targets_one(body_start, body_end);
     _vim_instr_n = _vim_instr_n + 1;
@@ -876,6 +979,8 @@ fn _vim_apply_star_inline(body_start, lazy): i64 {
 # backslash-prefixed). Caller passed `save_primary_start` to re-parse.
 fn _vim_apply_brace_q(save_primary_start, atom_start, has_bs): i64 {
     if (_vim_instr_n == atom_start) { _vim_err = VIM_E_SYNTAX; return 0; }
+    # v1.0.9 — snapshot the compiled atom; repetitions are relocated copies.
+    var tmpl_n = _vim_tmpl_save(atom_start, _vim_instr_n);
     var lazy = 0;
     if (_vim_pos < _vim_pat_len && load8(_vim_pat + _vim_pos) == 45) {
         # `\{-` or `{-` is lazy variant.
@@ -928,20 +1033,18 @@ fn _vim_apply_brace_q(save_primary_start, atom_start, has_bs): i64 {
         _vim_instr_n = atom_start;
         if (open_ended == 1) {
             var ts = _vim_instr_n;
-            _vim_pos = save_primary_start;
-            _vim_parse_primary(0);
+            _vim_tmpl_append(atom_start, tmpl_n);
             if (_vim_err != VIM_E_OK) { return 0; }
             _vim_apply_star_inline(ts, lazy);
         } else {
             var sn = 0;
             var k = 0;
             while (k < n_max) {
-                if (sn >= 64) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+                if (sn >= VIM_MAX_QSPLITS) { _vim_err = VIM_E_TOO_LARGE; return 0; }
                 var sx = _vim_emit_split(0, 0);
                 store64(_vim_q_splits + sn * 8, sx);
                 sn = sn + 1;
-                _vim_pos = save_primary_start;
-                _vim_parse_primary(0);
+                _vim_tmpl_append(atom_start, tmpl_n);
                 if (_vim_err != VIM_E_OK) { return 0; }
                 k = k + 1;
             }
@@ -957,27 +1060,24 @@ fn _vim_apply_brace_q(save_primary_start, atom_start, has_bs): i64 {
     } else {
         var k1 = 1;
         while (k1 < n_min) {
-            _vim_pos = save_primary_start;
-            _vim_parse_primary(0);
+            _vim_tmpl_append(atom_start, tmpl_n);
             if (_vim_err != VIM_E_OK) { return 0; }
             k1 = k1 + 1;
         }
         if (open_ended == 1) {
             var ts2 = _vim_instr_n;
-            _vim_pos = save_primary_start;
-            _vim_parse_primary(0);
+            _vim_tmpl_append(atom_start, tmpl_n);
             if (_vim_err != VIM_E_OK) { return 0; }
             _vim_apply_star_inline(ts2, lazy);
         } elif (n_max > n_min) {
             var sn2 = 0;
             var k2 = n_min;
             while (k2 < n_max) {
-                if (sn2 >= 64) { _vim_err = VIM_E_TOO_LARGE; return 0; }
+                if (sn2 >= VIM_MAX_QSPLITS) { _vim_err = VIM_E_TOO_LARGE; return 0; }
                 var sy = _vim_emit_split(0, 0);
                 store64(_vim_q_splits + sn2 * 8, sy);
                 sn2 = sn2 + 1;
-                _vim_pos = save_primary_start;
-                _vim_parse_primary(0);
+                _vim_tmpl_append(atom_start, tmpl_n);
                 if (_vim_err != VIM_E_OK) { return 0; }
                 k2 = k2 + 1;
             }
@@ -1067,6 +1167,11 @@ fn _vim_parse_alt(): i64 {
         }
         if (is_alt == 0) { return 0; }
         var left_end = _vim_instr_n;
+        # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+        # _vim_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+        # this guard a deeply-nested pattern walks _vim_instr_n past the end of the
+        # NFA's instruction region and _vim_shift_right writes out of bounds.
+        if (_vim_instr_n >= VIM_MAX_INSTRS) { _vim_err = VIM_E_TOO_LARGE; return 0; }
         _vim_shift_right(left_start, left_end);
         _vim_shift_targets_one(left_start, left_end);
         _vim_instr_n = _vim_instr_n + 1;
@@ -1136,6 +1241,11 @@ fn niyama_vim_compile_opts(pat, mode): i64 {
         }
         if (is_alt == 0) { _vim_err = VIM_E_SYNTAX; _vim_last_err = _vim_err; return 0; }
         var lend = _vim_instr_n;
+        # v1.0.9 — the shift grows the program by one slot WITHOUT going through
+        # _vim_emit_raw, so it bypasses that function's MAX_INSTRS ceiling. Without
+        # this guard a deeply-nested pattern walks _vim_instr_n past the end of the
+        # NFA's instruction region and _vim_shift_right writes out of bounds.
+        if (_vim_instr_n >= VIM_MAX_INSTRS) { _vim_err = VIM_E_TOO_LARGE; return 0; }
         _vim_shift_right(lstart, lend);
         _vim_shift_targets_one(lstart, lend);
         _vim_instr_n = _vim_instr_n + 1;
@@ -1173,15 +1283,10 @@ fn niyama_vim_last_error(): i64 {
 
 # === Pike NFA matcher (mirrors re2.cyr) ==============================
 
+# v1.0.9 — delegates to the shared implementation in src/posix_classes.cyr
+# (was a byte-identical copy in each of the four engines).
 fn _vim_at_word_char(input, input_len, pos): i64 {
-    if (pos < 0)         { return 0; }
-    if (pos >= input_len){ return 0; }
-    var c = load8(input + pos);
-    if (c >= 48 && c <= 57)   { return 1; }
-    if (c >= 65 && c <= 90)   { return 1; }
-    if (c >= 97 && c <= 122)  { return 1; }
-    if (c == 95)              { return 1; }
-    return 0;
+    return _posix_is_word_char(input, input_len, pos);
 }
 
 fn _vim_is_boundary(input, input_len, pos): i64 {
@@ -1197,6 +1302,21 @@ fn _vim_class_get_at(class_base, ci, c): i64 {
     var off = class_base + ci * 32 + (c >> 3);
     var b = load8(off);
     if ((b >> (c & 7)) & 1) { return 1; }
+    return 0;
+}
+
+# v1.0.9 — copy thread `ti`'s save slots out of `list_base` into `dst`. The
+# matcher had this exact loop hand-inlined once per opcode arm (19 copies
+# across bre/re2/vim), each repeating the 168-byte thread stride and the
+# 8-byte header offset. One transcription error in any of them would have
+# silently corrupted captures for that one opcode.
+fn _vim_thread_saves_to(list_base, ti, dst): i64 {
+    var k = 0;
+    while (k < VIM_MAX_SAVES) {
+        var v = load64(list_base + 8 + ti * 168 + 8 + k * 8);
+        store64(dst + k * 8, v);
+        k = k + 1;
+    }
     return 0;
 }
 
@@ -1248,6 +1368,20 @@ fn _vim_add_thread(list_base, pc, input, input_len, pos, saves, instrs): i64 {
             _vim_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
         }
     }
+    elif (op == VIM_OP_WORDBEGIN) {
+        var lw = _vim_at_word_char(input, input_len, pos - 1);
+        var rw = _vim_at_word_char(input, input_len, pos);
+        if (lw == 0 && rw == 1) {
+            _vim_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
+    }
+    elif (op == VIM_OP_WORDEND) {
+        var lw2 = _vim_at_word_char(input, input_len, pos - 1);
+        var rw2 = _vim_at_word_char(input, input_len, pos);
+        if (lw2 == 1 && rw2 == 0) {
+            _vim_add_thread(list_base, pc + 1, input, input_len, pos, saves, instrs);
+        }
+    }
     else {
         var n = load64(list_base);
         store64(list_base + 8 + n * 168, pc);
@@ -1267,13 +1401,13 @@ fn _vim_pike_run(nfa, input, input_len, start_pos): i64 {
     var instrs = nfa + load64(nfa + VIM_OFF_INSTRS_OFF);
     var class_base = nfa + load64(nfa + VIM_OFF_CLASSES_OFF);
     var matched = 0 - 1;
-    var saves_scratch = alloc(VIM_MAX_SAVES * 8);
+    var saves_scratch = _vim_m_saves;
     var k = 0;
     while (k < VIM_MAX_SAVES) {
         store64(saves_scratch + k * 8, 0 - 1);
         k = k + 1;
     }
-    var match_saves = alloc(VIM_MAX_SAVES * 8);
+    var match_saves = _vim_m_msaves;
     var k2 = 0;
     while (k2 < VIM_MAX_SAVES) {
         store64(match_saves + k2 * 8, 0 - 1);
@@ -1311,21 +1445,13 @@ fn _vim_pike_run(nfa, input, input_len, start_pos): i64 {
             var iop = iw0 & 0xFF;
             if (iop == VIM_OP_MATCH) {
                 matched = pos;
-                var ks = 0;
-                while (ks < VIM_MAX_SAVES) {
-                    store64(match_saves + ks * 8, load64(cur + 8 + ti * 168 + 8 + ks * 8));
-                    ks = ks + 1;
-                }
+                _vim_thread_saves_to(cur, ti, match_saves);
                 ti = n_cur;
             }
             elif (iop == VIM_OP_CHAR) {
                 var want = (iw0 >> 8) & 0xFF;
                 if (c >= 0 && c == want) {
-                    var ks2 = 0;
-                    while (ks2 < VIM_MAX_SAVES) {
-                        store64(saves_scratch + ks2 * 8, load64(cur + 8 + ti * 168 + 8 + ks2 * 8));
-                        ks2 = ks2 + 1;
-                    }
+                    _vim_thread_saves_to(cur, ti, saves_scratch);
                     _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                 }
             }
@@ -1333,21 +1459,13 @@ fn _vim_pike_run(nfa, input, input_len, start_pos): i64 {
                 # v0.8.0 — codepoint literal match.
                 var u_want = (iw0 >> 32) & 0x1FFFFF;
                 if (cp >= 0 && cp == u_want) {
-                    var ks_uc = 0;
-                    while (ks_uc < VIM_MAX_SAVES) {
-                        store64(saves_scratch + ks_uc * 8, load64(cur + 8 + ti * 168 + 8 + ks_uc * 8));
-                        ks_uc = ks_uc + 1;
-                    }
+                    _vim_thread_saves_to(cur, ti, saves_scratch);
                     _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                 }
             }
             elif (iop == VIM_OP_ANY) {
                 if (c >= 0) {
-                    var ks3 = 0;
-                    while (ks3 < VIM_MAX_SAVES) {
-                        store64(saves_scratch + ks3 * 8, load64(cur + 8 + ti * 168 + 8 + ks3 * 8));
-                        ks3 = ks3 + 1;
-                    }
+                    _vim_thread_saves_to(cur, ti, saves_scratch);
                     _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                 }
             }
@@ -1359,11 +1477,7 @@ fn _vim_pike_run(nfa, input, input_len, start_pos): i64 {
                         if (hit == 1) { hit = 0; } else { hit = 1; }
                     }
                     if (hit == 1) {
-                        var ks4 = 0;
-                        while (ks4 < VIM_MAX_SAVES) {
-                            store64(saves_scratch + ks4 * 8, load64(cur + 8 + ti * 168 + 8 + ks4 * 8));
-                            ks4 = ks4 + 1;
-                        }
+                        _vim_thread_saves_to(cur, ti, saves_scratch);
                         _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                     }
                 }
@@ -1377,11 +1491,7 @@ fn _vim_pike_run(nfa, input, input_len, start_pos): i64 {
                         if (u_hit == 1) { u_hit = 0; } else { u_hit = 1; }
                     }
                     if (u_hit == 1) {
-                        var ks_u = 0;
-                        while (ks_u < VIM_MAX_SAVES) {
-                            store64(saves_scratch + ks_u * 8, load64(cur + 8 + ti * 168 + 8 + ks_u * 8));
-                            ks_u = ks_u + 1;
-                        }
+                        _vim_thread_saves_to(cur, ti, saves_scratch);
                         _vim_add_thread(nxt, pc + 1, input, input_len, pos + step, saves_scratch, instrs);
                     }
                 }
@@ -1429,6 +1539,10 @@ fn niyama_vim_search(nfa, s): i64 {
 
 fn niyama_vim_search_at(nfa, s, len, from): i64 {
     if (nfa == 0) { return 0 - 1; }
+    # v1.0.9 — `from` is caller-supplied and was never validated; a negative
+    # value walked the matcher backwards off the front of the subject buffer.
+    if (from < 0) { return 0 - 1; }
+    if (len < 0) { return 0 - 1; }
     var i = from;
     while (i <= len) {
         var r = _vim_pike_run(nfa, s, len, i);

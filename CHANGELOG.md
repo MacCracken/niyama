@@ -4,6 +4,240 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.9] — 2026-09-08
+
+P(-1) hardening pass: audit, refactor, optimization and security sweep.
+**One CRITICAL and eight HIGH findings, all fixed.** Full report in
+[`docs/audit/2026-09-08-audit.md`](docs/audit/2026-09-08-audit.md).
+
+Method note: the review ran as a 6-dimension parallel pass followed by an
+adversarial refutation pass (32 raw findings, 3 refuted, 29 confirmed).
+Every finding below was independently reproduced with a compiled probe
+against the real source before a repair was written, and each repair was
+re-measured after. Two findings the reviewers confirmed were rejected on
+measurement — see **Measured and rejected**.
+
+### Security
+
+- **CRITICAL — heap out-of-bounds write via a crafted pattern.**
+  `_<engine>_emit_raw` is the only place enforcing `MAX_INSTRS`, but the
+  quantifier and alternation paths grow the program with
+  `_<engine>_shift_right` and then increment `_instr_n` directly. The `?`
+  branch performs no emit afterwards, so nothing checked the ceiling.
+  Pattern `"(?:" × 400 + "a" × 4095 + ")?" × 400` drove `_pcre_instr_n` to
+  **4496** against `MAX_INSTRS = 4096` — 6 400 bytes past the instruction
+  region, through the class bitmaps and name table and out of the 68 200-byte
+  NFA allocation entirely. Leaked instruction words were then observed
+  inside a subsequent `alloc()` result. `niyama_pcre_compile` still returned
+  0 with `TOO_LARGE`, so the API looked correct while the heap was already
+  corrupt — which is why 661 tests missed it. Fixed with a ceiling check at
+  all **16** shift-based growth sites (bre 2, re2 4, pcre 5, vim 5).
+  `instr_n` now stops at exactly 4096. Present in re2, the engine daimon
+  uses as a DoS-safe gate on untrusted input.
+- **HIGH — three unbounded, unreclaimable heap-growth sites.** `alloc()` is
+  a bump allocator whose only reclaim (`alloc_reset()`) invalidates every
+  outstanding pointer, so a library holding caller-visible handles can never
+  call it; every per-call `alloc()` is a permanent leak.
+  - `_<engine>_pike_run` allocated two 160-byte scratch arrays **per start
+    position** of a search. Measured on re2, pattern `Z`, 20 000-byte
+    subject: **6 400 320 B → 0 B** (exactly 320 B per input byte).
+  - pcre's backtracker allocated a 160-byte snapshot at every executed
+    SPLIT / LOOKAHEAD / NLOOKAHEAD / LOOKBEHIND / RECURSE, bounded only by
+    the 1M step limit. Measured on `(a+)+b` over 24 `a`s:
+    **45 715 840 B → 0 B**.
+  - `_pcre_run_at` allocated the top-level saves array per start offset.
+  All three hoisted to process-lifetime buffers in `_<engine>_lazy_init`;
+  pcre's snapshots became a depth-indexed pool sized
+  `(PCRE_MAX_DEPTH + 2) × PCRE_MAX_SAVES × 8`.
+- **HIGH — the catastrophic-backtracking guard was (len+1)× weaker than
+  documented.** `_pcre_run_at` reset `_pcre_step_count = 0` on entry and
+  `niyama_pcre_search_at` calls it once per start offset, so a search's real
+  budget was `step_limit × (len + 1)` — 4 billion steps on a 4 KB subject,
+  not the documented 1 000 000. The reset moved to a new
+  `_pcre_begin_match()` called once per public entry point.
+  `niyama_pcre_set_step_limit()` / `_last_step_count()` unchanged.
+- **LOW — `from` was never validated** on any of the four
+  `niyama_<engine>_search_at` entry points; a negative offset ran the
+  matcher backwards off the front of the subject buffer. (The v0.9.0 audit's
+  input-validation table asserted these checks were present. They were not.)
+  `len < 0` is rejected too.
+- **LOW — unchecked `alloc()` results.** All 33 lazy-init allocations across
+  the five engines are now checked; on failure the engine reports
+  `TOO_LARGE` and returns without setting its init flag, so a later call
+  retries rather than running on half-initialised state. Previously heap
+  exhaustion became a write to the NULL page.
+
+### Fixed
+
+- **`{n,m}` was compiled by re-parsing the atom, corrupting captures.**
+  `_<engine>_apply_brace_q` rewound the source cursor and re-ran
+  `_parse_primary` per repetition, re-running its non-idempotent side
+  effects — one capture index, one name-table slot and one class bitmap
+  burned per copy — and re-entering itself, which clobbered the shared
+  `_q_splits` scratch. Affected all four regex engines:
+
+  | Pattern | Before | Now |
+  |---|---|---|
+  | `(?:a{1,2}){1,2}` vs `"aa"` | no match | match |
+  | `(a){2}(b)` vs `"aab"` | group 2 = 2nd copy of `a` | group 2 = `b` |
+  | `(a){10}` | rejected `SYNTAX` | compiles |
+  | `(?<x>a){2}` | rejected `DUPLICATE_NAME` | compiles |
+
+  The re2 case fails **open**: a nested-quantifier deny-rule in a pattern
+  gate silently stops matching with `last_error() == 0`. Repetitions are now
+  relocated copies of the compiled atom (`_tmpl_save` / `_tmpl_append`); no
+  parser state is touched per repetition, which removes the re-entrancy and
+  so fixes the `_q_splits` clobber by construction.
+- **Split-list capacity contradicted the advertised limit.** All four
+  engines reject `n_max > 1000`, but the list held 64 — so `{0,65}`
+  through `{0,1000}` were falsely `TOO_LARGE`. Capacity is now
+  `<ENGINE>_MAX_QSPLITS = 1000`; `MAX_INSTRS` remains the real backstop.
+- **`niyama_fuzzy_search` returned an out-of-range offset.** Under
+  `FUZZY_FLAG_UNICODE_NFD` the offset indexed the normalized scratch buffer,
+  not the caller's string: a subject of five U+00E9 plus `"dog"` (13 bytes)
+  returned **15**. New `_fuzzy_norm_to_orig` translates back by walking the
+  original a codepoint at a time; now returns 10, and the result is clamped
+  to the subject length regardless.
+- **fuzzy silently truncated over-long subjects.** Every `_fuzzy_dp_*` entry
+  clamped to `FUZZY_MAX_TEXT_LEN`, so a match past byte 4096 reported "no
+  match" with `FUZZY_E_OK` — indistinguishable from a real miss, and
+  reachable *inside* the documented limit under NFD because decomposition
+  expands the subject. Now reported (see **Added**). `niyama_fuzzy_match`
+  additionally rejects the negative error distance, which would otherwise
+  have satisfied `d <= max_edits` and returned a **false positive match**.
+- **vim `\>` fired at word starts.** `\<` and `\>` both compiled to
+  `VIM_OP_BOUNDARY`, the symmetric `\b` test, so each fired at both ends of
+  a word; `\>x` matched `"x"` at position 0. `\<foo\>` only looked correct
+  because each end is independently a boundary. Now `VIM_OP_WORDBEGIN` (15)
+  and `VIM_OP_WORDEND` (16), matching bre's strict semantics since v0.7.0.
+- **`\K` inside a lookaround moved the outer match start.** Slot 0 is the
+  match start, not a user capture, and positive lookarounds keep their
+  sub-captures — so a `\K` inside one rewrote the outer start to a
+  zero-width position inside the lookaround, producing an inverted group-0
+  span. Slot 0 is now restored on the positive-lookaround success path,
+  scoping `\K` as PCRE2 does. Top-level `\K` unchanged.
+- Stale in-source documentation corrected: `PCRE_OP_LOOKBEHIND`'s comment
+  claimed width and end_pc were bit-packed into arg1 (the emitter and
+  matcher put the width in arg2); `src/posix_classes.cyr`'s header still
+  described vim as carrying its own copy and called the fold a "v0.9.0
+  cleanup" two releases after it happened in v0.8.0;
+  `niyama_fuzzy_search`'s comment still described the pre-v0.8.0
+  `end - plen` heuristic and cited ADR 0005 as outstanding work.
+- `BRE_E_BAD_ANCHOR` is documented as reserved. ADR 0010's freeze table
+  marked slot 4 "live" while ADR 0002 called it "reserved — currently
+  unused"; the code confirms ADR 0002 (it is never emitted), and the
+  declaration now carries the reserved-slot comment pcre's reserved codes
+  have.
+
+### Added
+
+- `FUZZY_E_TEXT_TOO_LONG = 4` — subject longer than `FUZZY_MAX_TEXT_LEN`,
+  checked after normalization on all four fuzzy entry points. Additive: a new
+  value on the existing `niyama_fuzzy_last_error()` accessor, no signature or
+  return-value change.
+- `PCRE_E_DEPTH_EXCEEDED = 12` — match-time signal that the backtracker hit
+  its recursion ceiling, readable via `niyama_pcre_last_error()` after a
+  match or search. See **Known limitation**.
+
+### Changed
+
+- **Refactor — duplication consolidated** (per CLAUDE.md § Refactoring
+  Policy: three or more instances, measured, same test gates as new code).
+  - `_<engine>_at_word_char` was a byte-identical 10-line copy in all four
+    engines — the `\w` / `\b` / `\<` / `\>` definition, so a change to the
+    character set had to land in four places. Now one
+    `_posix_is_word_char` in `src/posix_classes.cyr` with four one-line
+    delegates, preserving every call site.
+  - The per-thread save-copy loop was hand-inlined **22 times** across the
+    three Pike matchers (bre 5, re2 10, vim 7), each repeating the 168-byte
+    thread stride and 8-byte header offset. Now `_<engine>_thread_saves_to`.
+  - Not done: consolidating the NFA-blob edit primitives
+    (`_shift_right` / `_patch_arg1` / `_patch_arg2` / `_shift_targets_one`),
+    the class-bitmap helpers, and `_lit_byte`. All are genuine duplication,
+    but each is parameterised by engine-specific globals (`_instr_base`,
+    `_err`, `_pos`) and sits on the pattern-parsing core. Deferred rather
+    than bundled into a release already carrying this many security fixes.
+    Note the reviewer's claim that `_lit_byte` is "four byte-identical
+    copies" is **not accurate** — the four differ in which engine's error
+    constant they set, though all four constants are `= 1`.
+
+### Performance
+
+- **Every one of the 53 benchmark rows is faster or neutral. Zero
+  regressions.** Sequential baseline-vs-post-review: mean **−14.29%**,
+  median −15.48%, best `fuzzy_medium_pattern_distance` **−33.3%**, worst
+  +0.5% (inside its own spread). Confirmed by an interleaved A/B of v1.0.8
+  vs v1.0.9 source on the same host (mean −12.81%, median −15.74%).
+- These are a **side effect of the leak repairs**, not separate optimization
+  work: `_pike_run` was making two *locked* `alloc()` calls per start
+  position, so an unanchored N-byte search did 2N locked allocations.
+  Removing them is the 5–25% on every `*_search_*` row across the four
+  engines. fuzzy's larger 15–27% adds the `_fuzzy_prefold` hoist
+  (`_fuzzy_fold` had been recomputed `plen × slen` times for a value
+  depending only on the column) and the removal of a per-call 8-byte
+  allocation.
+- An ASCII fast path was added to `_fuzzy_maybe_normalize`: NFD is provably
+  the identity below U+0080, and `str_normalize` allocates ~60× the input
+  per call, so an NFD-flagged handle scanning ASCII lines leaked steadily
+  for no benefit.
+- Full numbers in [`docs/benchmarks.md`](docs/benchmarks.md).
+
+### Measured and rejected
+
+- **Dedup-guarding the per-thread save copy** (16 call sites across
+  bre/re2/vim): stage the copy only when `_m_lastgen` shows the target pc is
+  not already claimed this generation. Implemented, all 661 assertions
+  passed, then measured over 31 rows interleaved — mean −0.29%, median
+  −0.12%, every row inside its noise band. The dedup rarely fires at those
+  sites, so the guard only adds a branch. **Reverted.**
+- The reviewers also flagged "all four engines re-run the matcher from every
+  start offset (O(N²))" and "pcre rescans the instruction stream on every
+  RECURSE". Both were **refuted** in the verification pass and not acted on.
+
+### Known limitation — pcre recursion depth
+
+`_pcre_match_run` recurses natively for SPLIT and SAVE, so depth scales with
+**input position**, not pattern nesting. With `PCRE_MAX_DEPTH = 256`, a
+quantifier that must consume more than ~250 positions exhausts it:
+`a*$` over 300 `a`s and `(a){200}` over 200 `a`s both report no match
+(`(a){100}` over 100 works). Confirmed pre-existing — identical on v1.0.8.
+
+The limit is **not a tunable**: measured against an 8 MB stack,
+`_pcre_match_run` frames are ~20 KB and the process SIGSEGVs past ~400
+frames, so 256 is already near the ceiling. Raising it trades a false
+negative for a crash. The real fix is an explicit heap-allocated backtrack
+stack replacing native recursion — a matcher-core rewrite, deferred rather
+than carried in this release. Mitigated here by making the condition
+observable via `PCRE_E_DEPTH_EXCEEDED`, so a caller can distinguish "no
+match" from "gave up".
+
+### Tests / fuzz
+
+- `cyrius test` 6 files / **747 assertions** (was 661; **+86**), 0 failures.
+  Every finding above has a regression assertion: brace nesting and capture
+  numbering in all four engines, the falsely-rejected `(a){10}` /
+  `(?<x>a){2}` / `[a]{0,70}`, negative `from`/`len` on all four
+  `search_at`, vim `\<`/`\>` asymmetry, fuzzy over-long rejection and
+  NFD offset range, pcre `\K`-in-lookaround and depth observability.
+- `cyrius fuzz` 5 harnesses / **1689 assertions**, 0 failures (unchanged).
+
+### Bench
+
+- 53 rows, **0 regressions**, mean −14.29%. See **Performance**.
+
+### ABI summary
+
+- Error codes: `FUZZY_E_TEXT_TOO_LONG = 4` and `PCRE_E_DEPTH_EXCEEDED = 12`
+  added (additive; existing accessors). Reserved-but-unused, unchanged:
+  `BRE_E_BAD_ANCHOR = 4`, `PCRE_E_LOOKBEHIND_UNSUPPORTED = 2`,
+  `PCRE_E_RECURSION_UNSUPPORTED = 4`, `PCRE_E_CONDITIONAL_UNSUPPORTED = 5`.
+- Opcodes: `VIM_OP_WORDBEGIN = 15`, `VIM_OP_WORDEND = 16` added. Internal
+  encoding — never crosses the public surface.
+- The 42 public `niyama_<engine>_*` functions are unchanged in name,
+  arity and return semantics. ADR 0010's freeze holds.
+- `dist/niyama.cyr` regenerated: 7258 lines (was 6664).
+
+
 ## [1.0.8] — 2026-09-07
 
 Toolchain + vendored-stdlib refresh. No engine source changes; the

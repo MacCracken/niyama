@@ -280,3 +280,73 @@ rather than a regression — cyrius ≤ 6.5.15 silently ignored
 linked into it. Runtime performance is unaffected, which is what the
 table above establishes. See CHANGELOG § 1.0.7 and
 `development/state.md` § Toolchain.
+
+## v1.0.9 P(-1) hardening (steps 2 and 7 — baseline vs. post-review)
+
+**Date**: 2026-09-08
+**Cyrius**: 6.6.0
+**Host**: Linux 7.2.3-arch1-3 x86_64
+**Method**: 3 runs per harness, per-row medians, measured timer floor
+subtracted per sample. 53 rows across the 5 per-engine harnesses.
+
+### Result — no regressions; broad, large improvements
+
+| | value |
+|---|---|
+| Rows compared | 53 |
+| Rows regressed beyond +5% | **0** |
+| Rows improved beyond −5% | 38 |
+| Drift mean | **−14.29%** |
+| Drift median | **−15.48%** |
+| Best row | `fuzzy_medium_pattern_distance` **−33.3%** |
+| Worst row | `bre_compile_literal` +0.5% (inside its 1.5% spread) |
+
+### Controlled confirmation
+
+The step-2 baseline was taken hours before step 7, and this host drifts
+over a session, so the sequential comparison was re-run as an
+**interleaved A/B** — v1.0.8 source vs. v1.0.9 source, same toolchain,
+alternating runs, 3 rounds each:
+
+| Row | v1.0.8 | v1.0.9 | drift |
+|---|---|---|---|
+| `re2_search_literal` | 25.242µs | 21.230µs | **−15.9%** |
+| `re2_search_alt` | 49.932µs | 45.649µs | **−8.6%** |
+| `re2_search_class` | 122.205µs | 115.328µs | **−5.6%** |
+| `re2_search_email` | 11.739µs | 10.893µs | **−7.2%** |
+| `fuzzy_distance_long` | 2.257µs | 1.689µs | **−25.2%** |
+| `fuzzy_search_long_256B` | 25.569µs | 19.200µs | **−24.9%** |
+| `fuzzy_search_prefix` | 1.414µs | 1.071µs | **−24.3%** |
+| `fuzzy_medium_pattern_distance` | 13.990µs | 10.272µs | **−26.6%** |
+| `re2_compile_*` (3 rows) | — | — | +1.8% .. −0.3% |
+| `fuzzy_compile_*` (2 rows) | — | — | −0.5% .. −0.2% |
+
+Mean −12.81%, median −15.74%. Compile rows are neutral and search rows
+improve, which is exactly where the changes are.
+
+### Why the security fixes made it faster
+
+The wins are a **side effect of the C2 leak repairs**, not of separate
+optimization work:
+
+- `_<engine>_pike_run` called `alloc()` **twice per start position** of
+  every search. `alloc()` takes a lock (`_alloc_lock_acquire`), so an
+  unanchored search over N bytes performed 2N locked allocations. Hoisting
+  that scratch to process lifetime removed them from the hot loop —
+  that is the 5–25% on every `*_search_*` row across bre/re2/pcre/vim.
+- `fuzzy`'s larger 15–27% adds two more: `_fuzzy_fold` was called
+  `plen × slen` times to recompute a value depending only on the column
+  (now prefolded once per call, `_fuzzy_prefold`), and
+  `niyama_fuzzy_search` allocated an 8-byte out-param on every call.
+
+### Measured and rejected
+
+One optimization was implemented, measured and **discarded**: guarding the
+per-thread save copy with the `_m_lastgen` dedup check before staging it
+(16 call sites across bre/re2/vim). The hypothesis was that the copy is
+wasted whenever the thread is deduped. Interleaved A/B over 31 rows:
+mean −0.29%, median −0.12%, every row inside its own noise band. The dedup
+rarely fires at those sites, so the guard only adds a branch. Reverted per
+CLAUDE.md § Refactoring Policy — no speculative changes to a hot matcher
+loop without measured benefit.
+

@@ -227,6 +227,26 @@ fn main() {
     assert_neq(niyama_bre_compile("\\(a\\)\\(b\\)\\(c\\)\\(d\\)\\(e\\)\\(f\\)\\(g\\)\\(h\\)\\(i\\)"),
                0, "9 groups compile (max valid)");
 
+
+    # === v1.0.9 P(-1) regressions =====================================
+    test_group("bre-v109-brace-nesting");
+    assert_eq(t_match("\\(a\\{1,2\\}\\)\\{1,2\\}", "aa"), 1, "nested brace vs aa");
+    assert_eq(t_match("\\(a\\{0,2\\}\\)\\{0,2\\}", "aa"), 1, "nested brace zero-min");
+    var v109_g = niyama_bre_compile("\\(a\\)\\{2\\}\\(b\\)");
+    assert_neq(v109_g, 0, "\\(a\\)\\{2\\}\\(b\\) compiles");
+    niyama_bre_search(v109_g, "aab");
+    assert_eq(niyama_bre_group_start(v109_g, 2), 2, "g2 is (b), not a copy of (a)");
+    assert_eq(niyama_bre_group_end(v109_g, 2),   3, "g2 end");
+    assert_neq(niyama_bre_compile("\\(a\\)\\{10\\}"), 0, "\\(a\\)\\{10\\} not falsely SYNTAX");
+    assert_eq(t_match("a\\{3\\}", "aaa"), 1, "a{3} unchanged");
+    assert_eq(t_match("a\\{3\\}", "aa"),  0, "a{3} rejects aa");
+
+    test_group("bre-v109-search-at-bounds");
+    var v109_n = niyama_bre_compile("b");
+    assert_eq(niyama_bre_search_at(v109_n, "abc", 3, 0 - 1), 0 - 1, "negative from rejected");
+    assert_eq(niyama_bre_search_at(v109_n, "abc", 0 - 1, 0), 0 - 1, "negative len rejected");
+    assert_eq(niyama_bre_search_at(v109_n, "abc", 3, 0),     1,     "valid from still works");
+
     return assert_summary();
 }
 

@@ -124,7 +124,15 @@ Wagner-Fischer DP, two-row optimized. Not a regex (per ADR 0005).
 **Error codes**: `FUZZY_E_OK = 0`, `FUZZY_E_PATTERN_TOO_LONG = 1`,
 `FUZZY_E_INVALID_THRESHOLD = 2`, `FUZZY_E_NFD_OVERFLOW = 3`.
 
-**Limits**: `FUZZY_MAX_PAT_LEN = 256`, `FUZZY_MAX_TEXT_LEN = 4096`,
+**Limits**: `FUZZY_MAX_PAT_LEN = 256`, `FUZZY_MAX_TEXT_LEN = 4096`
+(**v1.0.9**: a subject over this limit is now REJECTED with
+`FUZZY_E_TEXT_TOO_LONG = 4` rather than silently truncated. The check runs
+*after* NFD normalization, so a subject inside the limit that decomposes past
+it is also rejected. `niyama_fuzzy_distance` returns `-1`,
+`niyama_fuzzy_match` / `_search_prefix` return 0, `niyama_fuzzy_search`
+returns `-1`. Under `FUZZY_FLAG_UNICODE_NFD` the offset from
+`niyama_fuzzy_search` indexes the CALLER's string, not the normalized
+buffer.),
 `FUZZY_DEFAULT_K = 2`.
 
 **Note**: no `_search_at` — substring-search-from-offset requires

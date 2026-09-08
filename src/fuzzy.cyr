@@ -63,6 +63,13 @@ var FUZZY_E_INVALID_THRESHOLD  = 2;
 # Hangul LVT). If the normalized pattern overflows FUZZY_MAX_PAT_LEN,
 # reject at compile time rather than silently truncate.
 var FUZZY_E_NFD_OVERFLOW       = 3;
+# v1.0.9 — subject longer than FUZZY_MAX_TEXT_LEN. The DP rows are sized once at
+# (FUZZY_MAX_TEXT_LEN + 1) * 8, and every _fuzzy_dp_* entry point silently CLAMPED
+# an over-long subject to that width — so a match past byte 4096 simply reported
+# 'no match' with FUZZY_E_OK, and the caller could not tell a real miss from a
+# truncated scan. NFD made it worse: decomposition expands the subject, so inputs
+# INSIDE the documented limit were truncated after normalization. Now reported.
+var FUZZY_E_TEXT_TOO_LONG      = 4;
 
 # Process-lifetime scratch.
 var _fuzzy_init = 0;
@@ -70,11 +77,35 @@ var _fuzzy_row_a = 0;
 var _fuzzy_row_b = 0;
 var _fuzzy_last_err = 0;
 var _fuzzy_last_dist = 0;
+# v1.0.9 — scratch for _fuzzy_norm_to_orig (process-lifetime, not per call).
+var _fuzzy_normalized = 0;
+var _fuzzy_cp_slot = 0;
+var _fuzzy_dec_buf = 0;
+var _fuzzy_enc_buf = 0;
+# v1.0.9 — prefolded subject. _fuzzy_fold was called once per (pattern row,
+# subject column), i.e. plen * slen times, to recompute a value that depends only
+# on the column. Folding the subject once up front makes it slen.
+var _fuzzy_fold_buf = 0;
 
 fn _fuzzy_lazy_init(): i64 {
     if (_fuzzy_init == 1) { return 0; }
     _fuzzy_row_a = alloc((FUZZY_MAX_TEXT_LEN + 1) * 8);
     _fuzzy_row_b = alloc((FUZZY_MAX_TEXT_LEN + 1) * 8);
+    _fuzzy_cp_slot = alloc(8);
+    _fuzzy_dec_buf = alloc(32 * 8);
+    _fuzzy_enc_buf = alloc(8);
+    _fuzzy_fold_buf = alloc(FUZZY_MAX_TEXT_LEN + 1);
+    # v1.0.9 — alloc() returns 0 on exhaustion (lib/alloc.cyr). Every pointer
+    # above is dereferenced unconditionally by the compiler and matcher, so an
+    # unchecked 0 turned heap exhaustion into a write to the NULL page. Bail
+    # WITHOUT setting the init flag, so a later call retries rather than
+    # running on half-initialised state.
+    if (_fuzzy_row_a == 0) { _fuzzy_last_err = FUZZY_E_PATTERN_TOO_LONG; return 0; }
+    if (_fuzzy_row_b == 0) { _fuzzy_last_err = FUZZY_E_PATTERN_TOO_LONG; return 0; }
+    if (_fuzzy_cp_slot == 0) { _fuzzy_last_err = FUZZY_E_PATTERN_TOO_LONG; return 0; }
+    if (_fuzzy_dec_buf == 0) { _fuzzy_last_err = FUZZY_E_PATTERN_TOO_LONG; return 0; }
+    if (_fuzzy_enc_buf == 0) { _fuzzy_last_err = FUZZY_E_PATTERN_TOO_LONG; return 0; }
+    if (_fuzzy_fold_buf == 0) { _fuzzy_last_err = FUZZY_E_PATTERN_TOO_LONG; return 0; }
     _fuzzy_init = 1;
     return 0;
 }
@@ -86,6 +117,23 @@ fn _fuzzy_min3(a, b, c): i64 {
     if (b < m) { m = b; }
     if (c < m) { m = c; }
     return m;
+}
+
+# v1.0.9 — fold `n` bytes of `src` into the shared prefold buffer once, so the DP
+# inner loops can index it directly instead of calling _fuzzy_fold per cell.
+fn _fuzzy_prefold(src, n, casefold): i64 {
+    var i = 0;
+    while (i < n) {
+        var c = load8(src + i);
+        if (casefold == 1) {
+            if (c >= 65) {
+                if (c <= 90) { c = c + 32; }
+            }
+        }
+        store8(_fuzzy_fold_buf + i, c);
+        i = i + 1;
+    }
+    return 0;
 }
 
 fn _fuzzy_fold(c, casefold): i64 {
@@ -158,6 +206,7 @@ fn niyama_fuzzy_last_distance(): i64 {
 # Base case: prev[j] = j (empty pattern → j insertions to match s[0..j]).
 fn _fuzzy_dp_full(pat, plen, s, slen, casefold): i64 {
     if (slen > FUZZY_MAX_TEXT_LEN) { slen = FUZZY_MAX_TEXT_LEN; }
+    _fuzzy_prefold(s, slen, casefold);
     var prev = _fuzzy_row_a;
     var curr = _fuzzy_row_b;
     var j = 0;
@@ -171,7 +220,7 @@ fn _fuzzy_dp_full(pat, plen, s, slen, casefold): i64 {
         var pc = _fuzzy_fold(load8(pat + i - 1), casefold);
         var k = 1;
         while (k <= slen) {
-            var sc = _fuzzy_fold(load8(s + k - 1), casefold);
+            var sc = load8(_fuzzy_fold_buf + k - 1);
             var sub_cost = 1;
             if (sc == pc) { sub_cost = 0; }
             var del_d = load64(prev + k * 8) + 1;
@@ -197,6 +246,7 @@ fn _fuzzy_dp_full(pat, plen, s, slen, casefold): i64 {
 # for skipping leading text bytes).
 fn _fuzzy_dp_substring(pat, plen, s, slen, casefold, out_end_pos): i64 {
     if (slen > FUZZY_MAX_TEXT_LEN) { slen = FUZZY_MAX_TEXT_LEN; }
+    _fuzzy_prefold(s, slen, casefold);
     var prev = _fuzzy_row_a;
     var curr = _fuzzy_row_b;
     var j = 0;
@@ -210,7 +260,7 @@ fn _fuzzy_dp_substring(pat, plen, s, slen, casefold, out_end_pos): i64 {
         var pc = _fuzzy_fold(load8(pat + i - 1), casefold);
         var k = 1;
         while (k <= slen) {
-            var sc = _fuzzy_fold(load8(s + k - 1), casefold);
+            var sc = load8(_fuzzy_fold_buf + k - 1);
             var sub_cost = 1;
             if (sc == pc) { sub_cost = 0; }
             var del_d = load64(prev + k * 8) + 1;
@@ -249,6 +299,7 @@ fn _fuzzy_dp_substring(pat, plen, s, slen, casefold, out_end_pos): i64 {
 # complexity as the forward pass; reuses the row scratch buffers.
 fn _fuzzy_recover_start(pat, plen, s, end_pos, casefold): i64 {
     if (end_pos > FUZZY_MAX_TEXT_LEN) { end_pos = FUZZY_MAX_TEXT_LEN; }
+    _fuzzy_prefold(s, end_pos, casefold);
     var prev = _fuzzy_row_a;
     var curr = _fuzzy_row_b;
     var j = 0;
@@ -264,7 +315,7 @@ fn _fuzzy_recover_start(pat, plen, s, end_pos, casefold): i64 {
         var k = 1;
         while (k <= end_pos) {
             # Read input backwards: 1-indexed k ↔ s[end_pos - k].
-            var sc = _fuzzy_fold(load8(s + (end_pos - k)), casefold);
+            var sc = load8(_fuzzy_fold_buf + (end_pos - k));
             var sub_cost = 1;
             if (sc == pc) { sub_cost = 0; }
             var del_d = load64(prev + k * 8) + 1;
@@ -296,6 +347,7 @@ fn _fuzzy_recover_start(pat, plen, s, end_pos, casefold): i64 {
 # of s. Same DP as full, but final answer is min over the last row.
 fn _fuzzy_dp_prefix(pat, plen, s, slen, casefold): i64 {
     if (slen > FUZZY_MAX_TEXT_LEN) { slen = FUZZY_MAX_TEXT_LEN; }
+    _fuzzy_prefold(s, slen, casefold);
     var prev = _fuzzy_row_a;
     var curr = _fuzzy_row_b;
     var j = 0;
@@ -309,7 +361,7 @@ fn _fuzzy_dp_prefix(pat, plen, s, slen, casefold): i64 {
         var pc = _fuzzy_fold(load8(pat + i - 1), casefold);
         var k = 1;
         while (k <= slen) {
-            var sc = _fuzzy_fold(load8(s + k - 1), casefold);
+            var sc = load8(_fuzzy_fold_buf + k - 1);
             var sub_cost = 1;
             if (sc == pc) { sub_cost = 0; }
             var del_d = load64(prev + k * 8) + 1;
@@ -341,16 +393,85 @@ fn _fuzzy_dp_prefix(pat, plen, s, slen, casefold): i64 {
 var _fuzzy_norm_buf = 0;
 var _fuzzy_norm_len = 0;
 
+# v1.0.9 — translate a byte offset in the NFD-normalized subject back to the
+# caller's original subject. niyama_fuzzy_search used to return the normalized
+# offset directly, so under FUZZY_FLAG_UNICODE_NFD the value was in the wrong
+# coordinate space and could point PAST the end of the caller's string (an
+# e-acute prefix decomposes 2 bytes -> 3, so the offset ran ahead by one byte per
+# such character). Walks the original a codepoint at a time, accumulating each
+# one's decomposed byte length. Canonical reordering permutes combining marks
+# within a sequence but never moves them across a starter and never changes the
+# total byte count, so boundaries computed this way agree with str_normalize.
+fn _fuzzy_norm_to_orig(s, slen, norm_off): i64 {
+    if (norm_off <= 0) { return 0; }
+    var oi = 0;
+    var ni = 0;
+    var done = 0;
+    var result = slen;
+    while (oi < slen) {
+        if (done == 0) {
+            if (ni >= norm_off) { result = oi; done = 1; }
+        }
+        if (done == 0) {
+            var consumed = _uc_decode_utf8(s, oi, slen, _fuzzy_cp_slot);
+            if (consumed < 1) { consumed = 1; }
+            var cp = load64(_fuzzy_cp_slot);
+            var n = _uc_decompose_cp_recursive(cp, _fuzzy_dec_buf, 0, 32);
+            var k = 0;
+            while (k < n) {
+                ni = ni + _uc_emit_utf8(_fuzzy_enc_buf, load64(_fuzzy_dec_buf + k * 8));
+                k = k + 1;
+            }
+            oi = oi + consumed;
+        } else {
+            oi = slen;
+        }
+    }
+    if (done == 0) { result = slen; }
+    return result;
+}
+
 fn _fuzzy_maybe_normalize(s, slen, flags): i64 {
     if ((flags & FUZZY_FLAG_UNICODE_NFD) == 0) {
         _fuzzy_norm_buf = s;
         _fuzzy_norm_len = slen;
+        _fuzzy_normalized = 0;
+        return 0;
+    }
+    # v1.0.9 — ASCII fast path. NFD is provably the identity below U+0080, and
+    # str_normalize allocates three buffers per call (~60x the input) on a bump
+    # heap that never reclaims — so an NFD-flagged handle used in a scan loop over
+    # ASCII lines leaked steadily for no benefit. Scan first; only pay when there
+    # is actually something to decompose.
+    var has_high = 0;
+    var i = 0;
+    while (i < slen) {
+        if (load8(s + i) >= 128) { has_high = 1; i = slen; }
+        else { i = i + 1; }
+    }
+    if (has_high == 0) {
+        _fuzzy_norm_buf = s;
+        _fuzzy_norm_len = slen;
+        _fuzzy_normalized = 0;
         return 0;
     }
     var nfd = str_normalize(str_new(s, slen), NFD);
     _fuzzy_norm_buf = str_data(nfd);
     _fuzzy_norm_len = str_len(nfd);
+    _fuzzy_normalized = 1;
     return 0;
+}
+
+# v1.0.9 — reject an over-long subject instead of silently truncating it. Called
+# AFTER _fuzzy_maybe_normalize because NFD expands: a subject well inside the
+# documented 4096-byte limit can decompose past it, and the old code clamped both
+# cases inside _fuzzy_dp_* with no signal to the caller.
+fn _fuzzy_text_ok(): i64 {
+    if (_fuzzy_norm_len > FUZZY_MAX_TEXT_LEN) {
+        _fuzzy_last_err = FUZZY_E_TEXT_TOO_LONG;
+        return 0;
+    }
+    return 1;
 }
 
 fn niyama_fuzzy_distance(h, s): i64 {
@@ -361,6 +482,8 @@ fn niyama_fuzzy_distance(h, s): i64 {
     if ((flags & FUZZY_FLAG_CASE_INSENSITIVE) != 0) { casefold = 1; }
     var slen = strlen(s);
     _fuzzy_maybe_normalize(s, slen, flags);
+    if (_fuzzy_text_ok() == 0) { return 0 - 1; }
+    _fuzzy_last_err = FUZZY_E_OK;
     var d = _fuzzy_dp_full(h + FUZZY_OFF_PAT, plen, _fuzzy_norm_buf, _fuzzy_norm_len, casefold);
     _fuzzy_last_dist = d;
     return d;
@@ -370,14 +493,21 @@ fn niyama_fuzzy_match(h, s): i64 {
     if (h == 0) { return 0; }
     var max_edits = load64(h + FUZZY_OFF_MAX_EDITS);
     var d = niyama_fuzzy_distance(h, s);
+    # v1.0.9 — a distance can never be negative, so a negative value is the
+    # error signal (FUZZY_E_TEXT_TOO_LONG). Without this test `0 - 1 <= max_edits`
+    # is true and an over-long subject would report a MATCH.
+    if (d < 0) { return 0; }
     if (d <= max_edits) { return 1; }
     return 0;
 }
 
 # Substring fuzzy: does some contiguous slice of s have edit distance
-# ≤ max_edits to pat? Returns approximate start offset on hit, or -1.
-# Start is computed as `end - plen` clamped to [0, slen) — exact start
-# recovery is deferred per ADR 0005.
+# ≤ max_edits to pat? Returns the start offset on hit, or -1.
+# v1.0.9 — comment corrected: exact start recovery landed in v0.8.0 via the
+# reverse-DP pass in _fuzzy_recover_start (ADR 0008). The old text still
+# described the superseded `end - plen` heuristic and cited ADR 0005 as if the
+# work were outstanding. The offset indexes the CALLER's string even under
+# FUZZY_FLAG_UNICODE_NFD (see _fuzzy_norm_to_orig).
 fn niyama_fuzzy_search(h, s): i64 {
     if (h == 0) { return 0 - 1; }
     var plen = load64(h + FUZZY_OFF_PAT_LEN);
@@ -391,6 +521,8 @@ fn niyama_fuzzy_search(h, s): i64 {
     var nlen = _fuzzy_norm_len;
     # Allocate a stack slot for the end-pos out param.
     var end_pos_buf = alloc(8);
+    if (_fuzzy_text_ok() == 0) { return 0 - 1; }
+    _fuzzy_last_err = FUZZY_E_OK;
     var d = _fuzzy_dp_substring(h + FUZZY_OFF_PAT, plen, nbuf, nlen, casefold, end_pos_buf);
     _fuzzy_last_dist = d;
     if (d > max_edits) { return 0 - 1; }
@@ -399,6 +531,13 @@ fn niyama_fuzzy_search(h, s): i64 {
     var start = _fuzzy_recover_start(h + FUZZY_OFF_PAT, plen, nbuf, end_pos, casefold);
     if (start < 0) { start = 0; }
     if (start > nlen) { start = nlen; }
+    # v1.0.9 — `start` indexes the NORMALIZED subject. Under NFD that is a
+    # different coordinate space from the caller's string and could exceed its
+    # length; translate back so the returned offset always indexes `s`.
+    if (_fuzzy_normalized == 1) {
+        start = _fuzzy_norm_to_orig(s, slen, start);
+    }
+    if (start > slen) { start = slen; }
     return start;
 }
 
@@ -414,6 +553,8 @@ fn niyama_fuzzy_search_prefix(h, s): i64 {
     if ((flags & FUZZY_FLAG_CASE_INSENSITIVE) != 0) { casefold = 1; }
     var slen = strlen(s);
     _fuzzy_maybe_normalize(s, slen, flags);
+    if (_fuzzy_text_ok() == 0) { return 0; }
+    _fuzzy_last_err = FUZZY_E_OK;
     var d = _fuzzy_dp_prefix(h + FUZZY_OFF_PAT, plen, _fuzzy_norm_buf, _fuzzy_norm_len, casefold);
     _fuzzy_last_dist = d;
     if (d <= max_edits) { return 1; }

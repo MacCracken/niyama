@@ -108,7 +108,7 @@ niyama_vim_last_error()               → VIM_E_*
 | bre | `BRE_E_SYNTAX` | 1 | live |
 | bre | `BRE_E_BACKREF_UNSUPPORTED` | 2 | live (per ADR 0009) |
 | bre | `BRE_E_TOO_LARGE` | 3 | live |
-| bre | `BRE_E_BAD_ANCHOR` | 4 | live |
+| bre | `BRE_E_BAD_ANCHOR` | 4 | **reserved** (never emitted; POSIX BRE treats mid-pattern `^`/`$` as literals — matches ADR 0002) |
 | re2 | `RE2_E_OK` | 0 | live |
 | re2 | `RE2_E_SYNTAX` | 1 | live |
 | re2 | `RE2_E_BACKREF_UNSUPPORTED` | 2 | live (structural — ADR 0003) |
@@ -130,10 +130,12 @@ niyama_vim_last_error()               → VIM_E_*
 | pcre | `PCRE_E_BAD_PROPERTY` | 9 | live |
 | pcre | `PCRE_E_LOOKBEHIND_VARWIDTH` | 10 | live |
 | pcre | `PCRE_E_BAD_RECURSION_REF` | 11 | live |
+| pcre | `PCRE_E_DEPTH_EXCEEDED` | 12 | live (**added v1.0.9** — MATCH-time: backtracker hit its recursion ceiling; was an unreportable false negative) |
 | fuzzy | `FUZZY_E_OK` | 0 | live |
 | fuzzy | `FUZZY_E_PATTERN_TOO_LONG` | 1 | live |
 | fuzzy | `FUZZY_E_INVALID_THRESHOLD` | 2 | live |
 | fuzzy | `FUZZY_E_NFD_OVERFLOW` | 3 | live |
+| fuzzy | `FUZZY_E_TEXT_TOO_LONG` | 4 | live (**added v1.0.9** — subject over `FUZZY_MAX_TEXT_LEN`, checked post-normalization; was silent truncation) |
 | vim | `VIM_E_OK` | 0 | live |
 | vim | `VIM_E_SYNTAX` | 1 | live |
 | vim | `VIM_E_BACKREF_UNSUPPORTED` | 2 | live (per ADR 0009 — vim post-fold revisit only) |

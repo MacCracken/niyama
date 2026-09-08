@@ -450,6 +450,50 @@ fn main() {
     assert_eq(t_err("(?<a>x)(?<b>x)(?<c>x)(?<d>x)(?<e>x)(?<f>x)(?<g>x)(?<h>x)(?<i>x)(?<j>x)"),
               PCRE_E_SYNTAX, "10 named groups exceeds capture_idx cap");
 
+
+    # === v1.0.9 P(-1) regressions =====================================
+    test_group("pcre-v109-brace-nesting");
+    assert_eq(t_match("(?:a{1,2}){1,2}", "aa"), 1, "nested brace {1,2}{1,2} vs aa");
+    assert_eq(t_match("(?:a{0,2}){0,2}", "aa"), 1, "nested brace zero-min");
+    var v109_g = niyama_pcre_compile("(a){2}(b)");
+    assert_neq(v109_g, 0, "(a){2}(b) compiles");
+    niyama_pcre_search(v109_g, "aab");
+    assert_eq(niyama_pcre_group_start(v109_g, 2), 2, "g2 is (b), not a copy of (a)");
+    assert_eq(niyama_pcre_group_end(v109_g, 2),   3, "g2 end");
+    assert_neq(niyama_pcre_compile("(a){10}"),    0, "(a){10} not falsely SYNTAX");
+    assert_neq(niyama_pcre_compile("(?<x>a){2}"), 0, "(?<x>a){2} not falsely DUPLICATE_NAME");
+    assert_eq(t_match("a{3}", "aaa"),     1, "a{3} unchanged");
+    assert_eq(t_match("(a|b){2}", "ab"),  1, "(a|b){2} unchanged");
+
+    test_group("pcre-v109-search-at-bounds");
+    var v109_n = niyama_pcre_compile("b");
+    assert_eq(niyama_pcre_search_at(v109_n, "abc", 3, 0 - 1), 0 - 1, "negative from rejected");
+    assert_eq(niyama_pcre_search_at(v109_n, "abc", 0 - 1, 0), 0 - 1, "negative len rejected");
+    assert_eq(niyama_pcre_search_at(v109_n, "abc", 3, 0),     1,     "valid from still works");
+
+    test_group("pcre-v109-k-in-lookaround");
+    # \K inside a lookaround wrote slot 0 (the MATCH START), inverting group 0.
+    var v109_k = niyama_pcre_compile("a(?=b\\Kc)bc");
+    if (v109_k != 0) {
+        var v109_kr = niyama_pcre_search(v109_k, "abc");
+        if (v109_kr >= 0) {
+            assert_gte(niyama_pcre_group_end(v109_k, 0), niyama_pcre_group_start(v109_k, 0),
+                       "group 0 span not inverted by \\K in lookahead");
+        }
+    }
+    # Plain \K at top level still resets the match start.
+    var v109_k2 = niyama_pcre_compile("ab\\Kcd");
+    assert_neq(v109_k2, 0, "ab\\Kcd compiles");
+    assert_eq(niyama_pcre_search(v109_k2, "abcd"), 0, "ab\\Kcd search hit");
+    assert_eq(niyama_pcre_group_start(v109_k2, 0), 2, "\\K moved match start to 2");
+
+    test_group("pcre-v109-depth-observable");
+    # Depth exhaustion used to be an unreportable false negative.
+    var v109_d = niyama_pcre_compile("a*$");
+    assert_neq(v109_d, 0, "a*$ compiles");
+    assert_eq(niyama_pcre_match(v109_d, "aaaa"), 1, "short subject still matches");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_OK, "no depth error on a short subject");
+
     return assert_summary();
 }
 

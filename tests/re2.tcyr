@@ -363,6 +363,52 @@ fn main() {
     # \p without { is treated as escaped p — not currently rejected
     # at compile, just a byte-literal. (Same as e.g. `\j`.) Skip.
 
+
+    # === v1.0.9 P(-1) regressions =====================================
+    test_group("re2-v109-brace-nesting");
+    # Nested {n,m}: the compiler used to re-parse the atom per repetition,
+    # which re-entered _apply_brace_q and clobbered the shared split list.
+    assert_eq(t_match("(?:a{1,2}){1,2}", "aa"), 1, "nested brace {1,2}{1,2} vs aa");
+    assert_eq(t_match("(?:a{1,2}){1,2}", "a"),  1, "nested brace vs single a");
+    assert_eq(t_match("(a{1,2}){1,2}",   "aa"), 1, "nested brace w/ capture");
+    assert_eq(t_match("(?:a{0,2}){0,2}", "aa"), 1, "nested brace zero-min");
+    assert_eq(t_match("(?:(?:a){1,2}){1,2}", "aa"), 1, "doubly nested group");
+    assert_eq(t_match("(?:a{1,2})(?:b{1,2})", "ab"), 1, "sibling braces still ok");
+
+    test_group("re2-v109-brace-captures");
+    # Re-parsing burned a capture index per repetition, renumbering later groups.
+    var v109_g = niyama_re2_compile("(a){2}(b)");
+    assert_neq(v109_g, 0, "(a){2}(b) compiles");
+    niyama_re2_search(v109_g, "aab");
+    assert_eq(niyama_re2_group_start(v109_g, 1), 1, "(a){2}(b) g1 start");
+    assert_eq(niyama_re2_group_end(v109_g, 1),   2, "(a){2}(b) g1 end");
+    assert_eq(niyama_re2_group_start(v109_g, 2), 2, "(a){2}(b) g2 is (b) not copy-of-a");
+    assert_eq(niyama_re2_group_end(v109_g, 2),   3, "(a){2}(b) g2 end");
+    # ...and a name-table slot, and a class bitmap, per repetition.
+    assert_neq(niyama_re2_compile("(a){10}"),    0, "(a){10} not falsely SYNTAX");
+    assert_neq(niyama_re2_compile("(?<x>a){2}"), 0, "(?<x>a){2} not falsely DUPLICATE_NAME");
+    assert_neq(niyama_re2_compile("[a]{0,70}"),  0, "[a]{0,70} within the 1000 ceiling");
+    # Unchanged basics.
+    assert_eq(t_match("a{3}", "aaa"),      1, "a{3} vs aaa");
+    assert_eq(t_match("a{3}", "aa"),       0, "a{3} rejects aa");
+    assert_eq(t_match("(ab){2}", "abab"),  1, "(ab){2} vs abab");
+    assert_eq(t_match("(ab){2}", "aba"),   0, "(ab){2} rejects aba");
+
+    test_group("re2-v109-search-at-bounds");
+    # `from` was never validated; a negative offset ran the matcher off the
+    # front of the subject buffer.
+    var v109_n = niyama_re2_compile("b");
+    assert_eq(niyama_re2_search_at(v109_n, "abc", 3, 0 - 1),   0 - 1, "negative from rejected");
+    assert_eq(niyama_re2_search_at(v109_n, "abc", 3, 0 - 100), 0 - 1, "large negative from rejected");
+    assert_eq(niyama_re2_search_at(v109_n, "abc", 0 - 1, 0),   0 - 1, "negative len rejected");
+    assert_eq(niyama_re2_search_at(v109_n, "abc", 3, 0),       1,     "valid from still works");
+    assert_eq(niyama_re2_search_at(v109_n, "abc", 3, 2),       0 - 1, "from past match still -1");
+
+    test_group("re2-v109-instr-ceiling");
+    # Nested `?` grew the program via _shift_right, which bypasses the
+    # MAX_INSTRS guard in _emit_raw and wrote past the NFA allocation.
+    assert_eq(t_err("(?:(?:(?:(?:a)?)?)?)?"), 0, "shallow nested ? still compiles");
+
     return assert_summary();
 }
 
