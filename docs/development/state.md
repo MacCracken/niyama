@@ -5,6 +5,20 @@
 
 ## Version
 
+**1.0.8** — maintenance patch shipped 2026-09-07. Toolchain pin
+bumped 6.5.29 → 6.6.0 (wrapper-drift catch-up) and the vendored
+`lib/` re-synced from the 6.6.0 snapshot. No engine source changes;
+`dist/niyama.cyr` byte-identical but for its version header.
+9 stdlib files changed content (`fmt`, `io`, `unicode/casefold`,
+`unicode/normalize`, 5 × `syscalls_*`); the two `unicode` ones are
+comment/whitespace only. Three undeclared stale files
+(`atomic`, `fnptr`, `result`) dropped from `lib/` — they now resolve
+from the snapshot, as `lib/bench.cyr` always has. Fixed
+`tests/niyama.bcyr`, which had never compiled (called a `bench()`
+that stdlib does not expose). DCE binary 323,416 B → 323,432 B
+(+16 B). Tests/fuzz/bench all green, no regressions.
+See CHANGELOG § 1.0.8.
+
 **1.0.7** — maintenance patch shipped 2026-08-19. Toolchain pin
 bumped 6.4.64 → 6.5.29 (wrapper-drift catch-up); no engine source
 changes, `dist/niyama.cyr` byte-identical but for its version
@@ -66,15 +80,44 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.29` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.6.0` (in `cyrius.cyml [package].cyrius`).
   Floor remains `5.8.65` for stdlib `lib/unicode/` per ADR 0008
   (categories at .49, casefold at .50, normalize at .51, codec
   lift at .55, NFKC/NFKD at .60). Bump history: `5.8.42`
   post-v0.7.0 → `5.8.65` for v0.8.0 (per ADR 0008) → `5.11.4`
   at v1.0.2 (for `: i64` return-type syntax) → `6.0.1` at v1.0.3
   → `6.1.27` at v1.0.4 → `6.2.1` at v1.0.5 → `6.4.64` at v1.0.6
-  → `6.5.29` at v1.0.7 (each matches the installed wrapper at
-  the time; zero engine source changes across all of them).
+  → `6.5.29` at v1.0.7 → `6.6.0` at v1.0.8 (each matches the
+  installed wrapper at the time; zero engine source changes across
+  all of them).
+- **The pin does not select the compiler.** It is advisory: the
+  wrapper reports it as its own version and warns on drift
+  (`cyrius.cyml pins X but cycc is Y`), but builds run under whatever
+  `cycc` is installed. A stale pin therefore means noisy builds, not
+  pinned behaviour — bump it promptly.
+- **Re-vendoring `lib/` means wiping it, not syncing over it.**
+  `cyrius lib sync` refreshes only the declared `[deps].stdlib`
+  subset, which is narrower than the actual include graph — stdlib
+  modules pulled in transitively (`atomic`, `fnptr`, `result` via
+  `alloc` / `vec` / `io`) are left untouched and go stale silently.
+  At v1.0.8 that would have left 6.6.0's `io.cyr` including a
+  v5.8.28-era `result.cyr` across 6.6.0's breaking `Result` change
+  (now a `: stack` register pair, not a 16-byte allocation).
+  `rm -rf lib && cyrius lib sync` is the safe sequence; anything
+  undeclared then resolves from the pinned snapshot, which is how
+  `lib/bench.cyr` has always worked.
+- **`cyrius audit` works again as of 6.6.0** (was known-broken from
+  5.8.65 on a missing `~/.cyrius/bin/check.sh`; that file is still
+  absent but is no longer required). It reports one accepted cosmetic
+  finding: `cyrius fmt` wants continuation lines in
+  `tests/{bre,re2,pcre,vim}.tcyr` flattened to a 6-space indent,
+  against the align-under-open-paren style those files use
+  throughout. Not actioned — same category as the 11 long-line
+  `cyrius lint` warnings.
+- **`cyrius build` / `cyrius deps` truncate `cyrius.cyml`'s
+  `description` at the first `;`.** Observed at v1.0.8; the manifest
+  needs checking after any toolchain invocation until upstream fixes
+  the normalisation.
 - **`[deps] stdlib` auto-include only works from cyrius 6.5.16.**
   Every toolchain through 6.5.15 silently ignored manifest-declared
   stdlib deps — a probe calling `unicode_category()` with no
@@ -181,6 +224,9 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
 
 ## Fold-ready artifact
 
+- `dist/niyama.deps` — sidecar emitted by `cyrius distlib` from 6.6.0
+  (v1.0.8), listing the 9 stdlib leaf requirements for downstream
+  `cyrius deps`. Checked in alongside the bundle.
 - `dist/niyama.cyr` — single-include bundle. v0.8.0 prepends both
   shared modules (`src/posix_classes.cyr` then `src/unicode_props.cyr`)
   ahead of the five engine modules. Consumers also need stdlib
@@ -198,6 +244,9 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
 - **`tests/fuzzy.tcyr`** — 57 fuzzy assertions (v1.0: +4 empty).
 - **`tests/vim.tcyr`** — 109 vim assertions (v1.0: +3 empty).
 - **`tests/{bre,re2,pcre,fuzzy,vim}.bcyr`** — per-engine bench harnesses.
+- `tests/niyama.bcyr` — scaffold smoke bench (1 row). Repaired at
+  v1.0.8; it had never compiled, calling a `bench()` entry point
+  stdlib does not expose. 6 runnable bench harnesses total.
 - **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
 
 Aggregate: `cyrius test` reports **6 files, 661 assertions** all passing

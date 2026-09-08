@@ -1,11 +1,33 @@
-# niyama benchmarks
-# Stdlib auto-included via cyrius.cyml
+# tests/niyama.bcyr — scaffold smoke benchmark.
+#
+# Counterpart to tests/niyama.tcyr: proves the bench harness itself
+# builds and runs. Real per-engine measurement lives in
+# tests/{bre,re2,pcre,fuzzy,vim}.bcyr.
+#
+# Run: cyrius bench tests/niyama.bcyr
+#
+# `bench` is not part of the declared [deps].stdlib set in cyrius.cyml,
+# so lib/bench.cyr (and the alloc/vec/fnptr it leans on) is named
+# explicitly — the same include block the five per-engine harnesses carry.
+include "lib/alloc.cyr"
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/vec.cyr"
+include "lib/fnptr.cyr"
+include "lib/bench.cyr"
 
 fn bench_noop() { return 0; }
 
 fn main() {
     alloc_init();
-    bench("noop", &bench_noop, 1000000);
+
+    var benches = vec_new();
+
+    var b1 = bench_new("niyama_noop");
+    bench_run(b1, &bench_noop, 1000000);
+    vec_push(benches, b1);
+
+    bench_report_all(benches);
     return 0;
 }
 
