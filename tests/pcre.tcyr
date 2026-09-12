@@ -443,13 +443,13 @@ fn main() {
     test_group("pcre-boundary");
     # 10 capture groups → capture_idx > 9 cap → SYNTAX.
     assert_eq(t_err("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)"), PCRE_E_SYNTAX,
-              "10 groups exceeds capture_idx cap");
+      "10 groups exceeds capture_idx cap");
     # 9 capture groups → fits.
     assert_neq(niyama_pcre_compile("(a)(b)(c)(d)(e)(f)(g)(h)(i)"), 0,
-               "9 groups compile (max valid)");
+      "9 groups compile (max valid)");
     # 10 named groups → MAX_NAMES=9 path; capture cap fires first → SYNTAX.
     assert_eq(t_err("(?<a>x)(?<b>x)(?<c>x)(?<d>x)(?<e>x)(?<f>x)(?<g>x)(?<h>x)(?<i>x)(?<j>x)"),
-              PCRE_E_SYNTAX, "10 named groups exceeds capture_idx cap");
+      PCRE_E_SYNTAX, "10 named groups exceeds capture_idx cap");
 
 
     # === v1.0.9 P(-1) regressions =====================================
@@ -479,7 +479,7 @@ fn main() {
         var v109_kr = niyama_pcre_search(v109_k, "abc");
         if (v109_kr >= 0) {
             assert_gte(niyama_pcre_group_end(v109_k, 0), niyama_pcre_group_start(v109_k, 0),
-                       "group 0 span not inverted by \\K in lookahead");
+              "group 0 span not inverted by \\K in lookahead");
         }
     }
     # Plain \K at top level still resets the match start.

@@ -236,10 +236,10 @@ fn main() {
     test_group("vim-boundary");
     # 10 capture groups (vim uses \( in magic mode) → capture_idx cap → SYNTAX.
     assert_eq(t_err("\\(a\\)\\(b\\)\\(c\\)\\(d\\)\\(e\\)\\(f\\)\\(g\\)\\(h\\)\\(i\\)\\(j\\)"),
-              VIM_E_SYNTAX, "10 groups exceeds capture_idx cap");
+      VIM_E_SYNTAX, "10 groups exceeds capture_idx cap");
     # 9 groups → fits.
     assert_neq(niyama_vim_compile("\\(a\\)\\(b\\)\\(c\\)\\(d\\)\\(e\\)\\(f\\)\\(g\\)\\(h\\)\\(i\\)"),
-               0, "9 groups compile (max valid)");
+      0, "9 groups compile (max valid)");
 
 
     # === v1.0.9 P(-1) regressions =====================================

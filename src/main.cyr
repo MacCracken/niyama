@@ -5,7 +5,7 @@
 # lives in programs/ at each milestone.
 
 fn main(): i64 {
-    syscall(1, 1, "niyama 1.0.10 - additional regex engines (fold-ready: bre + re2 + pcre + fuzzy + vim)\n", 86);
+    syscall(1, 1, "niyama 1.0.11 - additional regex engines (fold-ready: bre + re2 + pcre + fuzzy + vim)\n", 86);
     return 0;
 }
 

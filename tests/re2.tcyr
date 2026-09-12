@@ -278,16 +278,16 @@ fn main() {
     test_group("re2-boundary");
     # 10 capture groups → capture_idx == 10 > 9 cap → SYNTAX.
     assert_eq(t_err("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)"), RE2_E_SYNTAX,
-              "10 groups exceeds capture_idx cap");
+      "10 groups exceeds capture_idx cap");
     # 9 capture groups → fits exactly (groups 1..9 valid).
     assert_neq(niyama_re2_compile("(a)(b)(c)(d)(e)(f)(g)(h)(i)"), 0,
-               "9 groups compile (max valid)");
+      "9 groups compile (max valid)");
     # 10 named groups → MAX_NAMES=9 → TOO_LARGE.
     assert_eq(t_err("(?<a>x)(?<b>x)(?<c>x)(?<d>x)(?<e>x)(?<f>x)(?<g>x)(?<h>x)(?<i>x)(?<j>x)"),
-              RE2_E_SYNTAX, "10 named groups exceeds capture_idx cap before MAX_NAMES");
+      RE2_E_SYNTAX, "10 named groups exceeds capture_idx cap before MAX_NAMES");
     # 9 named groups → fits.
     assert_neq(niyama_re2_compile("(?<a>x)(?<b>x)(?<c>x)(?<d>x)(?<e>x)(?<f>x)(?<g>x)(?<h>x)(?<i>x)"),
-               0, "9 named groups compile");
+      0, "9 named groups compile");
 
     # === Multi-byte literal pattern chars (v0.8.0 codepoint-step regression check) ===
     test_group("re2-multibyte-literals");
