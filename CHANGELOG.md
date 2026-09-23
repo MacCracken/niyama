@@ -80,10 +80,27 @@ Toolchain and dependency refresh. There are no engine source changes: the
   - post-fold extension candidates
   - the deferral rule and out-of-scope list
 
-  README's status and roadmap sections and CLAUDE.md's roadmap pointers were
-  updated to match. The five ADR references to "roadmap.md — M*n* acceptance
-  criteria" (0002–0006) now point to CHANGELOG § 0.2.0 – 0.6.0, and
+  CLAUDE.md's roadmap pointers were updated to match. The five ADR
+  references to "roadmap.md — M*n* acceptance criteria" (0002–0006) now
+  point to CHANGELOG § 0.2.0 – 0.6.0, and
   `git show 1.0.11:docs/development/roadmap.md` still has the original text.
+- **README rewritten as a current landing page.** The old one described
+  0.6.0: a "Next: M4.5 → M5 → v1.0" status, a stdlib fold still in the
+  future, and consumers still "planned". It now covers, per the
+  first-party documentation standard's *what / why / quick start / build*:
+  - an engine table, with each engine's refusals and the pcre depth
+    limitation;
+  - a **Using niyama** section;
+  - the fold told as history (ADR 0011);
+  - current consumers: cyim active on all five flavors, and the AGNOS
+    kernel as consumer #2;
+  - the full build / test / fuzz / bench / distlib loop;
+  - a docs index.
+
+  Volatile numbers (version, pin, counts) are linked to `state.md` rather
+  than repeated. The usage example was compiled and run against both the
+  folded `lib/niyama.cyr` and a vendored `dist/niyama.cyr`, extracted
+  straight from the README text; it prints `2026`.
 
 ### Fixed
 
