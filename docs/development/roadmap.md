@@ -450,3 +450,27 @@ niyama stays out-of-tree until it earns the fold.
 - **Backwards-compat shims for non-AGNOS regex APIs** (e.g. wrapping
   PCRE2's C API). niyama is sovereign Cyrius — if a consumer needs
   PCRE2's wire API, they wrap it themselves.
+
+## Moving the cyrius pin to 6.6.6
+
+**Current pin: `cyrius = "6.6.2"` (cyrius.cyml:7). Bump it; nothing else.**
+
+niyama is the cleanest repo in this sibling slice against the 6.6.6 change
+list, and every line of it was checked rather than assumed: no `O_APPEND` /
+`O_TRUNC` anywhere outside vendored `lib/` (so the Windows append/truncate
+data-corruption fix is a non-event), no `struct` declarations at all, no
+`async` fns, no `operator` fns, no `ret2`/`rethi` pair returns, no SIMD-typed
+returns, no top-level `{ }` blocks, no `: cstring` parameters, no duplicate
+global `var` declarations in `src/`, and no locally defined `vec_*` — with
+`assert` and `vec` both already in `[deps] stdlib`, so assert.cyr's new
+transitive `include "lib/vec.cyr"` cannot collide. `lib/regression.cyr` is
+vendored but nothing in `src/`, `programs/` or `tests/` calls a `regression_*`
+helper, so the new exec deadline (`CYRIUS_CHECK_TIMEOUT`) changes nothing.
+
+**Measured:** `cyrius build` under 6.6.2 and under 6.6.6 both exit 0 and emit
+**zero** warnings or errors — the only repo in the slice with an empty
+diagnostic set on both sides.
+
+**Verify after bumping:** re-run `cyrius deps` so vendored `lib/` picks up
+6.6.6's rewritten `lib/io.cyr` (now self-sufficient — it includes `fmt` and
+`string` itself), then `cyrius build` + `cyrius test`.

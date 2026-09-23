@@ -13,7 +13,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   build, tests, and any bench/fuzz/distlib target, including every
   `[lib.<profile>]` bundle.
 
-
 ## [1.0.10] — 2026-09-08
 
 Refactor release: the cross-engine duplication that v1.0.9's audit
