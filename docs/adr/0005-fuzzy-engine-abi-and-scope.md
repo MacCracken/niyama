@@ -201,4 +201,4 @@ exact start via reverse-DP pass.
 - [niyama ADR 0002 / 0003 / 0004](0002-bre-engine-abi-and-scope.md) — prior engine ABIs that niyama_fuzzy mirrors.
 - [Wagner-Fischer algorithm (Wikipedia)](https://en.wikipedia.org/wiki/Wagner%E2%80%93Fischer_algorithm) — the Levenshtein DP.
 - [Ukkonen 1985 — "Algorithms for Approximate String Matching"](https://www.cs.helsinki.fi/u/ukkonen/InfCont85.PDF) — alternative algorithm considered.
-- [`docs/development/roadmap.md`](../development/roadmap.md) — M3.5 acceptance criteria.
+- [`CHANGELOG.md` § 0.5.0](../../CHANGELOG.md) — M3.5 as shipped. The pre-ship M3.5 acceptance criteria lived in `roadmap.md` until it went future-facing at v1.0.12: `git show 1.0.11:docs/development/roadmap.md`.

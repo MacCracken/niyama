@@ -230,4 +230,4 @@ Until that decision: niyama_vim is Pike NFA, reject + document.
 - [niyama ADR 0002 / 0003 / 0004 / 0005](0002-bre-engine-abi-and-scope.md) — prior engine ABIs that niyama_vim mirrors.
 - [vim docs: `:help magic`](https://vimhelp.org/pattern.txt.html#%2Fmagic) — magicness modes spec.
 - [vim docs: `:help \zs`](https://vimhelp.org/pattern.txt.html#%2F%5Czs) — match-position markers.
-- [`docs/development/roadmap.md`](../development/roadmap.md) — M4 acceptance criteria.
+- [`CHANGELOG.md` § 0.6.0](../../CHANGELOG.md) — M4 as shipped. The pre-ship M4 acceptance criteria lived in `roadmap.md` until it went future-facing at v1.0.12: `git show 1.0.11:docs/development/roadmap.md`.

@@ -251,4 +251,4 @@ explicit error codes so consumers know exactly what's missing.
 - [PCRE2 documentation](https://www.pcre.org/current/doc/html/pcre2pattern.html) — flavor reference.
 - [PCRE2 `match_limit` semantics](https://www.pcre.org/current/doc/html/pcre2api.html) — the prior art for niyama_pcre's step-limit guard.
 - [Russ Cox — Regular Expression Matching: the Virtual Machine Approach](https://swtch.com/~rsc/regexp/regexp2.html) — backtracking matcher design.
-- [`docs/development/roadmap.md`](../development/roadmap.md) — M3 acceptance criteria.
+- [`CHANGELOG.md` § 0.4.0](../../CHANGELOG.md) — M3 as shipped. The pre-ship M3 acceptance criteria lived in `roadmap.md` until it went future-facing at v1.0.12: `git show 1.0.11:docs/development/roadmap.md`.

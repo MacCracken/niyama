@@ -22,7 +22,11 @@ jobs:
     needs: [ci]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # All actions here are on their Node 24 majors (checkout v7,
+      # upload-artifact v7, download-artifact v8, action-gh-release v3).
+      # GitHub removed the Node 20 action runtime from hosted runners on
+      # 2026-09-23, and every @v4 / @v2 tag this file used was Node 20.
+      - uses: actions/checkout@v7
 
       - name: Verify version
         # Two-way sync gate: VERSION ↔ git tag. niyama doesn't currently
@@ -46,7 +50,6 @@ jobs:
           CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
           mkdir -p "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin" "$HOME/.cyrius/versions/$CYRIUS_VERSION/lib"
           cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin/" 2>/dev/null || true
-          cp "$CYRIUS_DIR/scripts/cyrius" "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin/cyrius" 2>/dev/null || true
           cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/versions/$CYRIUS_VERSION/lib/" 2>/dev/null || true
           chmod +x "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin/"* 2>/dev/null || true
           ln -sfn "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin" "$HOME/.cyrius/bin"
@@ -56,12 +59,13 @@ jobs:
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
       - name: Resolve deps
-        # See ci.yml for the full rationale: cyrius 6.0.1 truncates
-        # cyrius.lock to 0 bytes when there are no external deps,
-        # which then fails the release-asset upload. `--no-lock`
-        # preserves the committed stub. Drop the flag once upstream
-        # restores the lockfile writer.
-        run: cyrius deps --no-lock
+        # See ci.yml: the committed cyrius.lock is checked, not rewritten.
+        # `cyrius deps` refuses a stdlib snapshot that disagrees with it
+        # under the same pin; `--verify` re-checks lib/ against it. The
+        # lock ships as a release asset, so it must match what was built.
+        run: |
+          cyrius deps
+          cyrius deps --verify
 
       - name: Build (DCE)
         run: |
@@ -70,12 +74,29 @@ jobs:
           echo "niyama: $(wc -c < build/niyama) bytes"
 
       - name: Cross-build aarch64 (best-effort)
+        # Best-effort: ship x86_64 even if aarch64 fails. This probe named
+        # only `cc5_aarch64` through 1.0.11. cyrius 6.0.0 renamed it
+        # `cycc_aarch64`; the old name survived only as a symlink made by
+        # cyrius's install.sh, which the install step above never runs. So
+        # from the 6.0.1 pin on the `if` was always false: releases
+        # 1.0.3 – 1.0.11 warned, went green, and shipped x86_64 only.
+        # Probe order mirrors vidya's release.yml. Verified at the 6.6.6
+        # pin: a 573,400-byte static aarch64 ELF that runs under qemu.
         run: |
-          if [ -x "$HOME/.cyrius/bin/cc5_aarch64" ]; then
-            CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/niyama-aarch64
-            echo "niyama-aarch64: $(wc -c < build/niyama-aarch64) bytes"
+          CC_AA64=""
+          for cand in cycc_aarch64 cycc-native-aarch64 cc5_aarch64; do
+            if [ -x "$HOME/.cyrius/bin/$cand" ]; then CC_AA64="$cand"; break; fi
+          done
+          if [ -n "$CC_AA64" ]; then
+            echo "aarch64 backend: $CC_AA64"
+            if CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/niyama-aarch64; then
+              echo "niyama-aarch64: $(wc -c < build/niyama-aarch64) bytes"
+            else
+              echo "::warning::aarch64 cross-build failed; shipping x86_64 only"
+              rm -f build/niyama-aarch64
+            fi
           else
-            echo "::warning::cc5_aarch64 not in toolchain — aarch64 binary skipped"
+            echo "::warning::no aarch64 backend in this Cyrius — aarch64 binary skipped"
           fi
 
       - name: Test
@@ -101,7 +122,10 @@ jobs:
           fi
           sha256sum niyama-*.tar.gz niyama-*.cyr niyama-*-linux cyrius.lock 2>/dev/null > SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      # upload-artifact v7 and download-artifact v8 move together: v8 only
+      # unzips an artifact stored with a zip Content-Type, which v7 writes
+      # and v4 did not.
+      - uses: actions/upload-artifact@v7
         with:
           name: release-artifacts
           path: |
@@ -116,8 +140,8 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-artifacts
       - name: Extract changelog body for tag
@@ -130,7 +154,7 @@ jobs:
           if [ ! -s /tmp/body.md ]; then
             echo "::warning::no ## [${TAG}] section in CHANGELOG.md — release body will be empty"
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           name: "niyama ${{ github.ref_name }}"
           body_path: /tmp/body.md

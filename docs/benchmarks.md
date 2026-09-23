@@ -350,3 +350,108 @@ rarely fires at those sites, so the guard only adds a branch. Reverted per
 CLAUDE.md § Refactoring Policy — no speculative changes to a hot matcher
 loop without measured benefit.
 
+
+## v1.0.12 pin bump (6.6.2 → 6.6.6 — same-boot interleaved A/B)
+
+**Date**: 2026-09-23
+**Cyrius**: 6.6.2 (old pin) vs 6.6.6 (new pin)
+**Host**: Linux 7.2.6-arch2-1 x86_64, clocksource `hpet`
+
+### Method
+
+Each side is the **complete state its pin produces**, not just a compiler
+swap. Unlike the v1.0.7 A/B, the vendored `lib/` differs too. A = 6.6.2
+`cycc` + the 6.6.2 stdlib snapshot, B = 6.6.6 `cycc` + the 6.6.6
+snapshot, both building the same working tree in two scratch copies. The
+pin genuinely selects the compiler: `cyrius build -v` under the 6.6.2 pin
+reports `~/.cyrius/versions/6.6.2/bin/cycc`.
+
+Five interleaved rounds were run over all 6 harnesses, and the side that
+went first alternated each round to cancel time-ordered drift. The table
+compares per-row **medians of `avg`**. Spread is each side's
+`(max − min) / median` over its 5 runs. Every run measured a timer floor
+of 1.32–1.42 µs, on both sides.
+
+`avg` is the only column compared, because 6.6.5 rewrote `lib/bench.cyr`'s
+`min` / `max`. A window must now clear a resolution bar before it can
+claim an extreme; an unresolved one prints the mean. Those two columns
+are therefore not comparable across this bump. 6.6.5 also switched the
+ns rounding to half-up, which removes a small upward bias in `avg`. That
+is negligible at the µs scale of these rows, and the one sub-10 ns row
+(`niyama_noop`) reads 3 ns on both sides.
+
+### Result
+
+**No regression.** 57 per-engine rows plus the 1-row smoke harness:
+mean **−0.16%**, median **−0.13%**, range **−4.0% .. +3.4%**. **Zero rows**
+move beyond ±5%. The per-engine harnesses have not changed since v1.0.7,
+whose A/B also compared 57 rows; the v1.0.8 – v1.0.10 entries quote 53.
+
+| Bench | 6.6.2 (median) | 6.6.6 (median) | Δ | spread old / new |
+|---|---|---|---|---|
+| `bre_compile_literal` | 2.058µs | 2.011µs | -2.3% | 7.3% / 12.2% |
+| `bre_compile_dot_star` | 2.182µs | 2.201µs | +0.9% | 14.9% / 9.0% |
+| `bre_compile_quantifier` | 2.283µs | 2.333µs | +2.2% | 6.1% / 9.4% |
+| `bre_compile_group` | 2.169µs | 2.157µs | -0.6% | 6.8% / 9.6% |
+| `bre_search_literal_hit` | 23.197µs | 22.993µs | -0.9% | 5.9% / 2.6% |
+| `bre_search_literal_miss` | 4.111µs | 4.115µs | +0.1% | 4.3% / 2.1% |
+| `bre_search_dot_star` | 101.251µs | 99.955µs | -1.3% | 6.8% / 3.4% |
+| `bre_search_class` | 1.367µs | 1.328µs | -2.9% | 8.4% / 1.9% |
+| `bre_search_quantifier` | 1.820µs | 1.777µs | -2.4% | 6.7% / 1.9% |
+| `bre_search_anchored` | 1.155µs | 1.138µs | -1.5% | 5.3% / 3.1% |
+| `bre_search_group` | 13.745µs | 13.443µs | -2.2% | 11.3% / 1.5% |
+| `re2_compile_literal` | 2.687µs | 2.640µs | -1.7% | 10.4% / 15.1% |
+| `re2_compile_alt` | 3.257µs | 3.251µs | -0.2% | 17.9% / 3.8% |
+| `re2_compile_email` | 3.817µs | 3.854µs | +1.0% | 5.6% / 7.3% |
+| `re2_search_literal` | 23.545µs | 23.278µs | -1.1% | 7.8% / 3.3% |
+| `re2_search_alt` | 51.274µs | 49.527µs | -3.4% | 4.4% / 2.7% |
+| `re2_search_class` | 123.099µs | 122.620µs | -0.4% | 4.7% / 3.1% |
+| `re2_search_email` | 11.897µs | 11.583µs | -2.6% | 4.7% / 2.7% |
+| `re2_dos_alt_explosion (200a)` | 81.699µs | 80.344µs | -1.7% | 8.1% / 1.8% |
+| `re2_dos_nested_star (200a)` | 55.424µs | 54.946µs | -0.9% | 6.5% / 2.0% |
+| `re2_dos_optional_chain (30a)` | 191.987µs | 193.302µs | +0.7% | 2.2% / 2.2% |
+| `pcre_compile_literal` | 2.691µs | 2.583µs | -4.0% | 9.7% / 30.7% |
+| `pcre_compile_email` | 3.759µs | 3.819µs | +1.6% | 4.4% / 23.7% |
+| `pcre_compile_backref` | 3.180µs | 3.133µs | -1.5% | 13.8% / 25.9% |
+| `pcre_compile_lookahead` | 2.747µs | 2.722µs | -0.9% | 18.7% / 27.5% |
+| `pcre_search_literal` | 9.880µs | 9.820µs | -0.6% | 4.3% / 10.5% |
+| `pcre_search_alt` | 38.201µs | 39.007µs | +2.1% | 3.1% / 11.5% |
+| `pcre_search_email` | 5.197µs | 5.193µs | -0.1% | 2.5% / 14.6% |
+| `pcre_backref` | 680ns | 659ns | -3.1% | 5.4% / 10.5% |
+| `pcre_lookahead` | 117.063µs | 117.883µs | +0.7% | 2.4% / 10.3% |
+| `pcre_neg_lookahead` | 741ns | 758ns | +2.3% | 6.6% / 9.8% |
+| `pcre_atomic` | 1.339µs | 1.331µs | -0.6% | 3.7% / 8.7% |
+| `pcre_named_captures` | 1.501µs | 1.543µs | +2.8% | 4.9% / 7.7% |
+| `pcre_dos_bounded (step_limit=50k)` | 1.812ms | 1.846ms | +1.9% | 3.6% / 5.4% |
+| `fuzzy_compile_default` | 464ns | 467ns | +0.6% | 8.0% / 1.5% |
+| `fuzzy_compile_opts` | 464ns | 460ns | -0.9% | 3.0% / 2.8% |
+| `fuzzy_distance_short` | 382ns | 374ns | -2.1% | 5.0% / 2.7% |
+| `fuzzy_distance_long` | 1.837µs | 1.865µs | +1.5% | 4.0% / 2.8% |
+| `fuzzy_match` | 388ns | 373ns | -3.9% | 7.0% / 2.1% |
+| `fuzzy_search_short` | 2.074µs | 2.084µs | +0.5% | 4.2% / 2.6% |
+| `fuzzy_search_long_256B` | 20.556µs | 20.961µs | +2.0% | 1.9% / 3.2% |
+| `fuzzy_search_prefix` | 1.157µs | 1.194µs | +3.2% | 5.5% / 2.3% |
+| `fuzzy_case_insensitive` | 444ns | 449ns | +1.1% | 5.2% / 4.0% |
+| `fuzzy_medium_pattern_distance` | 11.022µs | 11.362µs | +3.1% | 2.0% / 2.9% |
+| `vim_compile_magic` | 2.194µs | 2.212µs | +0.8% | 25.8% / 9.5% |
+| `vim_compile_very_magic` | 2.154µs | 2.189µs | +1.6% | 27.9% / 12.3% |
+| `vim_compile_nomagic` | 2.182µs | 2.256µs | +3.4% | 23.9% / 4.4% |
+| `vim_compile_very_nomagic` | 2.192µs | 2.207µs | +0.7% | 25.4% / 4.3% |
+| `vim_compile_zs_ze` | 2.432µs | 2.399µs | -1.4% | 18.3% / 8.0% |
+| `vim_compile_posix` | 2.572µs | 2.570µs | -0.1% | 24.4% / 9.0% |
+| `vim_search_magic` | 4.274µs | 4.249µs | -0.6% | 6.1% / 9.7% |
+| `vim_search_very_magic` | 4.238µs | 4.258µs | +0.5% | 9.2% / 16.9% |
+| `vim_search_nomagic` | 4.220µs | 4.227µs | +0.2% | 3.1% / 17.7% |
+| `vim_search_very_nomagic` | 4.264µs | 4.246µs | -0.4% | 5.1% / 10.1% |
+| `vim_search_zs_ze` | 1.561µs | 1.561µs | +0.0% | 9.0% / 23.4% |
+| `vim_search_posix` | 1.744µs | 1.768µs | +1.4% | 5.2% / 12.3% |
+| `vim_search_word_bound` | 1.557µs | 1.554µs | -0.2% | 4.8% / 19.5% |
+| `niyama_noop` | 3ns | 3ns | +0.0% | 33.3% / 0.0% |
+
+### Note — binary size
+
+DCE smoke binary **323,432 B → 323,624 B (+192 B)**; non-DCE 401,256 B →
+405,544 B (+4,288 B). The growth is the stdlib, not niyama. 6.6.6's
+`io.cyr` was rewritten (277 changed lines in the diff), and cyrius 6.6.5 pads every
+odd-depth x86 call site by 2 bytes. The engine sources are byte-identical
+across the bump.

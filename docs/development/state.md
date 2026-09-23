@@ -5,6 +5,31 @@
 
 ## Version
 
+**1.0.12** — toolchain and dependency refresh, shipped 2026-09-23. No
+engine source changes; `dist/niyama.cyr` changed only in its version
+header.
+- **Pin and `lib/`:** pin `6.6.2` → `6.6.6`. `lib/` was wiped and
+  re-vendored with `cyrius deps` (110 → 30 files, byte-identical to the
+  6.6.6 snapshot).
+- **Lock and CI:** `cyrius.lock` is now a real lock, and CI/release check it
+  with `cyrius deps` + `cyrius deps --verify` (see § Toolchain).
+- **Actions:** moved to their Node 24 majors, because GitHub removed the
+  Node 20 runtime on 2026-09-23.
+- **aarch64:** the release aarch64 binary is restored. It was silently
+  skipped from 1.0.3 through 1.0.11 because the gate named the pre-6.0
+  `cc5_aarch64`.
+- **Gates:** tests 773 and fuzz 1689 are unchanged, all green. The bench A/B
+  (6.6.2 vs 6.6.6) has no regression: 58 rows, mean −0.16%, none beyond
+  ±5%. DCE binary 323,432 → 323,624 B.
+- **Roadmap:** rewritten to be forward-looking only.
+
+See CHANGELOG § 1.0.12.
+
+**1.0.11** — toolchain pin `6.6.0` → `6.6.2`, shipped 2026-09-12. No
+engine source changes. `tests/{bre,re2,pcre,vim}.tcyr` continuation lines
+were reflowed to `cyrius fmt`'s style, which cleared the one `audit` fmt
+finding.
+
 **1.0.10** — refactor release shipped 2026-09-08. Lands the
 cross-engine duplication v1.0.9's audit identified but deferred. New
 shared module **`src/nfa_edit.cyr`** holds the NFA-blob edit primitives
@@ -17,7 +42,8 @@ per-engine `_<engine>_*` entry points remain thin delegates, so all
 behaviour change**: no engine semantics, no error codes, no public
 surface. Code lines 5293 → 5178 (−115); raw lines +37 because the
 shared module carries the layout/ordering documentation four anonymous
-copies never had. Tests 747 → **779** — `tests/niyama.tcyr` is now the
+copies never had. Tests 741 → **773** (recorded at the time as
+747 → 779 — see § Tests) — `tests/niyama.tcyr` is now the
 cross-engine invariant suite, pinning `OP_JMP`/`OP_SPLIT` numbering
 across all four engines because the shared relocation code identifies
 branches by those numbers. Bench: 53 rows, **0 over ±5%**, mean
@@ -37,7 +63,8 @@ weaker than documented, and `{n,m}` compiled by re-parsing the atom
 finding was reproduced with a compiled probe before repair.
 **All 53 bench rows faster or neutral, 0 regressions, mean −14.29%** —
 a side effect of removing locked `alloc()` calls from the matcher hot
-loop. Tests 661 → **747 assertions**. Two confirmed findings were
+loop. Tests 661 → **741 assertions** (recorded at the time as 747 —
+see § Tests). Two confirmed findings were
 rejected on measurement. See CHANGELOG § 1.0.9 and
 [`../audit/2026-09-08-audit.md`](../audit/2026-09-08-audit.md).
 
@@ -125,44 +152,63 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.0` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.6.6` (in `cyrius.cyml [package].cyrius`).
   Floor remains `5.8.65` for stdlib `lib/unicode/` per ADR 0008
   (categories at .49, casefold at .50, normalize at .51, codec
   lift at .55, NFKC/NFKD at .60). Bump history: `5.8.42`
   post-v0.7.0 → `5.8.65` for v0.8.0 (per ADR 0008) → `5.11.4`
   at v1.0.2 (for `: i64` return-type syntax) → `6.0.1` at v1.0.3
   → `6.1.27` at v1.0.4 → `6.2.1` at v1.0.5 → `6.4.64` at v1.0.6
-  → `6.5.29` at v1.0.7 → `6.6.0` at v1.0.8 (each matches the
-  installed wrapper at the time; zero engine source changes across
-  all of them).
-- **The pin does not select the compiler.** It is advisory: the
-  wrapper reports it as its own version and warns on drift
-  (`cyrius.cyml pins X but cycc is Y`), but builds run under whatever
-  `cycc` is installed. A stale pin therefore means noisy builds, not
-  pinned behaviour — bump it promptly.
-- **Re-vendoring `lib/` means wiping it, not syncing over it.**
-  `cyrius lib sync` refreshes only the declared `[deps].stdlib`
-  subset, which is narrower than the actual include graph — stdlib
-  modules pulled in transitively (`atomic`, `fnptr`, `result` via
-  `alloc` / `vec` / `io`) are left untouched and go stale silently.
-  At v1.0.8 that would have left 6.6.0's `io.cyr` including a
-  v5.8.28-era `result.cyr` across 6.6.0's breaking `Result` change
-  (now a `: stack` register pair, not a 16-byte allocation).
-  `rm -rf lib && cyrius lib sync` is the safe sequence; anything
-  undeclared then resolves from the pinned snapshot, which is how
-  `lib/bench.cyr` has always worked.
-- **`cyrius audit` works again as of 6.6.0** (was known-broken from
-  5.8.65 on a missing `~/.cyrius/bin/check.sh`; that file is still
-  absent but is no longer required). It reports one accepted cosmetic
-  finding: `cyrius fmt` wants continuation lines in
-  `tests/{bre,re2,pcre,vim}.tcyr` flattened to a 6-space indent,
-  against the align-under-open-paren style those files use
-  throughout. Not actioned — same category as the 11 long-line
-  `cyrius lint` warnings.
-- **`cyrius build` / `cyrius deps` truncate `cyrius.cyml`'s
-  `description` at the first `;`.** Observed at v1.0.8; the manifest
-  needs checking after any toolchain invocation until upstream fixes
-  the normalisation.
+  → `6.5.29` at v1.0.7 → `6.6.0` at v1.0.8 → `6.6.2` at v1.0.11
+  → `6.6.6` at v1.0.12. Each matched the installed wrapper at the
+  time, and none required an engine source change.
+- **The pin selects the compiler.** When the pin differs from the
+  running wrapper, the wrapper re-execs `~/.cyrius/versions/<pin>/bin/cyrius`,
+  which builds with its own sibling `cycc`. That has held for pinned
+  wrappers from 6.5.44 on (cyrius CHANGELOG 6.5.47), and was measured at
+  v1.0.12: under the 6.6.2 pin, `cyrius build -v` reports
+  `versions/6.6.2/bin/cycc`. A bump is therefore a real compiler change.
+  The "advisory" behaviour recorded at v1.0.8 was true only because its
+  6.5.29 pin predated that fix.
+- **Re-vendor `lib/` by wiping it: `rm -rf lib && cyrius deps`.** On 6.6.6
+  that vendors 30 files: the declared leaves plus their transitive
+  includes (`atomic`, `fnptr`, `result`, `args_*`). It is also exactly
+  what CI vendors. The alternatives differ:
+  - `cyrius lib sync` copies only the 25 files behind the declared leaves,
+    and syncing over an existing `lib/` leaves transitive modules stale.
+    At v1.0.8 that would have mixed two `Result` ABIs.
+  - `cyrius update` copies the whole 111-file snapshot. That is how
+    `lib/` held 110 files before v1.0.12.
+
+  Undeclared modules such as `lib/bench.cyr` resolve from the pinned
+  snapshot.
+- **`cyrius.lock` is a real integrity record (v1.0.12).** It holds one
+  sha256 per vendored file plus a `cyrius <pin>` trailer, committed.
+  - `cyrius deps` re-locks silently when the pin changes.
+  - Under an unchanged pin, it refuses any file whose snapshot disagrees
+    with the lock (the cyrius 6.6.4 guard). Only `--relock` accepts that.
+  - `cyrius deps --verify` checks `lib/` against the lock. CI and release
+    run `cyrius deps` followed by `cyrius deps --verify`.
+  - The pre-1.0.12 comment-only stub and CI's `--no-lock` are retired. The
+    0-byte-truncation bug they worked around was fixed in cyrius 6.0.2, and
+    on 6.6.x every `build` / `test` / `bench` / `fuzz` / `distlib` /
+    `audit` run rewrites a stub lock anyway.
+- **`cyrius audit` runs but exits 1.** On 6.6.6 its default mode sweeps
+  fmt, lint, docs, tests and bench over `src/`, `tests/` and `fuzz/`. Any
+  lint warning or any undocumented public function sets exit code 1, and
+  niyama has two blockers:
+  - **Lint:** 23 warnings (11 in `src/`, 11 in `tests/`, 1 in `fuzz/`);
+    18 are over-long lines and 5 are consecutive blank lines.
+  - **Docs:** 150 undocumented public fns. It counted 141 under 6.6.2
+    because cyrdoc used to stop reading a file at 64 KB, and
+    `src/pcre.cyr` is 89.7 KB.
+
+  fmt has been clean since 1.0.11. Tracked in `roadmap.md` § Maintenance.
+- **The `description`-truncation bug did not reproduce on 6.6.6.** At
+  v1.0.8, `cyrius build` / `cyrius deps` were seen cutting `cyrius.cyml`'s
+  `description` at the first `;`. At v1.0.12, every command run in this
+  tree left the field byte-identical. A `git diff cyrius.cyml` after
+  toolchain runs is still cheap insurance.
 - **`[deps] stdlib` auto-include only works from cyrius 6.5.16.**
   Every toolchain through 6.5.15 silently ignored manifest-declared
   stdlib deps — a probe calling `unicode_category()` with no
@@ -286,7 +332,14 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
   shared modules (`src/posix_classes.cyr` then `src/unicode_props.cyr`)
   ahead of the five engine modules. Consumers also need stdlib
   `lib/str.cyr` and `lib/unicode/{categories,casefold,normalize}.cyr`.
-  M5 surface freeze ADR will lock its public symbol set.
+  ADR 0010 locks its public symbol set.
+- **Fold copy.** cyrius 6.6.6 vendors niyama **1.0.11** as
+  `lib/niyama.cyr`, with a body byte-identical to this repo's `dist/`.
+  1.0.12 changes only the header, so the fold is current in substance.
+- **The fold is never checked for agnos.** cyrius's folds-parity gate
+  skips niyama on Linux: its preamble lacks `lib/unicode`, so the fold's
+  `str_normalize(…, NFD)` fails with `undefined variable 'NFD'`. That is a
+  gap in cyrius's gate, not a niyama defect, and is recorded here only.
 
 ## Tests
 
@@ -308,11 +361,20 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
   stdlib does not expose. 6 runnable bench harnesses total.
 - **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
 
-Aggregate: `cyrius test` reports **6 files, 779 assertions** all passing
-(661 at v1.0.8 → 747 at v1.0.9 with the P(-1) regression coverage →
-779 at v1.0.10 with the cross-engine invariant suite).
-`cyrius fuzz` reports **5 files, 1689 assertions** all passing
-(unchanged from v0.9.0; no engine code changes).
+Aggregate: `cyrius test` reports **6 files, 773 assertions**, all
+passing. The history is 661 at v1.0.8 → 741 at v1.0.9 (the P(-1)
+regression coverage) → 773 at v1.0.10 (the cross-engine invariant suite),
+unchanged since.
+
+**Correction (v1.0.12):** v1.0.9 and v1.0.10 recorded 747 and 779. The
+per-file counts above were right; the aggregates also added the
+`6 passed, 0 failed` line that `cyrius test` prints last, which counts
+files, not assertions. When totalling, sum only the lines ending
+`(N total)`.
+
+`cyrius fuzz` runs 6 files, all passing: the 5 per-engine harnesses
+(**1689 assertions**, unchanged since v0.9.0) plus the zero-assertion
+`tests/niyama.fcyr` scaffold.
 
 Bench history captured in [`../benchmarks.md`](../benchmarks.md).
 Security audit history in [`../audit/`](../audit/).
@@ -327,38 +389,39 @@ Direct (declared in `cyrius.cyml`):
   0008 — pulls in the `lib/unicode/{categories,casefold,normalize,
   _decode}.cyr` tree.)
 
+`cyrius deps` vendors those 9 leaves as 30 files including transitive
+includes. Since v1.0.12 each is locked by sha256 in `cyrius.lock`, stamped
+with the pin, and CI checks it with `cyrius deps --verify`. niyama has no
+git `[deps.*]` entries, so `cyrius update` has nothing to move.
+
 ## Consumers
 
 | Consumer | Status | Notes |
 |----------|--------|-------|
-| [cyim](https://github.com/MacCracken/cyim) | Parser-side ready (1.2.0) | All five flavors (`bre`, `re2`, `pcre`, `fuzzy`, `vim`) ready to wire. cyim ADR 0002 keeps consumer code change at zero. |
-| owl | Planned | Pager / cat-class utility. |
-| agnoshi | Planned | AI shell — `fuzzy` ready for shell completion. |
-| daimon | Planned | Agent orchestration — `re2` ready for DoS-safe pattern gates; `pcre` with step-limit for richer patterns; `fuzzy` for fuzzy-name match. |
+| [cyim](https://github.com/MacCracken/cyim) | Active (consumer #1) | Includes cyrius stdlib's folded `lib/niyama.cyr` (cyim 1.10.x). `--regex=<flavor>` covers all five flavors; per cyim ADR 0002, cyim needs no code changes. |
+| AGNOS kernel | Consumer #2 per ADR 0011 | Long-horizon pin, queued for the bare-metal target. No `niyama_*` references in `agnos/src` as of 2026-09-23. |
+| owl | Planned | Pager / cat-class utility. No `niyama_*` references in `src/` as of 2026-09-23. |
+| agnoshi | Planned | AI shell — `fuzzy` for shell completion. No `niyama_*` references in `src/` as of 2026-09-23. |
+| daimon | Planned | Agent orchestration — `re2` for DoS-safe pattern gates, `pcre` with a step limit for richer patterns, `fuzzy` for fuzzy-name match. No `niyama_*` references in `src/` as of 2026-09-23. |
 
 ## Next
 
-niyama-the-repo enters maintenance mode at v1.0. Going forward:
+niyama-the-repo is in fold-maintenance. The fold triggered on 2026-05-06
+at cyrius v5.9.0 (ADR 0011). Going forward:
 
-1. **Bug-fix patches (v1.0.x)** — only fixes; no surface changes.
-   Reported issues land here.
-2. **Fold trigger** — when consumer #2 materializes (per ADR 0011's
-   gate), cyrius stdlib vendors `dist/niyama.cyr` as
-   `lib/niyama.cyr` byte-identical. ADR 0011 status updates to
-   "Triggered" at that point.
-3. **Post-fold extensions** — additive-only changes (per ADR 0010)
-   land in cyrius stdlib's vendored copy, not in niyama-the-repo.
-   Pinned candidates: vim backref (ADR 0009), fuzzy `_search_at`,
-   Unicode long property names, `(?i)` full case folding.
-4. **niyama v2.0** — speculative; only if a future ecosystem need
-   exceeds the additive-only post-fold model. Would be a new
-   namespace; v1.x consumers unaffected.
+1. **v1.0.x patches** — bug fixes, hardening and toolchain pin bumps; no
+   surface changes (ADR 0010). Each tag reaches cyrius stdlib's
+   `lib/niyama.cyr` on its next refold.
+2. **v1.1.0** — the pcre explicit heap backtrack stack, which removes the
+   `PCRE_MAX_DEPTH` false negative described under § Version, 1.0.9.
+3. **Post-fold extensions** — additive-only, landing in cyrius stdlib's
+   vendored copy, not here. The pinned candidates are vim backref
+   (ADR 0009), fuzzy `_search_at`, long Unicode property names and full
+   `(?i)` case folding.
+4. **niyama v2.0** — speculative, only if a need exceeds the additive-only
+   model. It would be a new namespace; v1.x consumers are unaffected.
 
-See [`roadmap.md`](roadmap.md) for the complete milestone history;
-[ADR 0010](../adr/0010-surface-freeze.md) for the freeze contract;
-[ADR 0011](../adr/0011-fold-readiness-and-trigger.md) for the
-fold trigger checklist.
-3. **M5 (post-v0.9.0)** — P(-1) hardening + closeout + surface freeze.
-4. **v1.0** — fold-ready release.
-
-See [`roadmap.md`](roadmap.md) for the full plan.
+See [`roadmap.md`](roadmap.md) for the open work (forward-looking only;
+shipped history is the CHANGELOG), [ADR 0010](../adr/0010-surface-freeze.md)
+for the freeze contract, and
+[ADR 0011](../adr/0011-fold-readiness-and-trigger.md) for the fold record.

@@ -90,7 +90,7 @@ cyrius test                          # run [build].test + tests/*.tcyr
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable examples
 - [`docs/development/state.md`](docs/development/state.md) — Live state snapshot
-- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0
+- [`docs/development/roadmap.md`](docs/development/roadmap.md) — Open work only (shipped history is the CHANGELOG)
 
 ## Process
 
@@ -101,9 +101,9 @@ corpus as the highest-risk surface, cyim as consumer #1).
 
 ### P(-1): Scaffold / Project Hardening (before any new features)
 
-niyama runs P(-1) before each major-band closeout. **v0.9.0 IS the
-P(-1) for v1.0 fold-ready freeze** — see roadmap.md §
-"M5 / v0.9.0 — P(-1) hardening + closeout + surface freeze".
+niyama runs P(-1) before each major-band closeout. **v0.9.0 was the
+P(-1) for the v1.0 fold-ready freeze** (CHANGELOG § 0.9.0); v1.0.9 was
+the post-fold one (CHANGELOG § 1.0.9, `docs/audit/2026-09-08-audit.md`).
 
 1. **Cleanliness baseline** — `cyrius build`, `cyrius lint`,
    `cyrius audit`; all `tests/*.tcyr` pass, all `fuzz/*.fcyr`
@@ -306,11 +306,12 @@ project, not niyama-specific.
 - **State sync**: release post-hook bumps
   `docs/development/state.md`. If the hook doesn't, fix the hook
   — don't hand-maintain state.
-- **`cyrius audit`**: known-broken from 5.8.65 onward (missing
-  `~/.cyrius/bin/check.sh`); verify against the live pinned
-  toolchain before relying on it. Run constituents individually
-  (`cyrius lint` + `cyrius test` + `cyrius fuzz` + clean DCE
-  build) until the toolchain bug is fixed.
+- **`cyrius audit`**: runs its full sweep (fmt, lint, docs, tests,
+  bench), but exits non-zero while *any* lint warning or undocumented
+  public function remains. The current counts are state, in
+  `docs/development/state.md` § Toolchain. Until it exits 0, treat its
+  report as advisory and gate on the constituents individually:
+  `cyrius lint`, `cyrius test`, `cyrius fuzz`, and a clean DCE build.
 
 ## Documentation Structure
 
@@ -332,7 +333,10 @@ docs/ (minimum):
   guides/    — Task-oriented how-tos (currently empty; reserved).
   examples/  — Runnable examples (currently empty; reserved).
   development/
-    roadmap.md — completed, backlog, future, v1.0 criteria.
+    roadmap.md — open work only: next release, maintenance items,
+                 post-fold candidates, out of scope. Shipped items
+                 are deleted, not struck through — the CHANGELOG is
+                 their record.
     state.md   — live state snapshot (volatile; release-hook-bumped).
 
 docs/ (when earned — niyama has all of these post-v0.9.0):
@@ -406,7 +410,9 @@ niyama DOES ignore `/lib/`, matching the template: `cyrius deps`
 vendors the stdlib subset niyama declares in `cyrius.cyml [deps]`
 (string, fmt, alloc, io, vec, str, syscalls, assert, unicode) into
 `lib/` on demand. The stdlib version is frozen by the `cyrius`
-pin, not by committing the vendored copy.
+pin, not by committing the vendored copy. What *is* committed is
+`cyrius.lock`, which holds a sha256 per vendored file plus the pin.
+`cyrius deps --verify` checks `lib/` against it, and CI runs that check.
 
 ## CHANGELOG Format
 

@@ -12,18 +12,17 @@ fit the universal-floor case Cyrius stdlib already covers.
 
 ## Status
 
-**0.6.0** (M4, 2026-05-03) — **all five engines shipped**: POSIX BRE
-(`niyama_bre_*`), linear-time RE2 (`niyama_re2_*`), Perl-compat
-PCRE (`niyama_pcre_*`), Levenshtein fuzzy (`niyama_fuzzy_*`), and
-vim/cyim flavor (`niyama_vim_*`). niyama_vim is a Pike NFA matcher
-with all four magicness modes (very-magic / magic / nomagic /
-very-nomagic), `\<`/`\>` word boundaries, `\zs`/`\ze` match-position
-markers, and POSIX bracket classes `[[:alpha:]]` etc., per ADR 0006.
-Next: M4.5 (`v0.9.0` deferred-features catch-up) → M5 (hardening +
-freeze) → v1.0 fold-ready. See
-[`docs/development/state.md`](docs/development/state.md) for the
-live snapshot and [`docs/development/roadmap.md`](docs/development/roadmap.md)
-for the full M4.5+ plan.
+**v1.x — fold-maintenance.** All five engines have shipped: POSIX BRE
+(`niyama_bre_*`), linear-time RE2 (`niyama_re2_*`), Perl-compat PCRE
+(`niyama_pcre_*`), Levenshtein fuzzy (`niyama_fuzzy_*`), and vim/cyim
+flavor (`niyama_vim_*`). The public surface is frozen (ADR 0010), and
+cyrius stdlib has vendored `dist/niyama.cyr` as `lib/niyama.cyr` since
+cyrius v5.9.0 (ADR 0011), so this repo now carries bug fixes, hardening,
+and toolchain bumps. See
+[`docs/development/state.md`](docs/development/state.md) for the live
+version, toolchain pin, and counts, and
+[`docs/development/roadmap.md`](docs/development/roadmap.md) for open
+work.
 
 ## Why niyama exists
 
@@ -71,20 +70,12 @@ the template).
 
 ## Roadmap
 
-See [`docs/development/roadmap.md`](docs/development/roadmap.md) for
-the full M0 → v1.0 plan. Engine ordering (architecture-shakeout,
-then demand):
-
-| Milestone | Engine | Why this order |
-|-----------|--------|----------------|
-| **M0** | scaffold | Done — first-party-standards conformance, ABI sketch, dist artifact stub. |
-| **M1** | **bre** (POSIX BRE) | ✅ Done (v0.2.0). 68 unit tests, fuzz harness, bench floor recorded. ABI shape (per ADR 0002) is the template M2+ engines mirror. |
-| **M2** | **re2** (Thompson NFA, linear-time) | ✅ Done (v0.3.0). 76 unit tests + adversarial fuzz. `(a\|a)*b` on 200 `a`s matches in ~84μs (would DoS backtracking engines). Compile rejects backref/lookaround/atomic/recursion with distinct error codes per ADR 0003. |
-| **M3** | **pcre** (Perl-compatible) | ✅ Done (v0.4.0). 83 unit tests + 229-assertion fuzz. Backref + lookahead + atomic + named captures + possessive quantifiers. Catastrophic-backtracking bounded by step-limit (default 1M) + recursion-depth bound (256). Lookbehind / Unicode `\p{L}` / recursion / conditionals deferred per ADR 0004. |
-| **M3.5** | **fuzzy** (Levenshtein) | ✅ Done (v0.5.0). 45 unit tests + 757-assertion fuzz (verifies all 5 Levenshtein mathematical invariants on randomized inputs). Anchored / substring / prefix match modes; ASCII case-fold flag. Per ADR 0005. |
-| **M4** | **vim** (vim/cyim flavor) | ✅ Done (v0.6.0). 88 unit tests + 219-assertion fuzz with mode-coverage sweep. All 4 magicness modes, `\<`/`\>`, `\zs`/`\ze`, all 12 POSIX bracket classes. Per ADR 0006. |
-| **M5** | P(-1) hardening + closeout | Audit, fuzz floor, perf claims, surface freeze. Fold ADR. |
-| **v1.0** | fold-ready release | `dist/niyama.cyr` is byte-identical fold candidate; cyrius stdlib vendors as `lib/niyama.cyr`. |
+[`docs/development/roadmap.md`](docs/development/roadmap.md) is
+forward-looking only. It holds the v1.1.0 pcre backtrack-stack fix,
+open v1.0.x maintenance items, and the post-fold extension candidates
+that belong to cyrius stdlib's `lib/niyama.cyr` rather than this repo.
+The M0 → v1.0 milestone history is the 0.1.0 → 1.0.0 entries in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ## Build
 

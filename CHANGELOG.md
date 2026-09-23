@@ -4,6 +4,170 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.12] — 2026-09-23
+
+Toolchain and dependency refresh. There are no engine source changes: the
+`niyama_<engine>_*` surface is untouched (frozen per ADR 0010), and
+`dist/niyama.cyr` is byte-identical to 1.0.11 except its version header.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.6`.** This time the bump changes the compiler,
+  not just metadata. The wrapper re-execs the pinned version, which uses its
+  own `cycc` (measured: `cyrius build -v` under the 6.6.2 pin reports
+  `~/.cyrius/versions/6.6.2/bin/cycc`). No niyama source change was needed.
+  6.6.6's headline fixes don't reach niyama:
+  - Windows `O_APPEND` / `O_TRUNC`: niyama has no open flags outside
+    vendored `lib/`.
+  - CVE-45, `#@file` forgery against `private`: niyama declares nothing
+    `private`.
+  - CVE-44, the cyrius installer: CI doesn't use it.
+- **`lib/` wiped and re-vendored with `cyrius deps`.** It went from 110 to 30
+  files, all byte-identical to `~/.cyrius/versions/6.6.6/lib`.
+  - The old 110-file tree was a whole-snapshot copy, which is what
+    `cyrius update` produces for a project with no git deps. 30 is exactly
+    what CI's `cyrius deps` vendors: the 25 files behind the 9 declared
+    leaves plus transitive `atomic`, `fnptr`, `result`, `args_agnos` and
+    `args_macos`.
+  - Undeclared modules such as `bench.cyr` still resolve from the pinned
+    snapshot.
+  - Changed modules niyama includes: `io` (rewritten; now includes `fmt` and
+    `string` itself), `bench` (6.6.5 min/max rule — see Bench), `assert`
+    (now includes `vec`), `alloc` (plus a new `alloc_cx`), `fmt`, `string`,
+    `vec`, `fnptr`, and the `syscalls*` leaves (aarch64 `SYS_UNLINKAT` 35 →
+    263, which is why 6.6.5 says to re-run `cyrius deps` at the bump).
+  - `str` and `unicode/*` are unchanged. The one exception,
+    `unicode/_normalize_data.cyr`, changed only in a comment.
+- **`cyrius.lock` is a real lock now.** It replaces the comment-only stub
+  (1.0.3) with 30 sha256 lines plus a `cyrius 6.6.6` pin trailer. It matches
+  what `cyrius deps` writes, and all 30 hashes match the `lib/` of the 6.6.6
+  release tarball CI downloads.
+  - **The stub's reason is gone.** The 0-byte truncation it worked around was
+    fixed in cyrius 6.0.2.
+  - **The stub had stopped surviving anyway.** On 6.6.x every `build`, `test`,
+    `bench`, `fuzz`, `distlib` and `audit` run rewrites it; this release's
+    `cyrius distlib` did. So `--no-lock` in CI protected nothing.
+  - **A committed lock is a real check.** One stamped with the pin is left
+    alone. Under an unchanged pin, `cyrius deps` refuses a stdlib snapshot
+    that disagrees with it (the cyrius 6.6.4 guard). Measured: one flipped
+    hash gives `refusing to vendor or re-lock this leaf`, exit 1, with or
+    without `--no-lock`.
+- **CI and release resolve deps with `cyrius deps` + `cyrius deps --verify`**
+  instead of `cyrius deps --no-lock`. `--verify` measured: 30 verified on a
+  clean tree; one tampered `lib/str.cyr` gives `1 failed`, exit 1.
+- **GitHub Actions moved to their Node 24 majors:**
+  - `actions/checkout` v4 → v7
+  - `actions/upload-artifact` v4 → v7
+  - `actions/download-artifact` v4 → v8
+  - `softprops/action-gh-release` v2 → v3
+
+  GitHub removed the Node 20 action runtime from hosted runners on
+  2026-09-23, and every tag the workflows used was a Node 20 action. No
+  inputs changed, because none of the v5–v8 breaking changes touch how
+  niyama uses these actions. The upload v7 / download v8 pair must move
+  together: v8 unzips only an artifact with a zip Content-Type, and v7 is
+  the version that writes it. vidya made the same migration first.
+  - Both workflows were replayed step by step against the working tree, in a
+    clean `HOME` with the real 6.6.6 tarball. The release job produced the
+    full asset set: source tarball, bundle, x86_64 and aarch64 binaries,
+    lock, and SHA256SUMS.
+- `dist/niyama.cyr` regenerated via `cyrius distlib`: 7295 lines,
+  header-only diff. `dist/niyama.deps` unchanged (9 stdlib leaves).
+- **`docs/development/roadmap.md` is forward-looking only now.** The shipped
+  M0–M5 narrative is gone; CHANGELOG 0.1.0 – 1.0.0 is its record. What remains:
+  - v1.1.0: the pcre heap backtrack stack
+  - open v1.0.x maintenance items
+  - post-fold extension candidates
+  - the deferral rule and out-of-scope list
+
+  README's status and roadmap sections and CLAUDE.md's roadmap pointers were
+  updated to match. The five ADR references to "roadmap.md — M*n* acceptance
+  criteria" (0002–0006) now point to CHANGELOG § 0.2.0 – 0.6.0, and
+  `git show 1.0.11:docs/development/roadmap.md` still has the original text.
+
+### Fixed
+
+- **The aarch64 release binary hadn't shipped since 1.0.2.** `release.yml`
+  gated the cross-build on `$HOME/.cyrius/bin/cc5_aarch64`. cyrius 6.0.0
+  renamed that binary `cycc_aarch64`, and the old name survived only as a
+  symlink created by cyrius's `install.sh`, which niyama's install step never
+  runs.
+  - From the 6.0.1 pin (1.0.3) on, the step printed a warning and passed, so
+    GitHub releases 1.0.3 – 1.0.11 have no `niyama-*-aarch64-linux` asset
+    (1.0.1 and 1.0.2 do).
+  - The gate now tries `cycc_aarch64`, `cycc-native-aarch64` and
+    `cc5_aarch64` in turn, following vidya. A failed cross-build falls back
+    to x86_64-only with a warning.
+  - Verified at 6.6.6: a 573,400-byte static aarch64 ELF that runs under
+    `qemu-aarch64`.
+- Removed a dead `cp "$CYRIUS_DIR/scripts/cyrius" …` from release.yml's
+  install step. The toolchain tarball has no `scripts/` directory, in 6.6.2
+  and 6.6.6 alike, and `bin/cyrius` already arrives with `bin/*`.
+
+### Corrections
+
+- **Test totals have been overstated by 6 since 1.0.9.** `cyrius test` runs
+  6 files / **773** assertions, and did at 1.0.10 and 1.0.11 too.
+  - 1.0.10's "779" and 1.0.9's "747" (really 741) added the trailing
+    `6 passed, 0 failed` line, which counts files, to the assertion counts.
+  - The per-file counts in `state.md` were always right; only the sum was
+    wrong. Fuzz's 1689 is correct.
+- **The pin is no longer advisory.** 1.0.8's "the pin is advisory for
+  compiler selection" was true for its 6.5.29 pin: pinned wrappers older
+  than 6.5.44 ran the *current* `cycc`. `state.md` then carried it forward
+  as a general rule. From 6.5.44 on, the pinned wrapper uses its own `cycc`;
+  measured here under both the 6.6.2 and 6.6.6 pins.
+- **`cyrius audit` isn't broken, but it exits 1.** CLAUDE.md said
+  "known-broken from 5.8.65". On 6.6.6 it runs its full sweep (fmt, lint,
+  docs, tests, bench), but any lint warning or undocumented public function
+  sets exit code 1, and niyama has 23 and 150.
+  - fmt has been clean since 1.0.11.
+  - The undocumented count rose from 141 to 150 on identical source because
+    cyrdoc now reads whole files. It used to stop at 64 KB, and
+    `src/pcre.cyr` is 89.7 KB.
+  - Tracked in the roadmap.
+- **The 1.0.8 `description`-truncation note didn't reproduce.** On 6.6.6,
+  `deps`, `build`, `test`, `fuzz`, `bench`, `lint`, `distlib` and
+  `deps --verify` in this tree all left `cyrius.cyml`'s description
+  byte-identical.
+
+### Deferred
+
+Pinned in `docs/development/roadmap.md` § Maintenance — v1.0.x open items:
+
+- CI runs build + test only. The lint and fuzz steps CLAUDE.md § CI/Release
+  describes don't exist.
+- `cyrius audit` exit code (above).
+- CI's toolchain install downloads with `curl` and never checks the
+  published `.sha256` or signature.
+
+### Tests / fuzz
+
+- No change. `cyrius test`: 6 files / **773** assertions. `cyrius fuzz`:
+  5 harnesses / **1689** assertions, plus the zero-assertion
+  `tests/niyama.fcyr` scaffold. 0 failures under both pins.
+- All 6 bench harnesses compile and run against the 30-file `lib/`.
+
+### Bench
+
+- **No regression.** This was a same-boot, interleaved A/B, 5 rounds per
+  side, comparing the complete old state (6.6.2 compiler + stdlib) with the
+  new one (6.6.6 compiler + stdlib).
+  - Across 58 rows: mean **−0.16%**, median **−0.13%**, range −4.0% .. +3.4%.
+    **Zero rows** moved beyond ±5%.
+  - Only `avg` is compared, because 6.6.5 changed `bench.cyr`'s min/max
+    (a window must clear a resolution bar before it can set an extreme).
+  - Full table: [`docs/benchmarks.md`](docs/benchmarks.md) § v1.0.12.
+
+### Toolchain notes
+
+- **DCE binary: 323,432 B → 323,624 B (+192 B).** Non-DCE: 401,256 B →
+  405,544 B. The engine sources are byte-identical; the growth comes from the
+  6.6.6 stdlib and 6.6.5's 2-byte padding at odd-depth x86 call sites.
+- `cyrius lint` is unchanged: the same 11 long-line warnings in `src/`.
+- cyrius 6.6.6 vendors niyama **1.0.11** as `lib/niyama.cyr`, with a body
+  byte-identical to this repo's `dist/`.
+
 ## [1.0.11] - 2026-09-12
 
 ### Changed

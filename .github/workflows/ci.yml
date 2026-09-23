@@ -17,7 +17,9 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Node 24 major. GitHub removed the Node 20 action runtime from
+      # hosted runners on 2026-09-23; checkout@v4 was a Node 20 action.
+      - uses: actions/checkout@v7
 
       - name: Install Cyrius toolchain
         run: |
@@ -37,15 +39,19 @@ jobs:
           echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
 
       - name: Resolve dependencies
-        # `--no-lock` preserves the committed cyrius.lock. Cyrius 6.0.1's
-        # default `cyrius deps` truncates cyrius.lock to 0 bytes (logs
-        # `cyrius.lock: 0 deps locked` when there are no external deps),
-        # which then breaks the release-asset upload (GitHub rejects
-        # 0-byte assets). niyama has no external deps, so the in-tree
-        # cyrius.lock is a comment-only stub; `--no-lock` keeps it that
-        # way. Same workaround lives in yukti / patra. Drop the flag
-        # once upstream restores the lockfile writer.
-        run: cyrius deps --no-lock
+        # cyrius.lock is a real integrity record (since 1.0.12): one sha256
+        # per vendored stdlib file plus a `cyrius <pin>` trailer. Under an
+        # unchanged pin, `cyrius deps` refuses any stdlib file whose snapshot
+        # no longer matches the lock (cyrius 6.6.4 guard; only `--relock`
+        # accepts it), so a toolchain tarball whose stdlib changed under the
+        # same tag fails here rather than building. `--verify` then checks
+        # lib/ against the committed lock. The old `--no-lock` flag worked
+        # around cyrius 6.0.1 truncating the lock to 0 bytes; that was fixed
+        # in 6.0.2, and on 6.6.x every build / test / distlib run rewrites
+        # a stub lock anyway.
+        run: |
+          cyrius deps
+          cyrius deps --verify
 
       - name: Build
         run: |

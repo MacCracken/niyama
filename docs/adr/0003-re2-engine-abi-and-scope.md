@@ -200,4 +200,4 @@ crosses engine boundaries.
 - [cyrius stdlib `lib/regex.cyr`](https://github.com/MacCracken/cyrius/blob/main/lib/regex.cyr) — Pike NFA template; niyama_re2 forks the matcher kernel.
 - [Google RE2 syntax](https://github.com/google/re2/wiki/Syntax) — flavor reference.
 - [Russ Cox — Regular Expression Matching Can Be Simple And Fast](https://swtch.com/~rsc/regexp/regexp1.html) — the Pike NFA technique paper that informs both stdlib and niyama_re2.
-- [`docs/development/roadmap.md`](../development/roadmap.md) — M2 acceptance criteria.
+- [`CHANGELOG.md` § 0.3.0](../../CHANGELOG.md) — M2 as shipped. The pre-ship M2 acceptance criteria lived in `roadmap.md` until it went future-facing at v1.0.12: `git show 1.0.11:docs/development/roadmap.md`.

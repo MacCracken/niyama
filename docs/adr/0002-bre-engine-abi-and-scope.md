@@ -196,4 +196,4 @@ home for backref-using patterns.**
 - [cyrius stdlib `lib/regex.cyr`](https://github.com/MacCracken/cyrius/blob/main/lib/regex.cyr) — Pike NFA template; niyama_bre instruction model + matcher are forked from this engine.
 - [cyim ADR 0002 — `--regex=<flavor>` extensibility shape](https://github.com/MacCracken/cyim/blob/main/docs/adr/0002-regex-extensibility-shape.md) — first consumer's surface.
 - [POSIX.1-2017 § 9.3 Basic Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html) — the spec niyama_bre conforms to (minus backrefs).
-- [`docs/development/roadmap.md`](../development/roadmap.md) — M1 acceptance criteria.
+- [`CHANGELOG.md` § 0.2.0](../../CHANGELOG.md) — M1 as shipped. The pre-ship M1 acceptance criteria lived in `roadmap.md` until it went future-facing at v1.0.12: `git show 1.0.11:docs/development/roadmap.md`.

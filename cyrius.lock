@@ -1,19 +1,31 @@
-# cyrius.lock — niyama
-#
-# niyama has no external [deps] entries (stdlib-only through M5
-# per CLAUDE.md "Rules"), so this lockfile has no hash lines to
-# carry. It exists as a non-empty placeholder for two reasons:
-#
-#   1. Cyrius 6.0.1's `cyrius deps` truncates cyrius.lock to 0
-#      bytes when there are no external deps to lock — and the
-#      GitHub release-asset API rejects 0-byte uploads with
-#      `size must be greater than or equal to 1`. Shipping this
-#      stub keeps the lock asset uploadable.
-#
-#   2. CI / release run `cyrius deps --no-lock` so the toolchain
-#      bug never overwrites this file. Drop --no-lock once the
-#      lockfile-writer regression is fixed upstream.
-#
-# Same workaround pattern lives in yukti / patra (which DO have
-# external deps in their locks); niyama's variant is comment-only
-# because there is nothing to hash.
+417031acfb92b8f018315ebf375a410c7aecafecd1175c2e691097bb3373a0ee  lib/alloc.cyr
+69e92cc4b67f1a936f94c92ce8a4c66673758b84dba385e96fbeaa46fa692b4c  lib/alloc_agnos.cyr
+c3b7f80d39f39610f44bebf34ba8f31c82eb85b1a7b7ff5327ef5a81e4945889  lib/alloc_cx.cyr
+03922b263b4a771d7104c6dcc30b4b029c6fe40ec93fec6a0ee38ec61f7e7dd8  lib/alloc_macos.cyr
+299c2c7e203b339a6b97d3ab88d15f3465d72bda018c61e6951819eabd7cc018  lib/alloc_windows.cyr
+27c9752b70e797b43d30204e5077749526144495ba7021b1272067f3236d81f9  lib/args_agnos.cyr
+99f96283da419ad9f01d076269411c3d5214b6007a92d1bbe2356ab906a5d1a1  lib/args_macos.cyr
+65b99d174e411037dc1662bea183fe4c67835760eda848063d352e590219d955  lib/assert.cyr
+eeadd5a7b29998c0039a6758687857689b20f83d3d16c74349a403dac39e71a4  lib/atomic.cyr
+224c9d1685b2a0859abbc1a8a01bc5570660a3aaf90a7ccfb468e38d0cf3af5f  lib/fmt.cyr
+2f9d210e9280506f280bbd10a7b26b76c7990360a97fb7701f348bfe76fbb291  lib/fnptr.cyr
+d5aa86a498c195c23a9b21f673c3d5ea6f2a9abbfab1d786b66d7262ddc62f2a  lib/io.cyr
+9892d2c32787cdbb5d65b8441bef25d4b8f31942ac4db7500d10aadc43f23632  lib/result.cyr
+8a3e4378e75eefbf7e6d8d098449dbe909f9b9b80a2a72624adb250eb4335c09  lib/str.cyr
+cf6d59104caf9904342400eba0df08b6c19f2124a446f5fab27b543df9b9b222  lib/string.cyr
+3363f2e6cdc81d4281a90dcebce75525a0650102d332fc3a78762ad5162e6175  lib/syscalls.cyr
+a6c780729505274da0da63d40e0efb5d73fb4e3f9d9a01be2c3c871c03216dd3  lib/syscalls_aarch64_linux.cyr
+e9ce43b5936641036ff990164bf5ad09608835f8b3dcfabb67fd5a846d1e0c17  lib/syscalls_linux_common.cyr
+284f6b26df7598fa2accfb787ce1fe233c044e94e81bf374c882732fe81364d0  lib/syscalls_macos.cyr
+d0bed7ae3fd45b30969a697ef49e7eeac1e545b8a38c3bd9dae16be940203dad  lib/syscalls_windows.cyr
+33dc38155f7b79ea3ca8f899642a3696ceb9058b2e598783681a11b9b1d72e43  lib/syscalls_x86_64_agnos.cyr
+57bc4655c9677f815547283729f5898543ae40e26362e075fdec0314654155d9  lib/syscalls_x86_64_linux.cyr
+8e45d3b594e31609051e958acac2f84cc102e0cd2264b0cbfdeaae8aaffda557  lib/unicode/_casefold_data.cyr
+490ce31f13069637ada2eec85c16f1e5ef942160892f32c07b572286fa4f9912  lib/unicode/_categories_data.cyr
+aeeba5627b78ffca6a34ebcbe318f50726a87d4f19713bf9ed070bbbec7ded74  lib/unicode/_decode.cyr
+137fac081ec373522a0d22aa702494b45505cb7d5a9b606f4b47549a5e9d299d  lib/unicode/_normalize_data.cyr
+1b25eed5cfb1555dd425644dccec378cf3ac80fe7874e35bdc30ca9edf01d35f  lib/unicode/casefold.cyr
+1091c0970c74fd47f63503b5dfbe0098a1b87048a8d43cc17cf51153839b2afe  lib/unicode/categories.cyr
+ae2647702546f03f5fe1f4797ef735aafbf9981bb6294a075a31d308fd7e905c  lib/unicode/normalize.cyr
+802a6a65421c1c0499b137069812e8f158c9779a574da4fb5948cca382306abe  lib/vec.cyr
+cyrius	6.6.6
