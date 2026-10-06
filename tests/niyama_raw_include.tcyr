@@ -1,0 +1,26 @@
+# niyama raw-include test — the bundle compiles on its own.
+#
+# Includes ONLY dist/niyama.cyr (plus the test framework). Since 1.0.13 the
+# bundle carries a compile-verified "# Requires" block, so a consumer that
+# raw-includes it needs no hand-written stdlib include list. `cyrius test`
+# auto-prepends [deps] stdlib and so cannot tell; CI also builds this file
+# with `cyrius build --no-deps`, which against the 1.0.12 bundle (no
+# requires block) fails with `undefined variable 'NFD'`.
+
+include "dist/niyama.cyr"
+include "lib/assert.cyr"
+
+fn main() {
+    alloc_init();
+
+    test_group("raw include");
+    var nfa = niyama_bre_compile("a\\(b*\\)c");
+    assert(nfa != 0, "bre compiles through the bundle alone");
+    assert_eq(niyama_bre_match(nfa, "abbbc"), 1, "bre matches through the bundle alone");
+    assert_eq(niyama_bre_match(nfa, "abd"), 0, "bre rejects through the bundle alone");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

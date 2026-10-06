@@ -5,6 +5,21 @@
 
 ## Version
 
+**1.0.13** — cyrius 6.6.18 pin and `dist/` regeneration, shipped
+2026-10-06. No engine source changes.
+- **Pin:** `6.6.6` → `6.6.18`; `lib/` re-vendored by `cyrius deps` (31
+  files, `deps --verify` clean).
+- **Sidecar:** the 6.6.18 `distlib` derives `dist/niyama.deps` from the
+  compile-verify alone: 9 → 4 leaves (`unicode alloc string str`; `fmt`,
+  `io`, `vec`, `syscalls`, `assert` dropped).
+- **Requires block:** `dist/niyama.cyr` now includes its own leaves, so
+  `include "dist/niyama.cyr"` alone compiles. Pinned by
+  `tests/niyama_raw_include.tcyr`, which CI also builds with
+  `cyrius build --no-deps`.
+- **Gates:** tests 773 → 776, all green.
+
+See CHANGELOG § 1.0.13.
+
 **1.0.12** — toolchain and dependency refresh, shipped 2026-09-23. No
 engine source changes; `dist/niyama.cyr` changed only in its version
 header.
@@ -152,7 +167,7 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.6` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.6.18` (in `cyrius.cyml [package].cyrius`).
   Floor remains `5.8.65` for stdlib `lib/unicode/` per ADR 0008
   (categories at .49, casefold at .50, normalize at .51, codec
   lift at .55, NFKC/NFKD at .60). Bump history: `5.8.42`
@@ -160,8 +175,9 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
   at v1.0.2 (for `: i64` return-type syntax) → `6.0.1` at v1.0.3
   → `6.1.27` at v1.0.4 → `6.2.1` at v1.0.5 → `6.4.64` at v1.0.6
   → `6.5.29` at v1.0.7 → `6.6.0` at v1.0.8 → `6.6.2` at v1.0.11
-  → `6.6.6` at v1.0.12. Each matched the installed wrapper at the
-  time, and none required an engine source change.
+  → `6.6.6` at v1.0.12 → `6.6.18` at v1.0.13. Each matched the
+  installed wrapper at the time, and none required an engine source
+  change.
 - **The pin selects the compiler.** When the pin differs from the
   running wrapper, the wrapper re-execs `~/.cyrius/versions/<pin>/bin/cyrius`,
   which builds with its own sibling `cycc`. That has held for pinned
@@ -323,8 +339,15 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
 ## Fold-ready artifact
 
 - `dist/niyama.deps` — sidecar emitted by `cyrius distlib` from 6.6.0
-  (v1.0.8), listing the 9 stdlib leaf requirements for downstream
-  `cyrius deps`. Checked in alongside the bundle.
+  (v1.0.8) for downstream `cyrius deps`, checked in alongside the bundle.
+  Since v1.0.13 (cyrius 6.6.18) it lists only the 4 leaves the
+  compile-verify proves the bundle needs (`unicode alloc string str`); it
+  listed all 9 declared leaves before.
+- **Requires block (v1.0.13).** The bundle opens with a compile-verified
+  `include "lib/…"` per sidecar leaf, so `include "dist/niyama.cyr"` alone
+  compiles. `tests/niyama_raw_include.tcyr` pins it; CI builds that file
+  with `cyrius build --no-deps`, since `cyrius test` auto-prepends
+  `[deps] stdlib` and would pass without the block.
 - `dist/niyama.cyr` — single-include bundle. v1.0.10 prepends
   `src/nfa_edit.cyr` ahead of the two other shared modules; consumers are
   unaffected because the bundle is still one file and `dist/niyama.deps`
@@ -343,6 +366,8 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
 
 ## Tests
 
+- `tests/niyama_raw_include.tcyr` — raw-include check of the bundle (3
+  assertions, v1.0.13).
 - `tests/niyama.tcyr` — **cross-engine invariants** (34 assertions,
   was a 2-assertion scaffold). Pins the assumptions no single-engine suite
   can see: every engine's `OP_JMP`/`OP_SPLIT` must equal `NFA_OP_JMP`/
@@ -361,10 +386,11 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
   stdlib does not expose. 6 runnable bench harnesses total.
 - **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
 
-Aggregate: `cyrius test` reports **6 files, 773 assertions**, all
-passing. The history is 661 at v1.0.8 → 741 at v1.0.9 (the P(-1)
-regression coverage) → 773 at v1.0.10 (the cross-engine invariant suite),
-unchanged since.
+Aggregate: `cyrius test` reports **8 files (7 `.tcyr` plus the
+`[build].test` entry), 776 assertions**, all passing. The history is 661
+at v1.0.8 → 741 at v1.0.9 (the P(-1) regression coverage) → 773 at
+v1.0.10 (the cross-engine invariant suite) → 776 at v1.0.13
+(`tests/niyama_raw_include.tcyr`).
 
 **Correction (v1.0.12):** v1.0.9 and v1.0.10 recorded 747 and 779. The
 per-file counts above were right; the aggregates also added the

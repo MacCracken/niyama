@@ -65,3 +65,13 @@ jobs:
         # stub didn't exist (Issue 1) and also wouldn't ever exercise
         # tests/${proj}.tcyr.
         run: cyrius test
+
+      - name: Raw-include check
+        # `cyrius test` auto-prepends the manifest's [deps] stdlib, so it
+        # would compile tests/niyama_raw_include.tcyr even against a bundle
+        # with no requires block. `--no-deps` skips that prepend: this step
+        # proves `include "dist/niyama.cyr"` alone compiles (1.0.13).
+        run: |
+          mkdir -p build
+          cyrius build --no-deps tests/niyama_raw_include.tcyr build/raw_include
+          ./build/raw_include
