@@ -162,7 +162,7 @@ diagnostics) sees unchanged numbers.
 | `FUZZY_MAX_TEXT_LEN` | 4096 | fuzzy |
 | `FUZZY_DEFAULT_K` | 2 | fuzzy |
 | pcre step-limit default | 1_000_000 | pcre (configurable) |
-| pcre depth-limit | 256 | pcre (not configurable in v1.0) |
+| pcre depth-limit | 256 | pcre (not configurable in v1.0) — **retired in 1.1.0** by [ADR 0012](0012-pcre-explicit-backtrack-stack.md): the matcher no longer recurses natively, the step limit is its only bound, and `PCRE_E_DEPTH_EXCEEDED` now reports the backtrack stack's ceiling |
 
 Patterns hitting any limit error cleanly with `*_E_TOO_LARGE` (or
 the appropriate engine code). v0.9.0 boundary tests (per-engine)
@@ -178,7 +178,7 @@ verify the contract.
 3. **vim cannot accept backref through v1.0.** Post-fold revisit
    open via cyrius stdlib per ADR 0009; niyama-side ABI is locked.
 4. **pcre is the *only* backtracking engine.** Step-limit + depth
-   bound the worst case.
+   bound the worst case. (Since 1.1.0 the step limit alone; ADR 0012.)
 5. **Pike NFA engines (bre, re2, vim) are linear-time-guaranteed**
    for accepted patterns. No catastrophic-backtracking path exists.
 6. **fuzzy is byte-Levenshtein** (with optional NFD normalization

@@ -38,11 +38,10 @@ with its own error code; none is silently degraded:
   **pcre**, and bound it with `niyama_pcre_set_step_limit()` when the
   pattern is untrusted.
 
-**Known limitation:** pcre's matcher recursion gets deeper with each
-input position it consumes. A quantifier that has to consume more than
-about 250 positions therefore reports no match and sets
-`PCRE_E_DEPTH_EXCEEDED`. The fix is planned
-for v1.1.0 (see the roadmap).
+Since 1.1.0, pcre keeps its backtrack state on an explicit heap stack
+(ADR 0012): a pattern can cover a subject of any length the step limit
+allows. Through 1.0.13 a quantifier that had to consume more than about
+250 positions gave up, so upgrade if you pin an older release.
 
 Every public symbol, error code, and limit is listed in
 [`docs/api/README.md`](docs/api/README.md). For which engine suits which
@@ -134,8 +133,7 @@ Live status is in [state.md § Consumers](docs/development/state.md#consumers).
 
 [`docs/development/roadmap.md`](docs/development/roadmap.md) looks
 forward only. It holds:
-- the v1.1.0 pcre backtrack-stack fix;
-- open v1.0.x maintenance items;
+- open v1.x maintenance items;
 - post-fold extension candidates, which belong to cyrius stdlib's
   `lib/niyama.cyr` rather than this repo.
 

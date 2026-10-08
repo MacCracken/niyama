@@ -200,7 +200,9 @@ explicit error codes so consumers know exactly what's missing.
   doesn't have native stack-depth limits; the matcher needs an
   explicit depth counter alongside the step counter, and OOM
   scenarios on deeply-nested patterns become a concern. M5 will
-  audit.
+  audit. *(1.1.0: superseded by [ADR 0012](0012-pcre-explicit-backtrack-stack.md) —
+  the matcher iterates over an explicit heap stack, and the step
+  limit is its only bound.)*
 - **Step-limit is process-global, not per-NFA.** A multi-tenant
   consumer that wants different limits for different patterns has
   to call `_set_step_limit` between calls. M5 may revisit if a

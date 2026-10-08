@@ -73,7 +73,9 @@ untrusted input (per ADR 0003).
 
 ## niyama_pcre — Perl-compatible (backtracking)
 
-Backtracking matcher. Step-limit + depth-limit bounded (per ADR 0004).
+Backtracking matcher, bounded by the step limit (ADR 0004). Since 1.1.0
+its backtrack state lives on an explicit heap stack (ADR 0012), so how far
+it can backtrack does not depend on the subject's length.
 
 | Function | Returns | Notes |
 |----------|---------|-------|
@@ -84,7 +86,7 @@ Backtracking matcher. Step-limit + depth-limit bounded (per ADR 0004).
 | `niyama_pcre_group_start(nfa, n)` | offset or `-1` | |
 | `niyama_pcre_group_end(nfa, n)` | offset or `-1` | |
 | `niyama_pcre_group_by_name(nfa, name)` | group_idx or `-1` | |
-| `niyama_pcre_last_error()` | `PCRE_E_*` | |
+| `niyama_pcre_last_error()` | `PCRE_E_*` | the last compile's code, or the last match / search's (`OK` or `DEPTH_EXCEEDED`) |
 | `niyama_pcre_set_step_limit(n)` | `0` | default 1_000_000; per-process |
 | `niyama_pcre_last_step_count()` | step count | observability |
 | `niyama_pcre_last_callout()` | callout num or `-1` | for `(?C<num>)` |
@@ -97,10 +99,16 @@ emitted for `[\p{L}]`-style char-class composition. Live codes:
 `PCRE_E_TOO_LARGE = 6`, `PCRE_E_DUPLICATE_NAME = 7`,
 `PCRE_E_BAD_CONDITION = 8`, `PCRE_E_BAD_PROPERTY = 9`,
 `PCRE_E_LOOKBEHIND_VARWIDTH = 10`, `PCRE_E_BAD_RECURSION_REF = 11`.
+Match-time: `PCRE_E_DEPTH_EXCEEDED = 12` — the backtrack stack hit its
+ceiling; the match / search answers no match / `-1` (a search does not
+try later starts). Unreachable under the default step limit.
 
 **Limits**: same as bre/re2, plus `PCRE_MAX_NAMES = 9`,
 `PCRE_NAME_MAX_LEN = 31`. Default `_pcre_step_limit = 1_000_000`
-(configurable); `_pcre_depth_limit = 256` (not configurable).
+(configurable). The backtrack stack starts at 32 KB and grows to at most
+128 MB (2^24 words); a match holds at most 3 words per step, so under the
+default step limit it stays under ~24 MB. The 1.0.x depth limit of 256 is
+gone (ADR 0012).
 
 ## niyama_fuzzy — Levenshtein edit-distance
 
