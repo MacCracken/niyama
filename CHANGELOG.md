@@ -65,9 +65,11 @@ Toolchain and dependency refresh. There are no engine source changes: the
   6.6.6's headline fixes don't reach niyama:
   - Windows `O_APPEND` / `O_TRUNC`: niyama has no open flags outside
     vendored `lib/`.
-  - CVE-45, `#@file` forgery against `private`: niyama declares nothing
-    `private`.
-  - CVE-44, the cyrius installer: CI doesn't use it.
+  - The `#@file` marker forgery against `private` (cyrius's file-marker
+    forge bug, a `private`-visibility bug rather than a security
+    vulnerability): niyama declares nothing `private`.
+  - CYRIUS-2026-0007, the cyrius installer's fixed `/tmp` staging: CI
+    doesn't use the installer.
 - **`lib/` wiped and re-vendored with `cyrius deps`.** It went from 110 to 30
   files, all byte-identical to `~/.cyrius/versions/6.6.6/lib`.
   - The old 110-file tree was a whole-snapshot copy, which is what

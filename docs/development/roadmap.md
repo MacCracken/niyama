@@ -78,8 +78,8 @@ the v1.0.9 security patch. Done when:
   Either add the steps (lint advisory, fuzz gating) or correct the doc.
 - **CI installs the toolchain unverified.** Both workflows fetch the cyrius
   tarball with `curl` and unpack it without checking the published
-  `.sha256` or the signed `SHA256SUMS`. That is the gap cyrius's CVE-21
-  names. The committed `cyrius.lock` now catches a changed *stdlib*
+  `.sha256` or the signed `SHA256SUMS`. That is the gap cyrius's
+  release-integrity hardening item names. The committed `cyrius.lock` now catches a changed *stdlib*
   (`cyrius deps` refuses it), but nothing checks the compiler binaries.
   Verify the checksum, or install through cyrius's own `install.sh`,
   which refuses a mismatch.
