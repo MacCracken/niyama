@@ -60,6 +60,19 @@ jobs:
           mkdir -p build
           cyrius build src/main.cyr build/${{ github.event.repository.name }}
 
+      - name: Smoke banner names VERSION
+        # The banner reads CYRIUS_PKG_VERSION (1.1.0); through 1.0.13 it was a
+        # literal that still said 1.0.12. Fails if it drifts from VERSION again.
+        shell: bash
+        run: |
+          set -eo pipefail
+          want="niyama $(tr -d '[:space:]' < VERSION) - "
+          got="$(./build/${{ github.event.repository.name }})"
+          case "$got" in
+            "$want"*) echo "$got" ;;
+            *) echo "banner '$got' does not start with '$want'"; exit 1 ;;
+          esac
+
       - name: Test
         # v5.6.28: bare `cyrius test` picks up the [build].test entry
         # AND auto-discovers tests/*.tcyr — avoids the previous

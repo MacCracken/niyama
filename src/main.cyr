@@ -5,7 +5,15 @@
 # lives in programs/ at each milestone.
 
 fn main(): i64 {
-    syscall(1, 1, "niyama 1.0.12 - additional regex engines (fold-ready: bre + re2 + pcre + fuzzy + vim)\n", 86);
+    # The version is cyrius.cyml's [package].version — the VERSION file —
+    # which `cyrius build` provides as CYRIUS_PKG_VERSION. A literal here went
+    # stale (it printed 1.0.12 through 1.0.13). Every length is computed: a
+    # hand-counted one over-read .rodata at 1.0.7.
+    var head = "niyama ";
+    var tail = " - additional regex engines (fold-ready: bre + re2 + pcre + fuzzy + vim)\n";
+    syscall(1, 1, head, strlen(head));
+    syscall(1, 1, CYRIUS_PKG_VERSION, strlen(CYRIUS_PKG_VERSION));
+    syscall(1, 1, tail, strlen(tail));
     return 0;
 }
 
