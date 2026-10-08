@@ -68,6 +68,34 @@ jobs:
         # tests/${proj}.tcyr.
         run: cyrius test
 
+      - name: Fuzz
+        # Gating since 1.1.0: every fuzz/*.fcyr harness must pass (it exits 1
+        # on a failed assertion; a crash fails the step too).
+        run: cyrius fuzz
+
+      - name: Format check
+        # Gating since 1.1.0. `cyrius fmt --check` exits 1 and names the first
+        # non-canonical line. Every source the repo owns; an unmatched glob
+        # stays literal under bash and fails on the missing file, so a moved
+        # directory cannot turn this green by matching nothing.
+        shell: bash
+        run: |
+          set -eo pipefail
+          fail=0
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr fuzz/*.fcyr; do
+            cyrius fmt --check "$f" || fail=1
+          done
+          exit "$fail"
+
+      - name: Lint (advisory)
+        # Advisory: `cyrius lint` reports over-long lines and untracked
+        # deferral notes that are accepted for now (roadmap § Maintenance,
+        # "cyrius audit exits 1"). Printed for review, never gating.
+        continue-on-error: true
+        shell: bash
+        run: |
+          for f in src/*.cyr; do cyrius lint "$f"; done
+
       - name: Raw-include check
         # `cyrius test` auto-prepends the manifest's [deps] stdlib, so it
         # would compile tests/niyama_raw_include.tcyr even against a bundle

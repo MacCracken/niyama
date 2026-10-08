@@ -292,11 +292,18 @@ project, not niyama-specific.
 - **Version-verify gate**: release asserts `VERSION ==
   cyrius.cyml version == git tag` before building. Mismatch fails
   the run.
-- **Lint step**: CI runs `cyrius lint` per source file across
-  `src/*.cyr`. Advisory; v0.9.0 audit notes 11 long-line cosmetic
-  warnings remain (cosmetic only).
+- **Toolchain install**: both workflows run cyrius's own
+  `scripts/install.sh`, fetched from the pinned tag (never `main`),
+  which refuses a tarball whose published checksum is missing or
+  wrong. Never unpack a release tarball by hand.
+- **Gates**: CI gates on `cyrius test`, `cyrius fuzz` and
+  `cyrius fmt --check` over every source the repo owns. The **lint
+  step** (`cyrius lint` per `src/*.cyr`) is advisory
+  (`continue-on-error`); the accepted findings are state, see
+  `docs/development/state.md` § Toolchain.
 - **Workflow layout** (`.github/workflows/`):
-  - `ci.yml` — build, lint, test, fuzz; reusable via
+  - `ci.yml` — install, deps + lock verify, build, test, fuzz, fmt,
+    lint (advisory), raw-include check; reusable via
     `workflow_call`.
   - `release.yml` — version gate → CI gate → DCE build →
     artifacts (source tarball, bundled `dist/niyama.cyr`, DCE
