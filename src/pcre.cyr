@@ -25,7 +25,8 @@
 #   niyama_pcre_group_start(nfa,n)   -> group n start or -1
 #   niyama_pcre_group_end(nfa,n)     -> group n end or -1
 #   niyama_pcre_group_by_name(nfa,name) -> group index or -1
-#   niyama_pcre_last_error()         -> error code from most recent compile
+#   niyama_pcre_last_error()         -> error code from the most recent compile,
+#                                       or from the most recent match / search
 #   niyama_pcre_set_step_limit(n)    -> set process-wide step budget
 #   niyama_pcre_last_step_count()    -> step count of most recent match
 #
@@ -177,7 +178,8 @@ var PCRE_E_LOOKBEHIND_VARWIDTH     = 10;
 # (?P>name) ref that doesn't resolve to any defined group.
 var PCRE_E_BAD_RECURSION_REF       = 11;
 # v1.0.9 — MATCH-time (not compile-time) signal: the backtracker ran out of
-# backtrack storage and abandoned the attempt.
+# backtrack storage and abandoned the attempt; the operation answers no match /
+# -1 and reports this code through niyama_pcre_last_error().
 # 1.1.0 — the storage is the explicit backtrack stack (ADR 0012). Its ceiling
 # (_PCRE_BT_MAX words) is out of reach under the default 1M step limit, which
 # stays the DoS bound; only a raised step limit or a refused allocation can hit
@@ -1806,6 +1808,11 @@ fn niyama_pcre_compile(pat): i64 {
     return nfa;
 }
 
+# The most recent compile's error, or — once a match / search has run — that
+# operation's: PCRE_E_OK, or the match-time PCRE_E_DEPTH_EXCEEDED. Compile writes
+# _pcre_last_err directly; a match publishes _pcre_err into it when it ends
+# (_pcre_end_match). A match on a 0 handle runs nothing and leaves it untouched, so
+# a failed compile's code survives the caller's first match attempt.
 fn niyama_pcre_last_error(): i64 {
     return _pcre_last_err;
 }
@@ -2453,6 +2460,15 @@ fn _pcre_begin_match(): i64 {
     return 0;
 }
 
+# End a match operation: publish its error to niyama_pcre_last_error(). Until
+# 1.1.0 nothing did — the matcher wrote _pcre_err and last_error() read
+# _pcre_last_err, which only compile writes — so PCRE_E_DEPTH_EXCEEDED, documented
+# as readable after a match or search since 1.0.9, never reached a caller.
+fn _pcre_end_match(): i64 {
+    _pcre_last_err = _pcre_err;
+    return 0;
+}
+
 fn _pcre_run_at(nfa, input, input_len, from): i64 {
     var instrs = nfa + load64(nfa + PCRE_OFF_INSTRS_OFF);
     var instr_count = load64(nfa + PCRE_OFF_INSTR_COUNT);
@@ -2487,6 +2503,7 @@ fn niyama_pcre_match(nfa, s): i64 {
     _pcre_begin_match();
     var len = strlen(s);
     var r = _pcre_run_at(nfa, s, len, 0);
+    _pcre_end_match();
     if (r >= 0) { return 1; }
     return 0;
 }
@@ -2507,9 +2524,21 @@ fn niyama_pcre_search_at(nfa, s, len, from): i64 {
     var i = from;
     while (i <= len) {
         var r = _pcre_run_at(nfa, s, len, i);
-        if (r >= 0) { return i; }
+        if (r >= 0) {
+            _pcre_end_match();
+            return i;
+        }
+        # Fail closed. A start that gave up (PCRE_E_DEPTH_EXCEEDED) is not a start
+        # that cannot match, so moving on to i + 1 would report a LATER start as the
+        # leftmost match — `.*z` over 300 'a' then 'z' answered 46, not 0. Stop, and
+        # leave the error for niyama_pcre_last_error() (CHANGELOG 1.1.0).
+        if (_pcre_err != PCRE_E_OK) {
+            _pcre_end_match();
+            return 0 - 1;
+        }
         i = i + 1;
     }
+    _pcre_end_match();
     return 0 - 1;
 }
 

@@ -615,6 +615,29 @@ fn main() {
     # Real recursion still nests: each level consumes before recursing.
     assert_eq(t_match("^(?<g>a(?P>g)?b)$", "aaabbb"), 1, "named recursion still nests");
 
+    test_group("pcre-depth-fail-closed");
+    # The stack still has a ceiling. Reaching it must fail the operation closed —
+    # no answer, and PCRE_E_DEPTH_EXCEEDED from last_error() — never let search
+    # report a later start (1.0.13 answered 46 for `.*z` here) or a false match.
+    # The ceiling is lowered so a 300-byte subject reaches it.
+    _pcre_bt_limit = 64;
+    assert_eq(niyama_pcre_match(ls_a, ls_a300), 0, "a*$ at the ceiling: no answer");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_DEPTH_EXCEEDED, "a*$ at the ceiling: reported");
+    assert_eq(niyama_pcre_search(ls_dz, ls_z300), 0 - 1, ".*z at the ceiling: no later start");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_DEPTH_EXCEEDED, ".*z at the ceiling: reported");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("a+z"), ls_z300), 0 - 1, "a+z at the ceiling: no later start");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_DEPTH_EXCEEDED, "a+z at the ceiling: reported");
+    # A short subject fits under the lowered ceiling.
+    assert_eq(niyama_pcre_search(ls_dz, "aaz"), 0, "short .*z under the ceiling");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_OK, "a clean search clears the error");
+    _pcre_bt_limit = 16777216;
+    assert_eq(niyama_pcre_search(ls_dz, ls_z300), 0, "ceiling restored: .*z matches again");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_OK, "ceiling restored: no error");
+    # A failed compile's code survives a match attempt on its 0 handle.
+    assert_eq(niyama_pcre_compile("(a"), 0, "(a fails to compile");
+    assert_eq(niyama_pcre_match(0, "a"), 0, "match on a 0 handle");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_SYNTAX, "compile error survives a 0-handle match");
+
     test_group("pcre-bt-stack-no-per-call-alloc");
     # The stack is process-lifetime scratch. Once it has grown to fit a match,
     # repeating that match allocates nothing (v1.0.9 measured 45.7 MB retained
