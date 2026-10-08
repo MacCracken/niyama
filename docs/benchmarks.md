@@ -455,3 +455,131 @@ DCE smoke binary **323,432 B → 323,624 B (+192 B)**; non-DCE 401,256 B →
 `io.cyr` was rewritten (277 changed lines in the diff), and cyrius 6.6.5 pads every
 odd-depth x86 call site by 2 bytes. The engine sources are byte-identical
 across the bump.
+
+## v1.1.0 — pin bump (6.6.18 → 6.7.5) and the pcre heap backtrack stack (same-boot interleaved A/B)
+
+**Date**: 2026-10-08
+**Cyrius**: 6.6.18 (old pin) and 6.7.5 (new pin)
+**Host**: Linux 7.2.8-arch1-2 x86_64, clocksource `hpet`
+
+### Method
+
+Three sides, each a clean `git archive` of one commit with `lib/` vendored by
+its own pin's `cyrius deps` (`deps --verify` clean on all three):
+
+- **P** = `9d45583` (1.0.13: 6.6.18 pin, recursive pcre matcher);
+- **A** = `8c398d5` (6.7.5 pin, recursive pcre matcher);
+- **B** = `bf77f03` (6.7.5 pin, the 1.1.0 explicit-stack matcher).
+
+P → A isolates the toolchain bump; A → B isolates the matcher. Five
+interleaved rounds of the full `cyrius bench` (all 6 harnesses), the side
+order alternating each round (P A B, then B A P). Per-row **medians of
+`avg`**; spread is each side's `(max − min) / median` over its 5 runs. The
+timer floor measured 1.21–1.68 µs per clock read, on every side. As at
+1.0.12, only `avg` is compared.
+
+### Result — the pcre matcher (A → B, 13 pcre rows)
+
+**8 rows faster by more than 5%, none slower beyond ±5%.** Mean **−22.1%**,
+median **−27.1%**, range **−49.4% .. +2.8%**.
+
+| Bench | A: recursive (median) | B: explicit stack (median) | Δ | spread A / B |
+|---|---|---|---|---|
+| `pcre_compile_literal` | 2.666µs | 2.707µs | +1.5% | 37.5% / 11.7% |
+| `pcre_compile_email` | 3.858µs | 3.920µs | +1.6% | 49.9% / 5.1% |
+| `pcre_compile_backref` | 3.214µs | 3.269µs | +1.7% | 8.0% / 7.2% |
+| `pcre_compile_lookahead` | 2.704µs | 2.715µs | +0.4% | 6.3% / 8.9% |
+| `pcre_search_literal` | 9.989µs | 10.271µs | +2.8% | 5.2% / 6.2% |
+| `pcre_search_alt` | 39.721µs | 22.405µs | -43.6% | 7.7% / 6.8% |
+| `pcre_search_email` | 5.264µs | 3.445µs | -34.6% | 6.7% / 5.2% |
+| `pcre_backref` | 683ns | 500ns | -26.8% | 7.5% / 7.2% |
+| `pcre_lookahead` | 121.357µs | 61.383µs | -49.4% | 13.6% / 5.8% |
+| `pcre_neg_lookahead` | 755ns | 509ns | -32.6% | 5.8% / 6.7% |
+| `pcre_atomic` | 1.334µs | 973ns | -27.1% | 5.5% / 15.4% |
+| `pcre_named_captures` | 1.542µs | 968ns | -37.2% | 6.0% / 16.3% |
+| `pcre_dos_bounded (step_limit=50k)` | 1.893ms | 1.049ms | -44.6% | 4.9% / 4.9% |
+
+The searches and feature rows gain because the recursive matcher paid a
+native call plus a 160-byte save-snapshot copy at every SPLIT, where the stack
+pushes one 8-byte word. `pcre_search_literal` (+2.8%, inside both sides'
+5–6% spread) is the per-start-offset overhead of a search that fails at the
+first byte ~120 times. A first draft measured +14% here: it declared ~30
+scratch locals at the top of the matcher, and an initialiser runs where it
+stands, so every start offset paid a store per local. They now live in the
+blocks that use them, and SAVE does not trail on an empty stack.
+The four compile rows (+0.4% .. +1.7%) carry the new loop analysis, which
+runs only on `*` / `+` / `{n,}` bodies.
+
+### Result — the toolchain bump (P → A, all 58 rows)
+
+**No regression.** 57 per-engine rows: mean **−1.34%**, median **−1.30%**,
+range **−5.5% .. +3.3%**; the 4 rows past ±5% are all faster. The 58th row,
+`niyama_noop`, reads 3 ns → 4 ns: one nanosecond at the timer's resolution.
+
+| Bench | 6.6.18 (median) | 6.7.5 (median) | Δ | spread old / new |
+|---|---|---|---|---|
+| `niyama_noop` | 3ns | 4ns | +33.3% | 33.3% / 100.0% |
+| `vim_compile_magic` | 2.271µs | 2.235µs | -1.6% | 29.7% / 26.0% |
+| `vim_compile_very_magic` | 2.257µs | 2.182µs | -3.3% | 41.9% / 29.1% |
+| `vim_compile_nomagic` | 2.280µs | 2.274µs | -0.3% | 33.0% / 28.0% |
+| `vim_compile_very_nomagic` | 2.313µs | 2.232µs | -3.5% | 40.8% / 23.5% |
+| `vim_compile_zs_ze` | 2.513µs | 2.498µs | -0.6% | 59.8% / 31.0% |
+| `vim_compile_posix` | 2.696µs | 2.622µs | -2.7% | 44.8% / 31.1% |
+| `vim_search_magic` | 4.420µs | 4.373µs | -1.1% | 105.4% / 112.8% |
+| `vim_search_very_magic` | 4.425µs | 4.422µs | -0.1% | 30.5% / 29.0% |
+| `vim_search_nomagic` | 4.421µs | 4.405µs | -0.4% | 115.1% / 21.8% |
+| `vim_search_very_nomagic` | 4.425µs | 4.429µs | +0.1% | 115.7% / 14.0% |
+| `vim_search_zs_ze` | 1.613µs | 1.614µs | +0.1% | 117.2% / 13.1% |
+| `vim_search_posix` | 1.805µs | 1.801µs | -0.2% | 118.4% / 13.4% |
+| `vim_search_word_bound` | 1.638µs | 1.608µs | -1.8% | 114.0% / 14.4% |
+| `pcre_compile_literal` | 2.691µs | 2.666µs | -0.9% | 14.3% / 37.5% |
+| `pcre_compile_email` | 3.933µs | 3.858µs | -1.9% | 4.8% / 49.9% |
+| `pcre_compile_backref` | 3.229µs | 3.214µs | -0.5% | 11.6% / 8.0% |
+| `pcre_compile_lookahead` | 2.861µs | 2.704µs | -5.5% | 6.2% / 6.3% |
+| `pcre_search_literal` | 10.263µs | 9.989µs | -2.7% | 27.3% / 5.2% |
+| `pcre_search_alt` | 39.589µs | 39.721µs | +0.3% | 45.0% / 7.7% |
+| `pcre_search_email` | 5.266µs | 5.264µs | -0.0% | 17.9% / 6.7% |
+| `pcre_backref` | 699ns | 683ns | -2.3% | 21.9% / 7.5% |
+| `pcre_lookahead` | 121.043µs | 121.357µs | +0.3% | 22.3% / 13.6% |
+| `pcre_neg_lookahead` | 788ns | 755ns | -4.2% | 11.0% / 5.8% |
+| `pcre_atomic` | 1.334µs | 1.334µs | +0.0% | 14.8% / 5.5% |
+| `pcre_named_captures` | 1.527µs | 1.542µs | +1.0% | 11.9% / 6.0% |
+| `pcre_dos_bounded (step_limit=50k)` | 1.917ms | 1.893ms | -1.3% | 6.2% / 4.9% |
+| `fuzzy_compile_default` | 490ns | 464ns | -5.3% | 16.7% / 2.8% |
+| `fuzzy_compile_opts` | 490ns | 463ns | -5.5% | 16.7% / 5.0% |
+| `fuzzy_distance_short` | 381ns | 381ns | +0.0% | 15.7% / 4.2% |
+| `fuzzy_distance_long` | 1.973µs | 1.930µs | -2.2% | 13.9% / 6.9% |
+| `fuzzy_match` | 385ns | 378ns | -1.8% | 14.3% / 5.0% |
+| `fuzzy_search_short` | 2.166µs | 2.194µs | +1.3% | 22.7% / 7.8% |
+| `fuzzy_search_long_256B` | 21.403µs | 21.218µs | -0.9% | 14.8% / 6.6% |
+| `fuzzy_search_prefix` | 1.225µs | 1.179µs | -3.8% | 21.3% / 7.2% |
+| `fuzzy_case_insensitive` | 467ns | 456ns | -2.4% | 12.8% / 8.8% |
+| `fuzzy_medium_pattern_distance` | 11.716µs | 11.386µs | -2.8% | 14.2% / 8.1% |
+| `re2_compile_literal` | 2.678µs | 2.622µs | -2.1% | 46.9% / 11.7% |
+| `re2_compile_alt` | 3.241µs | 3.349µs | +3.3% | 63.7% / 11.0% |
+| `re2_compile_email` | 3.884µs | 3.818µs | -1.7% | 62.2% / 11.0% |
+| `re2_search_literal` | 24.192µs | 23.648µs | -2.2% | 100.9% / 11.2% |
+| `re2_search_alt` | 51.232µs | 50.839µs | -0.8% | 15.9% / 5.5% |
+| `re2_search_class` | 125.467µs | 127.690µs | +1.8% | 18.5% / 9.5% |
+| `re2_search_email` | 12.213µs | 12.048µs | -1.4% | 17.0% / 9.3% |
+| `re2_dos_alt_explosion (200a)` | 82.355µs | 83.243µs | +1.1% | 12.1% / 8.8% |
+| `re2_dos_nested_star (200a)` | 57.905µs | 56.945µs | -1.7% | 12.6% / 12.1% |
+| `re2_dos_optional_chain (30a)` | 199.537µs | 203.958µs | +2.2% | 11.2% / 7.0% |
+| `bre_compile_literal` | 2.171µs | 2.158µs | -0.6% | 17.5% / 10.2% |
+| `bre_compile_dot_star` | 2.349µs | 2.410µs | +2.6% | 12.4% / 12.7% |
+| `bre_compile_quantifier` | 2.375µs | 2.372µs | -0.1% | 33.0% / 17.5% |
+| `bre_compile_group` | 2.292µs | 2.199µs | -4.1% | 33.6% / 38.5% |
+| `bre_search_literal_hit` | 24.137µs | 23.921µs | -0.9% | 44.8% / 16.8% |
+| `bre_search_literal_miss` | 4.403µs | 4.238µs | -3.7% | 37.1% / 19.3% |
+| `bre_search_dot_star` | 108.710µs | 102.884µs | -5.4% | 20.0% / 4.2% |
+| `bre_search_class` | 1.404µs | 1.374µs | -2.1% | 12.5% / 7.6% |
+| `bre_search_quantifier` | 1.884µs | 1.855µs | -1.5% | 14.1% / 12.5% |
+| `bre_search_anchored` | 1.177µs | 1.161µs | -1.4% | 10.0% / 13.5% |
+| `bre_search_group` | 14.023µs | 13.854µs | -1.2% | 11.4% / 16.3% |
+
+### Note — binary size
+
+DCE smoke binary **328,072 B → 328,936 B (+864 B)**; non-DCE 414,088 B →
+427,240 B (+13,152 B). The growth is the 6.7.5 stdlib: the smoke entry
+links no engine, so the matcher rewrite does not move it. (1.1.0's banner,
+which reads `CYRIUS_PKG_VERSION`, adds 8 B to the DCE build.)
