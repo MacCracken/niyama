@@ -581,5 +581,6 @@ range **−5.5% .. +3.3%**; the 4 rows past ±5% are all faster. The 58th row,
 
 DCE smoke binary **328,072 B → 328,936 B (+864 B)**; non-DCE 414,088 B →
 427,240 B (+13,152 B). The growth is the 6.7.5 stdlib: the smoke entry
-links no engine, so the matcher rewrite does not move it. (1.1.0's banner,
-which reads `CYRIUS_PKG_VERSION`, adds 8 B to the DCE build.)
+links no engine, so the matcher rewrite does not move it. 1.1.0's banner,
+which reads `CYRIUS_PKG_VERSION`, nets 0 B: the released 1.1.0 DCE build is
+also 328,936 B.

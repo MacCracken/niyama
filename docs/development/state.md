@@ -5,6 +5,31 @@
 
 ## Version
 
+**1.1.0** — the pcre explicit heap backtrack stack, cut 2026-10-08 (the
+W2 stdlib wave to cyrius 6.7.5; the user tags it).
+- **pcre matcher:** one loop over a process-lifetime stack instead of
+  native recursion ([ADR 0012](../adr/0012-pcre-explicit-backtrack-stack.md)).
+  Matching depth no longer grows with the subject, so the 1.0.x false
+  negatives and wrong match starts past ~250 positions are gone (`.*z`
+  over 300 `a` + `z` now searches to 0, not 46). The step limit is the only
+  bound; the stack's 2^24-word ceiling is out of reach under the default.
+- **New loop rules,** replacing what the depth bound did by accident: an
+  empty iteration ends its loop (PCRE's rule; only nullable loops are
+  instrumented), and a recursion that re-enters its group at the same
+  position fails that branch.
+- **`PCRE_E_DEPTH_EXCEEDED`** now reaches `niyama_pcre_last_error()` after a
+  match or search, and `search_at` fails closed at a start that gave up.
+- **Pin:** `6.6.18` → `6.7.5`; `lib/` re-vendored (31 files, `deps --verify`
+  clean); `dist/` regenerated (sidecar unchanged: 4 leaves).
+- **CI:** toolchain installed through cyrius's checksum-verifying
+  `install.sh` from the pinned tag; fuzz and fmt gate; lint is advisory;
+  the smoke banner is checked against `VERSION` (it read 1.0.12 through
+  1.0.13).
+- **Gates:** tests 776 → 844, fuzz 1689 → 1715, all green. Bench: 13 pcre
+  rows mean −22.1%, none slower beyond ±5%; pin A/B mean −1.34%.
+
+See CHANGELOG § 1.1.0.
+
 **1.0.13** — cyrius 6.6.18 pin and `dist/` regeneration, shipped
 2026-10-06. No engine source changes.
 - **Pin:** `6.6.6` → `6.6.18`; `lib/` re-vendored by `cyrius deps` (31
@@ -83,14 +108,12 @@ see § Tests). Two confirmed findings were
 rejected on measurement. See CHANGELOG § 1.0.9 and
 [`../audit/2026-09-08-audit.md`](../audit/2026-09-08-audit.md).
 
-**Known limitation (documented, not fixed)**: `_pcre_match_run`
-recurses natively per input position, so `PCRE_MAX_DEPTH = 256` caps
-consuming quantifiers at ~250 positions — `a*$` over 300 bytes reports
-no match. Pre-existing and **not a tunable**: frames measure ~20 KB and
-the process SIGSEGVs past ~400 frames on an 8 MB stack. The fix is an
-explicit heap backtrack stack (matcher-core rewrite), deferred.
-Mitigated by `PCRE_E_DEPTH_EXCEEDED = 12` so the condition is
-observable rather than a silent false negative.
+**Known limitation at 1.0.9 (fixed in 1.1.0)**: `_pcre_match_run`
+recursed natively per input position, so `PCRE_MAX_DEPTH = 256` capped
+consuming quantifiers at ~250 positions — `a*$` over 300 bytes reported
+no match. The "mitigation", `PCRE_E_DEPTH_EXCEEDED = 12`, never reached
+`niyama_pcre_last_error()` (see the audit's 2026-10-08 correction).
+1.1.0 replaced the recursion with an explicit heap stack (ADR 0012).
 
 **1.0.8** — maintenance patch shipped 2026-09-07. Toolchain pin
 bumped 6.5.29 → 6.6.0 (wrapper-drift catch-up) and the vendored
@@ -167,7 +190,7 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.6.18` (in `cyrius.cyml [package].cyrius`).
+- **Cyrius pin**: `6.7.5` (in `cyrius.cyml [package].cyrius`).
   Floor remains `5.8.65` for stdlib `lib/unicode/` per ADR 0008
   (categories at .49, casefold at .50, normalize at .51, codec
   lift at .55, NFKC/NFKD at .60). Bump history: `5.8.42`
@@ -175,9 +198,10 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
   at v1.0.2 (for `: i64` return-type syntax) → `6.0.1` at v1.0.3
   → `6.1.27` at v1.0.4 → `6.2.1` at v1.0.5 → `6.4.64` at v1.0.6
   → `6.5.29` at v1.0.7 → `6.6.0` at v1.0.8 → `6.6.2` at v1.0.11
-  → `6.6.6` at v1.0.12 → `6.6.18` at v1.0.13. Each matched the
-  installed wrapper at the time, and none required an engine source
-  change.
+  → `6.6.6` at v1.0.12 → `6.6.18` at v1.0.13 → `6.7.5` at v1.1.0.
+  Each matched the installed wrapper at the time, and none required an
+  engine source change. 1.1.0 adopts no 6.7.x syntax (no `const`,
+  `bool`, `loop` or if-expression); only the pin moved.
 - **The pin selects the compiler.** When the pin differs from the
   running wrapper, the wrapper re-execs `~/.cyrius/versions/<pin>/bin/cyrius`,
   which builds with its own sibling `cycc`. That has held for pinned
@@ -209,17 +233,24 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
     0-byte-truncation bug they worked around was fixed in cyrius 6.0.2, and
     on 6.6.x every `build` / `test` / `bench` / `fuzz` / `distlib` /
     `audit` run rewrites a stub lock anyway.
-- **`cyrius audit` runs but exits 1.** On 6.6.6 its default mode sweeps
+- **`cyrius audit` runs but exits 1.** On 6.7.5 its default mode sweeps
   fmt, lint, docs, tests and bench over `src/`, `tests/` and `fuzz/`. Any
   lint warning or any undocumented public function sets exit code 1, and
   niyama has two blockers:
-  - **Lint:** 23 warnings (11 in `src/`, 11 in `tests/`, 1 in `fuzz/`);
-    18 are over-long lines and 5 are consecutive blank lines.
+  - **Lint:** 21 warnings (9 in `src/`, 11 in `tests/`, 1 in `fuzz/`);
+    16 are over-long lines and 5 are consecutive blank lines. (1.1.0's
+    matcher rewrite removed two of `src/pcre.cyr`'s over-long lines.)
   - **Docs:** 150 undocumented public fns. It counted 141 under 6.6.2
     because cyrdoc used to stop reading a file at 64 KB, and
-    `src/pcre.cyr` is 89.7 KB.
+    `src/pcre.cyr` is now ~110 KB.
 
-  fmt has been clean since 1.0.11. Tracked in `roadmap.md` § Maintenance.
+  fmt has been clean since 1.0.11 and gates CI since 1.1.0; lint runs in
+  CI as an advisory step. Tracked in `roadmap.md` § Maintenance.
+- **CI installs the toolchain through cyrius's `install.sh`** (1.1.0),
+  fetched from the pinned tag, which refuses a tarball whose published
+  checksum is missing or wrong. Replayed on a fresh `HOME` against 6.7.5:
+  "checksum verified"; with a prior install present it also verifies the
+  signed `SHA256SUMS`.
 - **The `description`-truncation bug did not reproduce on 6.6.6.** At
   v1.0.8, `cyrius build` / `cyrius deps` were seen cutting `cyrius.cyml`'s
   `description` at the first `;`. At v1.0.12, every command run in this
@@ -267,7 +298,9 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 - **`src/pcre.cyr`** — PCRE-light backtracking engine (M3,
   +POSIX classes / inline flags / `\K` / branch-reset / conditional
   / callouts from v0.7.0; +`\p{L}` / `(?i)` Unicode / fixed-width
-  lookbehind / recursion from v0.8.0).
+  lookbehind / recursion from v0.8.0; the matcher iterates over an
+  explicit heap backtrack stack, with empty-iteration and recursion-loop
+  rules, from v1.1.0 — ADR 0012).
 - **`src/fuzzy.cyr`** — Levenshtein edit-distance engine (M3.5,
   +Unicode NFD + exact-start recovery from v0.8.0).
 - **`src/vim.cyr`** — vim/cyim flavor engine (M4, +`\p{L}` +
@@ -280,7 +313,7 @@ release-tag dust through the v0.8.0 → v0.9.0 → v1.0 sequence.
 |---|---|---|---|---|
 | **bre** | ✅ v0.7.0 (M1 + v0.7.0 catch-up) | `niyama_bre_*` | Pike NFA | POSIX BRE minus backrefs (per ADR 0002). v0.7.0 adds GNU `\<\>` boundaries + POSIX bracket classes (ADR 0007). |
 | **re2** | ✅ v0.8.0 (M2 + M4.5 complete) | `niyama_re2_*` | Pike NFA, codepoint-stepped | ERE + linear-time guarantee at API (per ADR 0003). v0.7.0: named captures, inline flags, strict `^/$/.` defaults. v0.8.0: `\p{L}` Unicode props, multi-byte literal patterns, `(?i)` Unicode case-fold (ADR 0008). |
-| **pcre** | ✅ v0.8.0 (M3 + M4.5 complete) | `niyama_pcre_*` | Backtracking | Perl-compat (per ADR 0004). Step-limit + depth bound. v0.7.0: POSIX classes, inline flags, `\K`, branch-reset, conditional, callouts. v0.8.0: `\p{L}`, `(?i)` Unicode, fixed-width lookbehind, recursion `(?R)` / `(?P>NAME)` (ADR 0008). |
+| **pcre** | ✅ v0.8.0 (M3 + M4.5 complete) | `niyama_pcre_*` | Backtracking | Perl-compat (per ADR 0004). Step-limit bound; explicit heap backtrack stack since v1.1.0 (ADR 0012). v0.7.0: POSIX classes, inline flags, `\K`, branch-reset, conditional, callouts. v0.8.0: `\p{L}`, `(?i)` Unicode, fixed-width lookbehind, recursion `(?R)` / `(?P>NAME)` (ADR 0008). |
 | **fuzzy** | ✅ v0.8.0 (M3.5 + M4.5 complete) | `niyama_fuzzy_*` | Levenshtein DP | Edit-distance, three match modes (per ADR 0005). v0.8.0: `FUZZY_FLAG_UNICODE_NFD`, exact start-position recovery via reverse-DP. |
 | **vim** | ✅ v0.8.0 (M4 + M4.5 complete) | `niyama_vim_*` | Pike NFA, codepoint-stepped | vim/cyim flavor, 4 magicness modes (per ADR 0006). v0.8.0: `\p{L}` Unicode props, multi-byte literal patterns, POSIX-class code folded onto `src/posix_classes.cyr`. |
 
@@ -356,9 +389,10 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
   ahead of the five engine modules. Consumers also need stdlib
   `lib/str.cyr` and `lib/unicode/{categories,casefold,normalize}.cyr`.
   ADR 0010 locks its public symbol set.
-- **Fold copy.** cyrius 6.6.6 vendors niyama **1.0.11** as
-  `lib/niyama.cyr`, with a body byte-identical to this repo's `dist/`.
-  1.0.12 changes only the header, so the fold is current in substance.
+- **Fold copy.** cyrius 6.7.5 vendors niyama **1.0.13** as
+  `lib/niyama.cyr`, body byte-identical to 1.0.13's `dist/`. 1.1.0 is
+  slated for cyrius 6.7.6's refold (Break 1, the W2 tags re-vendored
+  byte-identical).
 - **The fold is never checked for agnos.** cyrius's folds-parity gate
   skips niyama on Linux: its preamble lacks `lib/unicode`, so the fold's
   `str_normalize(…, NFD)` fails with `undefined variable 'NFD'`. That is a
@@ -377,7 +411,9 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
   blob-edit paths behaving identically across engines.
 - **`tests/bre.tcyr`** — 123 BRE assertions (v1.0.9: +11).
 - **`tests/re2.tcyr`** — 199 RE2 assertions (v1.0.9: +24).
-- **`tests/pcre.tcyr`** — 225 PCRE assertions (v1.0.9: +19).
+- **`tests/pcre.tcyr`** — 293 PCRE assertions (v1.0.9: +19; v1.1.0:
+  +68 — long subjects, empty iterations, recursion loops, the stack
+  ceiling, no per-call allocation).
 - **`tests/fuzzy.tcyr`** — 70 fuzzy assertions (v1.0.9: +13).
 - **`tests/vim.tcyr`** — 122 vim assertions (v1.0.9: +13).
 - **`tests/{bre,re2,pcre,fuzzy,vim}.bcyr`** — per-engine bench harnesses.
@@ -387,10 +423,11 @@ Per ADR 0010 (Surface freeze) + the v0.9.0 review remainders:
 - **`fuzz/{bre,re2,pcre,fuzzy,vim}.fcyr`** — per-engine fuzz harnesses.
 
 Aggregate: `cyrius test` reports **8 files (7 `.tcyr` plus the
-`[build].test` entry), 776 assertions**, all passing. The history is 661
+`[build].test` entry), 844 assertions**, all passing. The history is 661
 at v1.0.8 → 741 at v1.0.9 (the P(-1) regression coverage) → 773 at
 v1.0.10 (the cross-engine invariant suite) → 776 at v1.0.13
-(`tests/niyama_raw_include.tcyr`).
+(`tests/niyama_raw_include.tcyr`) → 844 at v1.1.0 (the pcre backtrack
+stack).
 
 **Correction (v1.0.12):** v1.0.9 and v1.0.10 recorded 747 and 779. The
 per-file counts above were right; the aggregates also added the
@@ -399,8 +436,9 @@ files, not assertions. When totalling, sum only the lines ending
 `(N total)`.
 
 `cyrius fuzz` runs 6 files, all passing: the 5 per-engine harnesses
-(**1689 assertions**, unchanged since v0.9.0) plus the zero-assertion
-`tests/niyama.fcyr` scaffold.
+(**1715 assertions**; 1689 from v0.9.0 to v1.0.13, then +26 long-subject
+pcre cases at v1.1.0) plus the zero-assertion `tests/niyama.fcyr`
+scaffold. CI gates on it since v1.1.0.
 
 Bench history captured in [`../benchmarks.md`](../benchmarks.md).
 Security audit history in [`../audit/`](../audit/).
@@ -438,13 +476,11 @@ at cyrius v5.9.0 (ADR 0011). Going forward:
 1. **v1.0.x patches** — bug fixes, hardening and toolchain pin bumps; no
    surface changes (ADR 0010). Each tag reaches cyrius stdlib's
    `lib/niyama.cyr` on its next refold.
-2. **v1.1.0** — the pcre explicit heap backtrack stack, which removes the
-   `PCRE_MAX_DEPTH` false negative described under § Version, 1.0.9.
-3. **Post-fold extensions** — additive-only, landing in cyrius stdlib's
+2. **Post-fold extensions** — additive-only, landing in cyrius stdlib's
    vendored copy, not here. The pinned candidates are vim backref
    (ADR 0009), fuzzy `_search_at`, long Unicode property names and full
    `(?i)` case folding.
-4. **niyama v2.0** — speculative, only if a need exceeds the additive-only
+3. **niyama v2.0** — speculative, only if a need exceeds the additive-only
    model. It would be a new namespace; v1.x consumers are unaffected.
 
 See [`roadmap.md`](roadmap.md) for the open work (forward-looking only;

@@ -4,6 +4,184 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-08
+
+The roadmap's v1.1.0: pcre's matcher keeps its backtrack state on an
+explicit heap stack instead of the native one
+([ADR 0012](docs/adr/0012-pcre-explicit-backtrack-stack.md)). That is the
+complete fix for a wrong-result bug — past ~250 subject positions pcre gave
+up, and a search then reported a later start than the leftmost — and the
+release also makes the give-up condition honest where it can still occur.
+The toolchain moves to cyrius 6.7.5, CI installs it through cyrius's
+checksum-verifying installer, and fuzz and fmt now gate CI.
+
+Every `niyama_<engine>_*` entry point, error code and opcode number is
+unchanged. It is a minor because pcre's answers change wherever 1.0.13
+depended on its depth bound, and because one frozen capacity row of
+ADR 0010 — "pcre depth-limit 256" — no longer exists.
+
+### Fixed
+
+- **pcre: matching depth grew with the subject, so long subjects gave
+  wrong answers.** `_pcre_match_run` recursed natively on every SPLIT and
+  SAVE, and the 256-frame bound (`PCRE_MAX_DEPTH`) turned any quantifier that
+  had to cover more than ~250 positions into a false negative — or, through
+  `search`, a wrong match start:
+
+  | Pattern, subject | 1.0.13 | 1.1.0 |
+  |---|---|---|
+  | `a*$`, 300 × `a` | no match | match |
+  | `(a){200}`, 200 × `a` | no match | match, group 1 = (199, 200) |
+  | `.*z`, 300 × `a` + `z` | search → **46** | search → 0 |
+  | `a+z`, 300 × `a` + `z` | search → **45** | search → 0 |
+  | `(?=a*z)a`, 1000 × `a` + `z` | search → **746** | search → 0 |
+  | `^a*z$`, 1000 × `a` + `z` | no match | match |
+  | `a(?R)?b`, 400 × `a` + 400 × `b` | no match | match |
+
+  The matcher is now one loop over a process-lifetime stack; how far it can
+  backtrack depends only on the step limit (see **Changed**).
+- **pcre: `PCRE_E_DEPTH_EXCEEDED` never reached a caller, and `search` did
+  not fail closed.** 1.0.9 documented the code as readable through
+  `niyama_pcre_last_error()` after a match or search, but the matcher wrote
+  `_pcre_err` and `last_error()` read `_pcre_last_err`, which only compile
+  writes — so it always said `PCRE_E_OK`. `niyama_pcre_search_at` also
+  treated a start that gave up as one that cannot match and moved on to the
+  next. Now `match` and `search_at` publish their error when they end, and
+  `search_at` stops at a start that gave up and returns -1. With the heap
+  stack the condition is its ceiling — out of reach under the default step
+  limit, but still reachable with a raised limit or a refused allocation.
+  A match on a 0 handle runs nothing, so a failed compile's code survives it.
+  The 2026-09-08 audit's "mitigated for v1.0.9" claim carries a dated
+  correction.
+- **The smoke binary called itself 1.0.12.** `src/main.cyr` hardcoded the
+  banner version; it now prints `CYRIUS_PKG_VERSION`, which `cyrius build`
+  resolves from `cyrius.cyml` (the `VERSION` file), with every write length
+  computed.
+
+### Changed
+
+- **pcre: the explicit backtrack stack (ADR 0012).** One 8-byte word per
+  entry — CHOICE (resume point), UNDO (restore one save slot), or a
+  three-word MARK opening a lookaround, atomic group or recursion — instead
+  of a native frame and a 160-byte save snapshot at every SPLIT.
+  - **Bounds.** An instruction pushes at most three words, so a match holds
+    at most 3 × the step limit: ~24 MB under the default 1M, below the 2^24-
+    word (128 MB) ceiling. The step limit stays the only DoS bound.
+  - **Allocation.** 32 KB from `_pcre_lazy_init`, doubled when full, never
+    allocated per call or per backtrack point: 50 repeated 20,000-byte
+    searches allocate 0 bytes after the first.
+  - **Semantics.** Each construct keeps the recursive matcher's contract:
+    atomic, positive-lookaround and atomic captures kept, recursion and
+    negative-lookaround captures discarded, `\K` scoped to a lookaround.
+    Step accounting is unchanged — one step per instruction: over 514,804
+    random runs that stayed under 256 steps, every count is identical.
+  - **Empty iterations end their loop.** The depth bound was also the only
+    thing stopping a quantified body that matches the empty string. An
+    iteration that matched empty now ends the loop and matching goes on
+    from its exit with that iteration's captures, PCRE's rule. Only loops
+    whose body *can* match empty are checked (a compile-time analysis), so
+    `.*`, `a+` and `[a-z]+` pay nothing. `(a*)*b` against `"aab"` matches in
+    22 steps (1.0.13: 516 steps, by falling back from the depth bound;
+    without the rule: no match after 1M steps).
+  - **A recursion that re-enters its group at the same position fails that
+    branch** (`(?R)?a`). PCRE2 stops the same case with
+    `PCRE2_ERROR_RECURSELOOP`; niyama has no such code, so the branch fails
+    as the depth bound's fallback made it fail.
+  - **Answers that changed.** A differential run of the 1.0.13 matcher
+    against this one — 21,000 random patterns × 16 subjects, match and
+    search, captures compared — changed only answers 1.0.13 gave up on at
+    the step limit, answers to patterns PCRE2 rejects or stops with
+    `RECURSELOOP`, and answers where 1.1.0 now equals PCRE2 10.49 and 1.0.13
+    did not. On short subjects 1.0.13's empty loops had used up the depth the
+    rest of a pattern needed: `(?<!.)*b??` against `"ba"` ended at 1 (PCRE2
+    and 1.1.0: 0), and `z??(?=[^a]|a*((?<!ab)?))*` against `"a"` captured
+    group 1 at (0, 0) (PCRE2 and 1.1.0: (1, 1)).
+  - **Faster.** 13 pcre bench rows, same-boot A/B: mean −22.1%, median
+    −27.1%, none slower beyond the ±5% noise margin (see **Bench**).
+- **Toolchain `6.6.18` → `6.7.5`.** `rm -rf lib && cyrius deps` re-vendored
+  31 files and re-locked `cyrius.lock` (`deps --verify` clean). No niyama
+  source change was needed for the pin; the pin move surfaced no new
+  diagnostic. `dist/` regenerated by the 6.7.5 `cyrius distlib`: the
+  sidecar still names the same 4 leaves (`unicode alloc string str`) and
+  the requires block is unchanged; `distlib --check` reports it current.
+- **CI installs the toolchain through cyrius's `install.sh`**, fetched from
+  the pinned tag (not `main`), under `set -eo pipefail`. It refuses a
+  tarball whose published `.sha256` is missing or wrong and verifies the
+  signed `SHA256SUMS` when a trusted verifier is present; the old step
+  unpacked the tarball unchecked. Both workflows.
+- **CI gates on `cyrius fuzz` and `cyrius fmt --check`** (every source under
+  `src/`, `tests/`, `fuzz/`); `cyrius lint` runs as an advisory step; a new
+  step fails if the smoke banner stops naming `VERSION`. CLAUDE.md's CI
+  section, which described lint and fuzz steps that did not exist, now
+  matches the workflow.
+- **Docs.** ADR 0010's depth-limit row and ADR 0004's depth-counter note
+  point to ADR 0012; `docs/api/README.md` states the stack's limits and the
+  match-time `PCRE_E_DEPTH_EXCEEDED`; README's "Known limitation" is gone.
+  CLAUDE.md § Cyrius Conventions no longer claims locals are
+  function-scoped — on 6.7.5 a `var` is scoped to its block — or that a
+  `break` past a `var` is unreliable.
+- **cyrius's security ledger renumbering (2026-10-08).** The cyrius ids this
+  repo cited are rewritten: 1.0.12's CVE-44 is CYRIUS-2026-0007, its CVE-45
+  is the file-marker forge bug, and the roadmap's CVE-21 is the
+  release-integrity hardening item.
+
+### Removed
+
+- `PCRE_MAX_DEPTH` and `_pcre_depth_limit` (the retired bound), with the
+  internals they sized: `_pcre_snap_pool`, `_pcre_recurse_stop_pc`,
+  `_pcre_saves_snapshot` and `_pcre_saves_restore`. None is part of the
+  ADR 0010 API listing, and nothing in the ecosystem outside niyama and its
+  vendored copies names any of them (searched every repo under `~/Repos`).
+
+### Added
+
+- [ADR 0012](docs/adr/0012-pcre-explicit-backtrack-stack.md) — the stack's
+  design, bounds, loop rules, the differential check and the alternatives
+  rejected.
+
+### Tests / fuzz
+
+- `cyrius test`: **776 → 844** assertions (`tests/pcre.tcyr` 225 → 293), all
+  green. New groups: `pcre-long-subject` (300 / 1,000 / 10,000-byte
+  subjects, every scoped construct across them, `(?R)` 400 deep),
+  `pcre-empty-iteration` (expected values from PCRE2 10.49, each with a step
+  bound), `pcre-recursion-loop`, `pcre-depth-fail-closed` (the ceiling,
+  lowered through the internal `_pcre_bt_limit` so a 300-byte subject
+  reaches it), and `pcre-bt-stack-no-per-call-alloc`. On the 1.0.13 matcher
+  22 of the new assertions fail; with the two loop rules switched off, 25.
+- `cyrius fuzz`: **1689 → 1715** (`fuzz/pcre.fcyr` 250 → 276): random
+  patterns over 300 – 1,323-byte subjects — under the default ceiling no
+  search reports `PCRE_E_DEPTH_EXCEEDED`, and a reported start is found
+  again by `search_at` from it — and known answers over 1,000 `a`s, five of
+  which the 1.0.13 matcher gets wrong.
+- The pcre suite and fuzz harness also pass built for aarch64 (under
+  `qemu-aarch64`) and as a PE binary (under `wine`).
+
+### Bench
+
+Same-boot, 5 interleaved rounds, medians of `avg`
+([`docs/benchmarks.md`](docs/benchmarks.md) § v1.1.0):
+- **Matcher** (6.7.5, recursive → explicit stack), 13 pcre rows: mean
+  **−22.1%**, median **−27.1%**, range −49.4% .. +2.8%. `pcre_lookahead`
+  121.4 → 61.4 µs, `pcre_dos_bounded` 1.89 → 1.05 ms,
+  `pcre_search_alt` 39.7 → 22.4 µs.
+- **Pin** (6.6.18 → 6.7.5, same source), 57 per-engine rows: mean −1.34%,
+  range −5.5% .. +3.3%, nothing slower beyond ±5%.
+- DCE smoke binary 328,072 → 328,936 B (+864 B), all of it the 6.7.5
+  stdlib; the `CYRIUS_PKG_VERSION` banner nets 0 B at `VERSION` 1.1.0.
+
+### ABI summary
+
+- Opcodes: pcre 0–30, numbering and encodings unchanged. A loop whose body
+  can match empty carries a loop id in the previously unused `small` field
+  (bits 8..21, plus bit 22 for `X+`) of its SPLIT / JMP — internal, no
+  frozen value moves.
+- Error codes: unchanged. `PCRE_E_DEPTH_EXCEEDED = 12` now means the
+  backtrack stack's ceiling and is reported by `niyama_pcre_last_error()`.
+- Frozen capacity: "pcre depth-limit 256" retired (ADR 0012); every other
+  row of ADR 0010 is unchanged. Internal: NFA header offset 232 holds the
+  program's loop count.
+
 ## [1.0.13] — 2026-10-06
 
 Toolchain pin and `dist/` regeneration for the cyrius 6.6.18 sibling wave.
