@@ -65,6 +65,20 @@ fn gen_input(buf, n) {
     return 0;
 }
 
+# Subjects over a three-letter alphabet, so random patterns match often.
+fn gen_input_abc(buf, n) {
+    var i = 0;
+    while (i < n) {
+        var r = rng();
+        var c = r - (r / 3) * 3;
+        if (c < 0) { c = 0 - c; }
+        store8(buf + i, 97 + c);
+        i = i + 1;
+    }
+    store8(buf + n, 0);
+    return 0;
+}
+
 fn fuzz_one(pat_buf, in_buf) {
     var nfa = niyama_pcre_compile(pat_buf);
     if (nfa == 0) {
@@ -253,6 +267,43 @@ fn main() {
         iter = iter + 1;
     }
     assert(1, "200-iter-sweep-survived");
+
+    # === Long subjects (1.1.0) =========================================
+    # The matcher keeps its backtrack state on a heap stack (ADR 0012), so its
+    # depth no longer grows with the subject. Through 1.0.13 a pattern that had
+    # to cover more than ~250 positions gave up — a false negative, or a later
+    # start than the leftmost. Two properties over random patterns on subjects
+    # of 300..1323 bytes: under the default ceiling no search reports
+    # PCRE_E_DEPTH_EXCEEDED (it answers or runs out of steps), and a start it
+    # reports is found again by search_at from that start.
+    var long_in = alloc(1400);
+    var long_iter = 0;
+    while (long_iter < 100) {
+        var lp_len = (rng() & 0x1F) + 1;
+        gen_pat(pat_buf, lp_len);
+        var ln = 300 + (rng() & 0x3FF);
+        gen_input_abc(long_in, ln);
+        var lnfa = niyama_pcre_compile(pat_buf);
+        if (lnfa != 0) {
+            var lr = niyama_pcre_search(lnfa, long_in);
+            assert_eq(niyama_pcre_last_error(), PCRE_E_OK, "long subject: no depth error");
+            if (lr >= 0) {
+                assert_eq(niyama_pcre_search_at(lnfa, long_in, ln, lr), lr, "long subject: start re-found");
+            }
+        }
+        long_iter = long_iter + 1;
+    }
+    # Patterns with known answers over 1000 a's: each needs every position.
+    fill_a(long_in, 1000);
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("a*$"), long_in), 1, "a*$ over 1000 a");
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("(a|b)*$"), long_in), 1, "(a|b)*$ over 1000 a");
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("(?:aa)*$"), long_in), 1, "(?:aa)*$ over 1000 a");
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("(?:a(?=a|$))+$"), long_in), 1, "lookahead per a");
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("(?:(?<=a)|^)(?:a)*$"), long_in), 1, "lookbehind then 1000 a");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("a*b"), long_in), 0 - 1, "a*b over 1000 a: no b");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_OK, "a*b: a real no-match, not a give-up");
+
+    niyama_pcre_set_step_limit(1000000);
 
     return assert_summary();
 }

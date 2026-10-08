@@ -33,6 +33,19 @@ fn t_err(pat) {
     return niyama_pcre_last_error();
 }
 
+# A NUL-terminated subject of `n` copies of byte `c`, then `tail` if nonzero.
+fn t_rep(n, c, tail) {
+    var b = alloc(n + 2);
+    var i = 0;
+    while (i < n) {
+        store8(b + i, c);
+        i = i + 1;
+    }
+    store8(b + n, tail);
+    store8(b + n + 1, 0);
+    return b;
+}
+
 fn main() {
     alloc_init();
 
@@ -494,6 +507,128 @@ fn main() {
     assert_neq(v109_d, 0, "a*$ compiles");
     assert_eq(niyama_pcre_match(v109_d, "aaaa"), 1, "short subject still matches");
     assert_eq(niyama_pcre_last_error(), PCRE_E_OK, "no depth error on a short subject");
+
+    test_group("pcre-long-subject");
+    # 1.1.0 — the matcher keeps its choice points on an explicit heap stack
+    # (ADR 0012), so how far it can backtrack no longer depends on the subject's
+    # length. Through 1.0.13 each of these gave up past ~250 positions: a false
+    # negative, or with search a later start than the leftmost (46, 45).
+    var ls_a300 = t_rep(300, 97, 0);
+    var ls_z300 = t_rep(300, 97, 122);
+    var ls_z1000 = t_rep(1000, 97, 122);
+    var ls_a = niyama_pcre_compile("a*$");
+    assert_eq(niyama_pcre_match(ls_a, ls_a300), 1, "a*$ over 300 a");
+    assert_eq(niyama_pcre_last_error(), PCRE_E_OK, "a*$ over 300 a: no error");
+    var ls_g = niyama_pcre_compile("(a){200}");
+    assert_eq(niyama_pcre_match(ls_g, t_rep(200, 97, 0)), 1, "(a){200} over 200 a");
+    assert_eq(niyama_pcre_group_start(ls_g, 1), 199, "(a){200}: g1 is the last copy");
+    assert_eq(niyama_pcre_group_end(ls_g, 1), 200, "(a){200}: g1 end");
+    var ls_dz = niyama_pcre_compile(".*z");
+    assert_eq(niyama_pcre_search(ls_dz, ls_z300), 0, ".*z over 300 a + z: leftmost start 0");
+    assert_eq(niyama_pcre_group_end(ls_dz, 0), 301, ".*z: match ends after the z");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("a+z"), ls_z300), 0, "a+z over 300 a + z");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("^a*z$"), ls_z1000), 0, "^a*z$ over 1000 a + z");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("a*?z"), ls_z1000), 0, "lazy a*?z over 1000 a + z");
+    assert_eq(niyama_pcre_search(ls_dz, t_rep(10000, 97, 122)), 0, ".*z over 10000 a + z");
+    # Captures, backrefs and every scoped construct across a long subject.
+    var ls_bk = niyama_pcre_compile("^(a+)\\1$");
+    assert_eq(niyama_pcre_match(ls_bk, t_rep(1000, 97, 0)), 1, "^(a+)\\1$ over 1000 a");
+    assert_eq(niyama_pcre_group_end(ls_bk, 1), 500, "backref splits 1000 a in half");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?=a*z)a"), ls_z1000), 0, "lookahead over 1000 a");
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("^(?!a*b)a*z$"), ls_z1000), 1, "neg lookahead over 1000 a");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?>a*)z"), ls_z1000), 0, "atomic over 1000 a");
+    assert_eq(niyama_pcre_search(niyama_pcre_compile("(?<=a)z"), ls_z1000), 1000, "lookbehind after 1000 a");
+    # (?R) nests 400 deep: each level was several native frames before.
+    var ls_rb = alloc(802);
+    var ls_i = 0;
+    while (ls_i < 400) {
+        store8(ls_rb + ls_i, 97);
+        store8(ls_rb + 400 + ls_i, 98);
+        ls_i = ls_i + 1;
+    }
+    store8(ls_rb + 800, 0);
+    assert_eq(niyama_pcre_match(niyama_pcre_compile("a(?R)?b"), ls_rb), 1, "(?R) nested 400 deep");
+    # Group capture of the last iteration over a long subject.
+    var ls_cap = niyama_pcre_compile("(?:(a)|b)*z");
+    assert_eq(niyama_pcre_search(ls_cap, ls_z1000), 0, "(?:(a)|b)*z over 1000 a");
+    assert_eq(niyama_pcre_group_start(ls_cap, 1), 999, "last iteration's capture kept");
+
+    test_group("pcre-empty-iteration");
+    # 1.1.0 — a quantified body that can match empty ends its loop on an empty
+    # iteration (PCRE's rule). Through 1.0.13 nothing did: the 256-frame depth
+    # bound cut the loop off and the matcher fell back to the loop's exit, which
+    # happened to give the right answer for `(a*)*b` but a wrong one wherever the
+    # pattern needed depth after the loop. Every expected value below is what
+    # PCRE2 10.49 returns; the step bound shows the loop ends instead of spinning
+    # to the step limit.
+    var ei = niyama_pcre_compile("(a*)*b");
+    assert_eq(niyama_pcre_search(ei, "aab"), 0, "(a*)*b matches");
+    assert_eq(niyama_pcre_group_end(ei, 0), 3, "(a*)*b end");
+    assert_eq(niyama_pcre_group_start(ei, 1), 2, "(a*)*b: g1 is the empty last iteration");
+    assert_eq(niyama_pcre_group_end(ei, 1), 2, "(a*)*b: g1 end");
+    assert_lt(niyama_pcre_last_step_count(), 100, "(a*)*b: bounded by the loop, not the step limit");
+    var ei2 = niyama_pcre_compile("(a?)+b");
+    assert_eq(niyama_pcre_search(ei2, "aab"), 0, "(a?)+b matches");
+    assert_eq(niyama_pcre_group_start(ei2, 1), 2, "(a?)+b: g1 empty at 2");
+    assert_lt(niyama_pcre_last_step_count(), 100, "(a?)+b: bounded");
+    var ei3 = niyama_pcre_compile("(a??)*?b");
+    assert_eq(niyama_pcre_search(ei3, "aab"), 0, "lazy (a??)*?b matches");
+    assert_eq(niyama_pcre_group_start(ei3, 1), 1, "(a??)*?b: g1 is the last a");
+    assert_eq(niyama_pcre_group_end(ei3, 1), 2, "(a??)*?b: g1 end");
+    var ei4 = niyama_pcre_compile("(\\w*\\s*)*x");
+    assert_eq(niyama_pcre_search(ei4, "foo bar x"), 0, "(\\w*\\s*)*x matches");
+    assert_eq(niyama_pcre_group_start(ei4, 1), 8, "(\\w*\\s*)*x: g1 empty at 8");
+    assert_eq(t_search("(?:a?)+?b", "aab"), 0, "lazy (?:a?)+?b");
+    assert_eq(t_search("(?:a*)*$", "aaa"), 0, "(?:a*)*$");
+    assert_eq(t_search("(?=a)*a", "a"), 0, "quantified lookahead");
+    var ei5 = niyama_pcre_compile("(?:(a)|\\b)*c");
+    assert_eq(niyama_pcre_search(ei5, "ac"), 0, "(?:(a)|\\b)*c matches");
+    assert_eq(niyama_pcre_group_end(ei5, 1), 1, "(?:(a)|\\b)*c: g1 kept from the real iteration");
+    var ei6 = niyama_pcre_compile("((a)|b?)*c");
+    assert_eq(niyama_pcre_search(ei6, "abc"), 0, "((a)|b?)*c matches");
+    assert_eq(niyama_pcre_group_start(ei6, 1), 2, "((a)|b?)*c: g1 empty at 2");
+    assert_eq(niyama_pcre_group_start(ei6, 2), 0, "((a)|b?)*c: g2 from the first iteration");
+    # Answers 1.0.13 got wrong on short subjects, because the empty loop used up
+    # the depth the rest of the pattern needed.
+    var ei7 = niyama_pcre_compile("(?<!.)*b??");
+    assert_eq(niyama_pcre_search(ei7, "ba"), 0, "(?<!.)*b?? matches");
+    assert_eq(niyama_pcre_group_end(ei7, 0), 0, "(?<!.)*b??: lazy b?? stays empty (1.0.13: 1)");
+    var ei8 = niyama_pcre_compile("z??(?=[^a]|a*((?<!ab)?))*");
+    assert_eq(niyama_pcre_match(ei8, "a"), 1, "quantified lookahead with a capture");
+    assert_eq(niyama_pcre_group_start(ei8, 1), 1, "greedy a* inside it reaches 1 (1.0.13: 0)");
+    # Loops whose body cannot match empty are not instrumented.
+    assert_eq(t_search("(?:ab)*c", "ababc"), 0, "non-nullable loop unchanged");
+
+    test_group("pcre-recursion-loop");
+    # 1.1.0 — a recursion into a group that the nearest open recursion into the
+    # same group entered at the same position fails that branch. PCRE2 reports
+    # PCRE2_ERROR_RECURSELOOP; 1.0.13 relied on the depth bound; with neither, the
+    # recursion would spin to the step limit and answer no match.
+    var rl = niyama_pcre_compile("(?R)?a");
+    assert_eq(niyama_pcre_match(rl, "a"), 1, "(?R)?a matches a");
+    assert_lt(niyama_pcre_last_step_count(), 100, "(?R)?a: the loop is cut, not run to the limit");
+    var rl2 = niyama_pcre_compile("(a|(?R))");
+    assert_eq(niyama_pcre_match(rl2, "a"), 1, "(a|(?R)) matches a");
+    assert_eq(niyama_pcre_group_end(rl2, 1), 1, "(a|(?R)): g1 is the a (PCRE2 agrees)");
+    assert_eq(niyama_pcre_match(rl2, "b"), 0, "(a|(?R)) on b: no match");
+    assert_lt(niyama_pcre_last_step_count(), 100, "(a|(?R)) on b: bounded");
+    # Real recursion still nests: each level consumes before recursing.
+    assert_eq(t_match("^(?<g>a(?P>g)?b)$", "aaabbb"), 1, "named recursion still nests");
+
+    test_group("pcre-bt-stack-no-per-call-alloc");
+    # The stack is process-lifetime scratch. Once it has grown to fit a match,
+    # repeating that match allocates nothing (v1.0.9 measured 45.7 MB retained
+    # from a per-backtrack alloc()).
+    var na_s = t_rep(20000, 97, 122);
+    var na_n = niyama_pcre_compile(".*z");
+    assert_eq(niyama_pcre_search(na_n, na_s), 0, ".*z over 20000 a + z (grows the stack)");
+    var na_before = alloc_used();
+    var na_i = 0;
+    while (na_i < 50) {
+        niyama_pcre_search(na_n, na_s);
+        na_i = na_i + 1;
+    }
+    assert_eq(alloc_used() - na_before, 0, "50 more searches allocate 0 bytes");
 
     return assert_summary();
 }
