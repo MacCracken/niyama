@@ -7,7 +7,7 @@
 > consumers) in [`state.md`](state.md). **When an item ships, delete it
 > here**; its CHANGELOG entry is the record.
 >
-> Last swept: 2026-09-23, at v1.0.12.
+> Last swept: 2026-10-08, at v1.1.0.
 
 ## Where niyama is
 
@@ -24,48 +24,7 @@ each kind of change can land:
 | Additive surface growth | **cyrius stdlib's `lib/niyama.cyr`**, not this repo | New symbols at the next free slot; existing values immutable (ADR 0010 § Post-fold) |
 | Anything additive-only cannot express | niyama **v2.0** — new namespace | Speculative; v1.x consumers unaffected |
 
-## Next minor — v1.1.0
-
-### pcre: explicit heap backtrack stack
-
-**The bug.** `_pcre_match_run` recurses natively on SPLIT and SAVE, so
-recursion depth grows with **input position**, not pattern nesting. With
-`PCRE_MAX_DEPTH = 256`, any quantifier that must consume more than ~250
-positions exhausts the bound and the match fails — a false negative:
-
-```
-a*$        over 300 × 'a'   → no match   (correct: match)
-(a){200}   over 200 × 'a'   → no match   (correct: match)
-(a){100}   over 100 × 'a'   → match
-```
-
-**Why it is not a tunable.** Frames measure ~20 KB and the process
-SIGSEGVs past ~400 of them on an 8 MB stack, so 256 is already near the
-ceiling; raising it trades a false negative for a crash. Since v1.0.9 the
-condition is at least observable — `PCRE_E_DEPTH_EXCEEDED = 12` via
-`niyama_pcre_last_error()` — which is the interim mitigation, not the fix.
-Full analysis: [`../audit/2026-09-08-audit.md`](../audit/2026-09-08-audit.md)
-§ Known limitation.
-
-**The fix** replaces native recursion with an explicit heap-allocated
-backtrack stack — a matcher-core rewrite, which is why it was held out of
-the v1.0.9 security patch. Done when:
-
-- The probes above return the correct answer, and matching depth no longer
-  scales with input length.
-- The step limit (`niyama_pcre_set_step_limit`, default 1M) remains the
-  only DoS bound, with its documented semantics unchanged.
-- Backtrack storage is process-lifetime scratch initialised in
-  `_pcre_lazy_init` — never an `alloc()` per call or per backtrack point.
-  `alloc()` is a bump allocator that never frees; v1.0.9 measured 45.7 MB
-  retained from exactly that pattern.
-- `PCRE_E_DEPTH_EXCEEDED` keeps its frozen value and still reports, rather
-  than crashes, if the new stack has a ceiling.
-- Regression tests for the probes, long-input cases in `fuzz/pcre.fcyr`,
-  and a same-boot bench A/B showing no regression on the 13 pcre rows.
-- An ADR recording the stack design.
-
-## Maintenance — v1.0.x open items
+## Maintenance — v1.x open items
 
 - **Toolchain tracking.** Bump the `cyrius` pin with each cyrius release:
   wipe and re-vendor `lib/` (`rm -rf lib && cyrius deps`), commit the
@@ -73,23 +32,38 @@ the v1.0.9 security patch. Done when:
   run test + fuzz + a same-boot bench A/B against the old pin (method:
   [`../benchmarks.md`](../benchmarks.md)). Check that cyrius's vendored
   `lib/niyama.cyr` matches the latest tag.
-- **CI does less than CLAUDE.md says.** `ci.yml` runs build + test only;
-  CLAUDE.md § CI/Release describes lint and fuzz steps that do not exist.
-  Either add the steps (lint advisory, fuzz gating) or correct the doc.
-- **CI installs the toolchain unverified.** Both workflows fetch the cyrius
-  tarball with `curl` and unpack it without checking the published
-  `.sha256` or the signed `SHA256SUMS`. That is the gap cyrius's
-  release-integrity hardening item names. The committed `cyrius.lock` now catches a changed *stdlib*
-  (`cyrius deps` refuses it), but nothing checks the compiler binaries.
-  Verify the checksum, or install through cyrius's own `install.sh`,
-  which refuses a mismatch.
-- **`cyrius audit` exits 1** on accepted findings, so it cannot gate
-  anything. It lints `src/` + `tests/` + `fuzz/` — 23 warnings (11 / 11 / 1):
-  18 lines over 120 characters and 5 runs of consecutive blank lines — and
-  counts 150 public functions without doc comments (6.6.6's count; 6.6.2
-  counted 141 on identical source). Document the functions and clear the
-  lint set, or record which findings are accepted so a non-zero exit means
-  something new.
+- **Make `cyrius audit` gateable.** It exits 1 on accepted findings, so it
+  cannot gate anything. On the 6.7.5 pin it lints `src/` + `tests/` +
+  `fuzz/` — 21 warnings (9 / 11 / 1): 16 lines over 120 characters and 5
+  runs of consecutive blank lines — and counts 150 public functions
+  without doc comments. Document the functions and clear the lint set, or
+  record which findings are accepted so a non-zero exit means something
+  new; then CI's advisory lint step can gate too.
+- **Every engine's compile trusts its allocations.** `niyama_<engine>_compile`
+  dereferences its `alloc()`'d NFA unchecked in all four regex engines
+  (`bre.cyr:695`, `re2.cyr:1095`, `pcre.cyr:1751`, `vim.cyr:1153`), and
+  bre / re2 / vim do not check that their lazy init succeeded (pcre does
+  since 1.1.0). Heap exhaustion becomes a write to the NULL page instead of
+  `*_E_TOO_LARGE`, the 1.0.9 C10 class. Found during 1.1.0; the same
+  one-line refusal in each engine, with a test under a capped allocator.
+- **pcre backreference inside its own group.** A `\N` read while group N
+  is open sees the current iteration's start with the previous iteration's
+  end; when that span is negative the backreference moves the position
+  backwards. `(?:x(a\1?))+` over `"xaxaa"`: niyama answers (0,3) with
+  group 1 = (3,3); PCRE2 answers (0,5), group 1 = (3,5), because it keeps a
+  group's previous capture until the group closes. Pre-existing (1.0.13
+  answers the same); fixing it changes capture bookkeeping, so it needs
+  its own design note. Found by the 1.1.0 differential run.
+- **Flag loops → `loop` / `break`.** The engines' scanners and matchers
+  use a flag + `continue` (CLAUDE.md § Cyrius Conventions) from an era
+  when `break` past a `var` was unreliable; it is not on 6.7.5. Adopting
+  cyrius 6.7.x `loop` raises the toolchain floor, so it is a deliberate
+  release of its own, measured with the bench A/B, not a drive-by edit.
+- **Public constants stay `var`.** The `PCRE_*` / `RE2_*` / … opcode,
+  error-code and limit names are frozen surface (ADR 0010); turning them
+  into 6.7.x `const` changes what kind of name a consumer sees, and a
+  `const` beside a same-name `var` anywhere in a consumer's unit is a hard
+  error. Not recommended for v1.x; revisit only with a v2.0 namespace.
 
 ## Post-fold extension candidates
 
@@ -109,6 +83,11 @@ niyama-the-repo by accident.
 
 **Unpinned** — only if a consumer asks:
 
+- A distinct match-time code for a recursion loop (PCRE2's
+  `PCRE2_ERROR_RECURSELOOP`). Since 1.1.0 a recursion that re-enters its
+  group at the same position fails that branch
+  ([ADR 0012](../adr/0012-pcre-explicit-backtrack-stack.md)); a new error
+  code is additive surface, so it would land in cyrius stdlib.
 - `_compile_opts` for bre / re2 / pcre (review A2; only fuzzy and vim have
   it).
 - `\A` / `\z` / `\Z` absolute anchors (review G4). Strict-default `^` / `$`
