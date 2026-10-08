@@ -22,21 +22,23 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Cyrius toolchain
+        # Through cyrius's own installer, fetched from the PINNED tag rather
+        # than main, so the script is the one that release shipped. It
+        # refuses a tarball whose published .sha256 is missing or does not
+        # match, and checks the Ed25519-signed SHA256SUMS when a trusted
+        # verifier is already installed. Until 1.1.0 this step unpacked the
+        # tarball with no check at all. The pin is cyrius.cyml's
+        # [package].cyrius, never hardcoded here.
+        shell: bash
         run: |
-          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          set -eo pipefail
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep -m1 '^cyrius *= *"' cyrius.cyml | sed 's/.*"\(.*\)".*/\1/')}"
           echo "Installing Cyrius $CYRIUS_VERSION"
-          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
-          mkdir -p "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin" "$HOME/.cyrius/versions/$CYRIUS_VERSION/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/versions/$CYRIUS_VERSION/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin/"* 2>/dev/null || true
-          ln -sfn "$HOME/.cyrius/versions/$CYRIUS_VERSION/bin" "$HOME/.cyrius/bin"
-          ln -sfn "$HOME/.cyrius/versions/$CYRIUS_VERSION/lib" "$HOME/.cyrius/lib"
-          echo "$CYRIUS_VERSION" > "$HOME/.cyrius/current"
-          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
-          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+          curl -sSfL "https://raw.githubusercontent.com/MacCracken/cyrius/$CYRIUS_VERSION/scripts/install.sh" \
+            -o "$RUNNER_TEMP/cyrius-install.sh"
+          CYRIUS_VERSION="$CYRIUS_VERSION" sh "$RUNNER_TEMP/cyrius-install.sh"
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> "$GITHUB_ENV"
 
       - name: Resolve dependencies
         # cyrius.lock is a real integrity record (since 1.0.12): one sha256
