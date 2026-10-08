@@ -253,16 +253,23 @@ project, not niyama-specific.
   (4 096 initialized globals limit).
 - Heap-allocate large buffers — `var buf[256000]` bloats the
   binary by 256 KB.
-- `break` in while loops with `var` declarations is unreliable —
-  use flag + `continue`. (See niyama's `_<engine>_parse_class`
-  loops for the canonical pattern.)
+- niyama's loops use a flag + `continue` instead of `break` (see
+  `_<engine>_parse_class`), from an era when `break` past a `var`
+  declaration was unreliable. A `break` out of a loop that declares a
+  `var` works on the 6.7.5 pin (measured 2026-10-08); moving to
+  `loop` / `break` is a roadmap item, not something to do in passing.
 - No negative literals — write `(0 - N)` not `-N`. niyama uses
   `0 - 1` for "no match" / "not found" returns throughout.
 - No mixed `&&` / `||` in one expression — nest `if` blocks
   instead.
 - `match` is reserved — don't use as a variable name.
 - `return;` without value is invalid — always `return 0;`.
-- All `var` declarations are function-scoped — no block scoping.
+- A `var` declared inside a block (`if` / `elif` / `else` / `while`
+  body) is scoped to that block: a sibling `elif` or the code after the
+  `}` cannot see it (`undefined variable`). Declare above the block and
+  assign inside to share a value. An initialiser runs where it stands,
+  so a scratch local in a hot function belongs in the block that uses
+  it, not at the top (1.1.0's matcher measured the difference).
 - Max limits per compilation unit: 4 096 variables, 1 024
   functions, 4 096 initialized globals. niyama's largest engine
   (pcre at ~2 000 lines) is well under all three; the dist
